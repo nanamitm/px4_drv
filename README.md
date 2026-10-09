@@ -43,6 +43,12 @@ PLEX 社の [Webサイト](http://plex-net.co.jp) にて配布されている公
   - 既定の抽出済みファームウェアで問題なく動作することが知られているため、特段実用性はない
 - README（このページ）に WinUSB 版のインストール方法などを追記
 
+### 変更点 (macOS 版)
+
+- Apple Silicon (ARM) および Intel Mac 向けのユーザー空間デーモン `DriverHost_PX4` を追加
+  - libusb を用いた USB デバイスアクセスと、UNIX ドメインソケットによる IPC を実装
+  - Linux カーネルモジュール・Windows WinUSB 版と同一のデバイスロジックを共有しているため、対応デバイスは同一
+
 ### 変更点 (Linux 版)
 
 動作確認は Ubuntu 22.04 LTS (x64) で行っています。
@@ -345,6 +351,261 @@ gcc, make, カーネルソース/ヘッダ, dkms がインストールされて�
 
 すべてのチューナーにおいて、ISDB-T と ISDB-S のどちらも受信可能です。
 
+## インストール (macOS)
+
+macOS 版は、ユーザー空間デーモン `DriverHost_PX4` として動作します。  
+デーモンが起動すると、UNIX ドメインソケット (`/tmp/px4_ctrl_pipe.sock`, `/tmp/px4_data_pipe.sock`) 経由でチューナーの制御・TS データの取得が可能になります。
+
+あわせて、デーモンのクライアントとして機能する `px4rec` コマンドも同時にビルドされます。  
+`px4rec` は録画した TS データを stdout または指定ファイルに出力するシンプルなコマンドラインツールで、Linux の `recpt1` に相当する役割を担います。
+
+`px4rec` は、制御ソケットに接続できない場合に、同じディレクトリに配置された `DriverHost_PX4` を自動起動してから再接続を試みます。  
+このため、`DriverHost_PX4` と `px4rec` は基本的に同じディレクトリに配置して使用してください。
+
+> [!IMPORTANT]
+> **Linux の `/dev/px4video*` との互換性について**
+>
+> Linux ドライバは `ioctl()` によって制御するキャラクタデバイスを提供しますが、macOS ではユーザー空間からカーネル拡張なしに `/dev/*` デバイスノードを作成することはできません。  
+> このため、`recpt1` や `recisdb` などの既存 Linux バイナリをそのまま macOS で使用することはできません。
+>
+> 代わりに、同梱の `px4rec` コマンドを `recpt1` の代わりに使用するか、`mirakurun` の `command:` 設定に `px4rec` を指定することで、同等の機能を利用できます。
+
+### 1. 前提条件のインストール
+
+[Homebrew](https://brew.sh/) がインストールされている必要があります。
+
+	$ xcode-select --install            # Xcode コマンドラインツール (未インストールの場合)
+	$ brew install cmake libusb
+
+### 2. ファームウェアの準備
+
+事前に unzip, gcc, make がインストールされている必要があります。
+
+	$ cd fwtool
+	$ make
+	$ wget http://plex-net.co.jp/plex/pxw3u4/pxw3u4_BDA_ver1x64.zip -O pxw3u4_BDA_ver1x64.zip
+	$ unzip -oj pxw3u4_BDA_ver1x64.zip pxw3u4_BDA_ver1x64/PXW3U4.sys && rm pxw3u4_BDA_ver1x64.zip
+	$ ./fwtool PXW3U4.sys it930x-firmware.bin && rm PXW3U4.sys
+	$ cd ../
+
+または、抽出済みのファームウェアを利用することもできます。
+
+	$ cp ./etc/it930x-firmware.bin ./macos/build/
+
+### 3. ビルド
+
+	$ cd macos
+	$ cmake -B build
+	$ cmake --build build
+	$ cd ../
+
+ビルドが成功すると `macos/build/DriverHost_PX4` が生成されます。  
+また、`macos/build/DriverHost_PX4.ini` に設定ファイルが自動的にコピーされます。
+
+### 4. ファームウェアの配置
+
+ビルド後、ファームウェアをビルドディレクトリに配置します。  
+`DriverHost_PX4.ini` はビルド時に自動コピーされますが、`it930x-firmware.bin` は自動コピーされません。
+
+	$ cp ./etc/it930x-firmware.bin ./macos/build/
+
+### 5. デーモンの起動
+
+`px4rec` を使うだけであれば、この手順は必須ではありません。  
+`px4rec` 実行時に `DriverHost_PX4` が起動していなければ、同じディレクトリにある `DriverHost_PX4` が自動起動されます。
+
+#### 手動起動
+
+デーモンを手動で起動する場合は、ビルドディレクトリから実行します。
+
+	$ ./macos/build/DriverHost_PX4 &
+
+標準出力と標準エラー出力をログへ保存する場合は、次のように起動します。
+
+	$ nohup ./macos/build/DriverHost_PX4 \
+	    > /tmp/DriverHost_PX4.log 2>&1 &
+
+`DriverHost_PX4.ini` と `it930x-firmware.bin` は、実行ファイルと同じ `macos/build/` に配置します。実行時のカレントディレクトリは実行ファイルのディレクトリへ変更されるため、別のディレクトリから絶対パスで起動しても、この配置関係は維持されます。
+
+#### 起動オプション
+
+| オプション | 説明 |
+| --- | --- |
+| `-r`, `--resident` | クライアントが接続していなくても終了せず常駐する (`--idle-timeout=0` と同じ) |
+| `-t <秒>`, `--idle-timeout=<秒>` | 接続がない状態がこの秒数続いたときに終了する (既定値: 15、`0` で常駐) |
+| `-h`, `--help` | 使い方を表示する |
+
+常駐させる場合は `-r` を付けて起動します。
+
+	$ ./macos/build/DriverHost_PX4 -r &
+
+無接続時の終了までの時間だけを延ばす場合は、秒数を指定します。
+
+	$ ./macos/build/DriverHost_PX4 --idle-timeout=300 &
+
+常駐中のデーモンは `SIGINT` または `SIGTERM` で終了処理を開始し、受信の停止とソケットの削除を行ってから終了します。`kill -9` で停止すると、この後始末を行いません。
+
+	$ kill $(pgrep -f macos/build/DriverHost_PX4)
+
+#### デーモンの動作
+
+デーモンは次の UNIX ドメインソケットを作成します。
+
+| 用途 | ソケット |
+| --- | --- |
+| チューナー制御 | `/tmp/px4_ctrl_pipe.sock` |
+| TS データ取得 | `/tmp/px4_data_pipe.sock` |
+
+制御接続またはデータ接続が1つでも残っている間、デーモンは終了しません。最後のクライアントが切断されると、1秒間隔で接続数を確認し、無接続のまま15秒が経過したときに終了します。この時間は `--idle-timeout` で変更でき、`-r` を付けた場合は接続がなくても常駐します。複数の `px4rec` や Mirakurun の録画処理から同時に接続できます。
+
+同じデーモンを複数起動することはできません。2つ目のプロセスはロックファイル `/tmp/px4_drv_host.lock` で既存プロセスを検出し、終了します。
+
+#### launchd で起動
+
+ログイン時に起動し、終了後も launchd から再起動する場合は、ユーザー用 LaunchAgent を作成します。`/Users/ユーザー名/Library/LaunchAgents/io.px4.DriverHost_PX4.plist` を作成し、パスを実際の配置へ置き換えます。
+
+	<?xml version="1.0" encoding="UTF-8"?>
+	<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+	  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+	<plist version="1.0">
+	<dict>
+	  <key>Label</key>
+	  <string>io.px4.DriverHost_PX4</string>
+	  <key>ProgramArguments</key>
+	  <array>
+	    <string>/Users/ユーザー名/px4_drv/macos/build/DriverHost_PX4</string>
+	    <string>-r</string>
+	  </array>
+	  <key>WorkingDirectory</key>
+	  <string>/Users/ユーザー名/px4_drv/macos/build</string>
+	  <key>RunAtLoad</key>
+	  <true/>
+	  <key>KeepAlive</key>
+	  <true/>
+	  <key>StandardOutPath</key>
+	  <string>/tmp/DriverHost_PX4.log</string>
+	  <key>StandardErrorPath</key>
+	  <string>/tmp/DriverHost_PX4.error.log</string>
+	</dict>
+	</plist>
+
+読み込みと状態確認:
+
+	$ launchctl bootstrap gui/$(id -u) \
+	    ~/Library/LaunchAgents/io.px4.DriverHost_PX4.plist
+	$ launchctl print gui/$(id -u)/io.px4.DriverHost_PX4
+
+上の例では `-r` を指定してデーモンを常駐させるため、クライアントの有無による終了と launchd による再起動が起きません。`-r` を外した場合、クライアントがいなければデーモンは約15秒後に終了し、`KeepAlive` が `true` のため launchd が再起動します。録画時だけ起動したい場合は、plist を登録せず、`px4rec` の自動起動または手動起動を使用します。
+
+停止と登録解除:
+
+	$ launchctl bootout gui/$(id -u)/io.px4.DriverHost_PX4
+
+録画中に停止すると TS が途中で終了します。録画処理を先に終了し、クライアントが切断されたことを確認してから停止します。
+
+#### tmux で起動
+
+ターミナルを閉じても動作させ、ログを確認したい場合は tmux を使用します。
+
+	$ tmux new-session -d -s px4-driver \
+	    './macos/build/DriverHost_PX4 2>&1 | tee /tmp/DriverHost_PX4.log'
+	$ tmux attach -t px4-driver
+
+デタッチは `Ctrl-b` の後に `d` です。セッションとデーモンの状態は次で確認できます。
+
+	$ tmux has-session -t px4-driver
+	$ ls -l /tmp/px4_ctrl_pipe.sock /tmp/px4_data_pipe.sock
+
+デーモンは、最後のクライアントが切断されてから約 15 秒後に自動的に終了します。launchd の `KeepAlive` または tmux の再起動運用を使わない限り、ソケットが消えることは正常な動作です。
+
+#### 起動確認とトラブルシューティング
+
+ソケットだけでなく、プロセスとログを確認します。
+
+	$ pgrep -af DriverHost_PX4
+	$ ls -l /tmp/px4_ctrl_pipe.sock /tmp/px4_data_pipe.sock
+	$ tail -f /tmp/DriverHost_PX4.log
+
+ソケットが存在してもプロセスが動いていなければ、前回の異常終了で残ったソケットの可能性があります。プロセスが存在しないことを確認してから、対象ファイルだけを削除し、再起動します。
+
+	$ rm -f /tmp/px4_ctrl_pipe.sock /tmp/px4_data_pipe.sock
+	$ ./macos/build/DriverHost_PX4
+
+起動時に `DriverHost_PX4.ini` または `it930x-firmware.bin` を読み込めない場合は、配置とファイル名を確認します。USB デバイスを認識できない場合は、USB 接続、対応機種、macOS の権限、ログのエラーを確認します。
+
+### 6. 録画 (px4rec)
+
+`px4rec` を使用して TS データを録画します。
+
+> [!NOTE]
+> 接続されているチューナーが対応していない系統を指定した場合は `OPEN failed` で終了します。  
+> また、アンテナが未接続・無信号・受信条件不一致の場合は `TUNE failed` で終了します。
+
+	# 地上波 (ISDB-T) 27ch を 60 秒録画してファイルに保存
+	$ ./macos/build/px4rec -d 60 T 27 output.ts
+
+	# 衛星受信対応チューナーで、BS トランスポンダ 3 を stdout に出力 (パイプで他ツールへ渡す場合)
+	$ ./macos/build/px4rec S 3 - | ffplay -i -
+
+	# B-CAS カードで B25 デスクランブルを行いながら録画 (--b25 オプション)
+	$ ./macos/build/px4rec --b25 -d 60 T 13 output_decoded.ts
+
+オプション一覧:
+
+| オプション | 説明 |
+| --- | --- |
+| `-i N` | 使用するチューナーのインデックス (0 始まり、デフォルト: -1 = 最初の空きチューナー) |
+| `-d N` | 録画時間を秒で指定 (省略すると SIGTERM/Ctrl+C まで継続) |
+| `--b25` | B-CAS カードを使って ARIB STD-B25 のデスクランブル処理を行う (macOS の PC/SC フレームワーク経由) |
+| `T` または `S` | ISDB-T (地上波) または ISDB-S (衛星) |
+| チャンネル | T: 物理チャンネル番号 13–62 / S: トランスポンダ番号 0–11 (BS), 12–23 (CS110) |
+| 出力先 | ファイルパス、または `-` (標準出力、省略時も標準出力) |
+
+> [!NOTE]
+> `--b25` を使用する場合は、macOS に接続された PC/SC 対応 IC カードリーダーに B-CAS カードを挿入してください。  
+> macOS の PC/SC フレームワーク (`PCSC.framework`) を使用するため、追加のドライバやライブラリは不要です。
+
+### 7. mirakurun との連携
+
+`mirakurun` の設定ファイル (`tuners.yml`) に以下のように記述することで、mirakurun 経由で EPGStation や Chinachu から利用できます。
+
+`px4rec` が `DriverHost_PX4` を自動起動できるように、`DriverHost_PX4` / `DriverHost_PX4.ini` / `it930x-firmware.bin` / `px4rec` を同じディレクトリに配置し、`command:` には `px4rec` の絶対パスを指定してください。  
+長時間常駐させたい場合は、`DriverHost_PX4` を launchd などで先に起動しておいても構いません。
+
+```yaml
+- name: PX4-T1
+  types:
+    - GR
+  command: /path/to/px4rec T <ch>
+
+- name: PX4-S1
+  types:
+    - BS
+    - CS
+  command: /path/to/px4rec -i 1 S <ch>
+```
+
+### 8. 確認
+
+デーモンが起動すると、UNIX ドメインソケットが作成されます。
+
+	$ ls /tmp/px4_ctrl_pipe.sock /tmp/px4_data_pipe.sock
+	/tmp/px4_ctrl_pipe.sock  /tmp/px4_data_pipe.sock
+
+ソケットファイルが存在していれば、デーモンは正常に起動しています。
+
+## アンインストール (macOS)
+
+### 1. デーモンの停止
+
+実行中の `DriverHost_PX4` プロセスを停止します。
+
+	$ pkill DriverHost_PX4
+
+### 2. ファイルの削除
+
+	$ rm -rf macos/build
+
 ## アンインストール (Windows)
 
 ### 1. ドライバのアンインストール
@@ -391,6 +652,10 @@ gcc, make, カーネルソース/ヘッダ, dkms がインストールされて�
 チューナーの機種に応じた BonDriver とその設定ファイルを配置し、TVTest や EDCB などの BonDriver に対応したソフトウェアで使用することで、TS データを受信することが可能です。
 
 BonDriver は専用のものが必要になるため、公式 (Jacky版) BonDriver や radi-sh 氏版 BonDriver_BDA と併用することはできません。
+
+### macOS
+
+`DriverHost_PX4` デーモンを起動した状態で、または `px4rec` に同梱された自動起動機能を通じて、UNIX ドメインソケット (`/tmp/px4_ctrl_pipe.sock`, `/tmp/px4_data_pipe.sock`) を経由し、Windows WinUSB 版と同一のコマンドプロトコルで通信することで、TS データを受信することが可能です。
 
 ### Linux
 
