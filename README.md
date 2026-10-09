@@ -49,6 +49,14 @@ PLEX 社の [Webサイト](http://plex-net.co.jp) にて配布されている公
   - libusb を用いた USB デバイスアクセスと、UNIX ドメインソケットによる IPC を実装
   - Linux カーネルモジュール・Windows WinUSB 版と同一のデバイスロジックを共有しているため、対応デバイスは同一
 
+### 変更点 (ISDB-C トラモジ対応・実験的)
+
+- [n0atl 氏のフォーク](https://github.com/n0atl/px4_drv) での更新を取り込み、PX-MLT 系チューナーで CATV のトランスモジュレーション方式 (ISDB-C / ITU-T J.83 Annex C) を受信できるようにする
+  - WinUSB 版: 64QAM / 256QAM の受信、TSMF の Relative stream 抽出、dantto4k 連携用の生 TLV 出力に対応
+  - Linux 版: 通常の ISDB-C TS 受信経路のみを実験的に含む (実機未検証)
+  - macOS 版: 未対応・未検証
+  - 設定方法や制限事項は [docs/isdbc_winusb_experimental.md](docs/isdbc_winusb_experimental.md) を参照
+
 ### 変更点 (Linux 版)
 
 動作確認は Ubuntu 22.04 LTS (x64) で行っています。
