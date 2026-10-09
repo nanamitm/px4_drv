@@ -8,6 +8,7 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <sys/file.h>   /* flock */
+#include <sys/time.h>   /* futimes */
 #include <csignal>
 
 #include "msg.h"
@@ -76,9 +77,20 @@ void DriverHost::Run(unsigned int idle_timeout_sec)
 	 * 受信中の停止処理が遅れるため、待機はアイドル判定の粒度と分けています。
 	 */
 	unsigned int idle = 0;
+	unsigned int lock_refresh = 0;
 
 	while (!g_stop_requested) {
 		::sleep(1);
+
+		/*
+		 * macOS は /tmp にある通常ファイルを、3 日間使われていなければ定期的に削除します。
+		 * 常駐中にロックファイルが消えると二重起動を検出できなくなるため、
+		 * 1 時間ごとに更新時刻を進めて削除対象から外します。
+		 */
+		if (++lock_refresh >= 3600) {
+			lock_refresh = 0;
+			::futimes(g_lock_fd, nullptr);
+		}
 
 		if (ctrl_server_->GetActiveConnectionCount() ||
 		    stream_server_->GetActiveConnectionCount()) {

@@ -421,6 +421,7 @@ macOS 版は、ユーザー空間デーモン `DriverHost_PX4` として動作�
 
 `px4rec` を使うだけであれば、この手順は必須ではありません。  
 `px4rec` 実行時に `DriverHost_PX4` が起動していなければ、同じディレクトリにある `DriverHost_PX4` が自動起動されます。
+自動起動されたデーモンは、`px4rec` の終了後も常駐し続けます。
 
 #### 手動起動
 
@@ -439,19 +440,17 @@ macOS 版は、ユーザー空間デーモン `DriverHost_PX4` として動作�
 
 | オプション | 説明 |
 | --- | --- |
-| `-r`, `--resident` | クライアントが接続していなくても終了せず常駐する (`--idle-timeout=0` と同じ) |
-| `-t <秒>`, `--idle-timeout=<秒>` | 接続がない状態がこの秒数続いたときに終了する (既定値: 15、`0` で常駐) |
+| `-t <秒>`, `--idle-timeout=<秒>` | 接続がない状態がこの秒数続いたときに終了する (既定値: `0` = 終了せず常駐) |
+| `-r`, `--resident` | クライアントが接続していなくても終了せず常駐する (`--idle-timeout=0` と同じ。既定の動作) |
 | `-h`, `--help` | 使い方を表示する |
 
-常駐させる場合は `-r` を付けて起動します。
+既定では、クライアントが接続していなくてもデーモンは終了せず常駐します。
 
-	$ ./macos/build/DriverHost_PX4 -r &
-
-無接続時の終了までの時間だけを延ばす場合は、秒数を指定します。
+使っていないときはデーモンを終了させたい場合は、無接続のまま待つ秒数を指定します。次の例では、最後のクライアントが切断されてから 300 秒後に終了します。
 
 	$ ./macos/build/DriverHost_PX4 --idle-timeout=300 &
 
-常駐中のデーモンは `SIGINT` または `SIGTERM` で終了処理を開始し、受信の停止とソケットの削除を行ってから終了します。`kill -9` で停止すると、この後始末を行いません。
+デーモンは `SIGINT` または `SIGTERM` で終了処理を開始し、受信の停止とソケットの削除を行ってから終了します。`kill -9` で停止すると、この後始末を行いません。
 
 	$ kill $(pgrep -f macos/build/DriverHost_PX4)
 
@@ -464,13 +463,13 @@ macOS 版は、ユーザー空間デーモン `DriverHost_PX4` として動作�
 | チューナー制御 | `/tmp/px4_ctrl_pipe.sock` |
 | TS データ取得 | `/tmp/px4_data_pipe.sock` |
 
-制御接続またはデータ接続が1つでも残っている間、デーモンは終了しません。最後のクライアントが切断されると、1秒間隔で接続数を確認し、無接続のまま15秒が経過したときに終了します。この時間は `--idle-timeout` で変更でき、`-r` を付けた場合は接続がなくても常駐します。複数の `px4rec` や Mirakurun の録画処理から同時に接続できます。
+既定では、接続の有無にかかわらずデーモンは終了しません。`--idle-timeout` に 1 以上の秒数を指定した場合に限り、最後のクライアントが切断されてから 1 秒間隔で接続数を確認し、無接続のまま指定した秒数が経過したときに終了します。制御接続またはデータ接続が 1 つでも残っている間は終了しません。複数の `px4rec` や Mirakurun の録画処理から同時に接続できます。
 
 同じデーモンを複数起動することはできません。2つ目のプロセスはロックファイル `/tmp/px4_drv_host.lock` で既存プロセスを検出し、終了します。
 
 #### launchd で起動
 
-ログイン時に起動し、終了後も launchd から再起動する場合は、ユーザー用 LaunchAgent を作成します。`/Users/ユーザー名/Library/LaunchAgents/io.px4.DriverHost_PX4.plist` を作成し、パスを実際の配置へ置き換えます。
+ログイン時に起動し、異常終了したときに launchd から再起動する場合は、ユーザー用 LaunchAgent を作成します。`/Users/ユーザー名/Library/LaunchAgents/io.px4.DriverHost_PX4.plist` を作成し、パスを実際の配置へ置き換えます。
 
 	<?xml version="1.0" encoding="UTF-8"?>
 	<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
@@ -482,14 +481,18 @@ macOS 版は、ユーザー空間デーモン `DriverHost_PX4` として動作�
 	  <key>ProgramArguments</key>
 	  <array>
 	    <string>/Users/ユーザー名/px4_drv/macos/build/DriverHost_PX4</string>
-	    <string>-r</string>
 	  </array>
 	  <key>WorkingDirectory</key>
 	  <string>/Users/ユーザー名/px4_drv/macos/build</string>
 	  <key>RunAtLoad</key>
 	  <true/>
 	  <key>KeepAlive</key>
-	  <true/>
+	  <dict>
+	    <key>SuccessfulExit</key>
+	    <false/>
+	  </dict>
+	  <key>ThrottleInterval</key>
+	  <integer>30</integer>
 	  <key>StandardOutPath</key>
 	  <string>/tmp/DriverHost_PX4.log</string>
 	  <key>StandardErrorPath</key>
@@ -503,7 +506,12 @@ macOS 版は、ユーザー空間デーモン `DriverHost_PX4` として動作�
 	    ~/Library/LaunchAgents/io.px4.DriverHost_PX4.plist
 	$ launchctl print gui/$(id -u)/io.px4.DriverHost_PX4
 
-上の例では `-r` を指定してデーモンを常駐させるため、クライアントの有無による終了と launchd による再起動が起きません。`-r` を外した場合、クライアントがいなければデーモンは約15秒後に終了し、`KeepAlive` が `true` のため launchd が再起動します。録画時だけ起動したい場合は、plist を登録せず、`px4rec` の自動起動または手動起動を使用します。
+デーモンは既定で常駐するため、起動オプションは不要です。`KeepAlive` の `SuccessfulExit` を `false` にしているので、launchd が再起動するのは異常終了したときだけです。`kill` による正常終了や、すでに別の `DriverHost_PX4` が動いていて二重起動を検出した場合 (どちらも終了コード 0) は再起動しません。`KeepAlive` を単に `true` にすると、手動起動したデーモンが残っている間、launchd が起動と終了を繰り返します。`ThrottleInterval` は、ファームウェアの配置漏れなどで起動に失敗し続けたときの再起動間隔 (秒) です。
+
+- LaunchAgent はログインしているユーザーのセッションで動きます。再起動後に自動で使えるようにするには、そのユーザーの自動ログインを有効にしてください。SSH だけで接続している状態では `gui/` ドメインへ登録できません
+- plist を書き換えたときは、いったん `bootout` してから `bootstrap` し直します
+- デーモンだけを再起動するときは `launchctl kickstart -k gui/$(id -u)/io.px4.DriverHost_PX4` を使います
+- `/tmp` のログは追記され続け、再起動で消えます。残したい場合は `StandardOutPath` / `StandardErrorPath` を `~/Library/Logs/` 以下へ変更してください
 
 停止と登録解除:
 
@@ -524,7 +532,7 @@ macOS 版は、ユーザー空間デーモン `DriverHost_PX4` として動作�
 	$ tmux has-session -t px4-driver
 	$ ls -l /tmp/px4_ctrl_pipe.sock /tmp/px4_data_pipe.sock
 
-デーモンは、最後のクライアントが切断されてから約 15 秒後に自動的に終了します。launchd の `KeepAlive` または tmux の再起動運用を使わない限り、ソケットが消えることは正常な動作です。
+デーモンは既定で常駐するため、クライアントが切断されてもソケットは残ります。`--idle-timeout` を指定して起動した場合に限り、無接続が続くとデーモンが終了してソケットが消えます。
 
 #### 起動確認とトラブルシューティング
 
@@ -578,7 +586,7 @@ macOS 版は、ユーザー空間デーモン `DriverHost_PX4` として動作�
 `mirakurun` の設定ファイル (`tuners.yml`) に以下のように記述することで、mirakurun 経由で EPGStation や Chinachu から利用できます。
 
 `px4rec` が `DriverHost_PX4` を自動起動できるように、`DriverHost_PX4` / `DriverHost_PX4.ini` / `it930x-firmware.bin` / `px4rec` を同じディレクトリに配置し、`command:` には `px4rec` の絶対パスを指定してください。  
-長時間常駐させたい場合は、`DriverHost_PX4` を launchd などで先に起動しておいても構いません。
+`px4rec` から自動起動されたデーモンはそのまま常駐します。macOS の起動時から動かしておきたい場合や、異常終了時に自動で再起動させたい場合は、`DriverHost_PX4` を launchd で起動してください。
 
 ```yaml
 - name: PX4-T1
@@ -605,6 +613,11 @@ macOS 版は、ユーザー空間デーモン `DriverHost_PX4` として動作�
 ## アンインストール (macOS)
 
 ### 1. デーモンの停止
+
+launchd に登録している場合は、先に登録を解除します。
+
+	$ launchctl bootout gui/$(id -u)/io.px4.DriverHost_PX4
+	$ rm ~/Library/LaunchAgents/io.px4.DriverHost_PX4.plist
 
 実行中の `DriverHost_PX4` プロセスを停止します。
 

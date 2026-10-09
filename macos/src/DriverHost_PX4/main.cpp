@@ -16,8 +16,12 @@
 #include "util.hpp"
 #include "msg.h"
 
-/* 無接続が続いた場合に終了するまでの既定の秒数 */
-static const unsigned int kDefaultIdleTimeout = 15;
+/*
+ * 無接続が続いた場合に終了するまでの既定の秒数。0 は終了せず常駐することを表す。
+ * 以前は 15 秒で終了していたが、起動直後やクライアントの切り替えの合間に
+ * デーモンが消えてしまうため、既定では常駐させる。
+ */
+static const unsigned int kDefaultIdleTimeout = 0;
 
 static void usage(const char *argv0)
 {
@@ -25,12 +29,13 @@ static void usage(const char *argv0)
 		     "usage: %s [options]\n"
 		     "\n"
 		     "options:\n"
+		     "  -t, --idle-timeout=<sec>  無接続がこの秒数続いたときに終了する\n"
+		     "                            (既定: %u, 0 は終了せず常駐)\n"
 		     "  -r, --resident            クライアントが接続していなくても終了せず常駐する\n"
-		     "                            (--idle-timeout=0 と同じ)\n"
-		     "  -t, --idle-timeout=<sec>  無接続がこの秒数続いたときに終了する (既定: %u, 0 で常駐)\n"
+		     "                            (--idle-timeout=0 と同じ。既定の動作)\n"
 		     "  -h, --help                この使い方を表示する\n"
 		     "\n"
-		     "常駐中は SIGINT または SIGTERM で終了処理を開始します。\n",
+		     "SIGINT または SIGTERM で終了処理を開始します。\n",
 		     argv0, kDefaultIdleTimeout);
 }
 
