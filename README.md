@@ -388,39 +388,56 @@ macOS 版は、ユーザー空間デーモン `DriverHost_PX4` として動作�
 	$ xcode-select --install            # Xcode コマンドラインツール (未インストールの場合)
 	$ brew install cmake libusb
 
-### 2. ファームウェアの準備
+### 2. ソースコードの取得とビルド
 
-事前に unzip, gcc, make がインストールされている必要があります。
+	$ git clone https://github.com/stuayu/px4_drv.git
+	$ cd px4_drv
+	$ git checkout integration/macos-isdbc-tsmf   # macOS 対応が develop へ取り込まれるまでの間
+	$ cmake -S macos -B macos/build -DCMAKE_BUILD_TYPE=Release
+	$ cmake --build macos/build
 
-	$ cd fwtool
-	$ make
-	$ wget http://plex-net.co.jp/plex/pxw3u4/pxw3u4_BDA_ver1x64.zip -O pxw3u4_BDA_ver1x64.zip
+以降のコマンドは、すべてリポジトリのルート (`px4_drv/`) で実行します。
+
+ビルドが成功すると `macos/build/` に次のファイルが生成されます。
+
+| ファイル | 内容 |
+| --- | --- |
+| `DriverHost_PX4` | デーモン本体 |
+| `px4rec` | 録画コマンド |
+| `DriverHost_PX4.ini` | 設定ファイル (ビルド時に自動でコピーされる) |
+
+### 3. ファームウェアの配置
+
+`it930x-firmware.bin` を `macos/build/` に置きます。ファームウェアは自動ではコピーされません。
+リポジトリに同梱している抽出済みのファームウェアを使う場合は、次のコマンドだけで完了です。
+
+	$ cp etc/it930x-firmware.bin macos/build/
+
+公式ドライバから自分で抽出する場合は、同梱ファームウェアをコピーする代わりに次を実行します。
+
+	$ make -C fwtool
+	$ curl -L -o pxw3u4_BDA_ver1x64.zip http://plex-net.co.jp/plex/pxw3u4/pxw3u4_BDA_ver1x64.zip
 	$ unzip -oj pxw3u4_BDA_ver1x64.zip pxw3u4_BDA_ver1x64/PXW3U4.sys && rm pxw3u4_BDA_ver1x64.zip
-	$ ./fwtool PXW3U4.sys it930x-firmware.bin && rm PXW3U4.sys
-	$ cd ../
+	$ ./fwtool/fwtool PXW3U4.sys macos/build/it930x-firmware.bin && rm PXW3U4.sys
 
-または、抽出済みのファームウェアを利用することもできます。
+### 4. 動作確認
 
-	$ cp ./etc/it930x-firmware.bin ./macos/build/
+インストールする前に、ビルドしたものが動くことを確認します。チューナーを接続し、`sudo` を付けてデーモンを起動します。
 
-### 3. ビルド
+	$ sudo ./macos/build/DriverHost_PX4
 
-	$ cd macos
-	$ cmake -B build
-	$ cmake --build build
-	$ cd ../
+`DriverHost_PX4 started. (resident)` と表示され、`libusb_claim_interface() failed` が出ていなければ、チューナーを取得できています。
+デーモンを動かしたまま別のターミナルを開き、地上波の物理チャンネル (下の例では 27) を 10 秒録画します。
 
-ビルドが成功すると `macos/build/DriverHost_PX4` が生成されます。  
-また、`macos/build/DriverHost_PX4.ini` に設定ファイルが自動的にコピーされます。
+	$ cd px4_drv
+	$ ./macos/build/px4rec -d 10 T 27 test.ts
+	$ ls -l test.ts
 
-### 4. ファームウェアの配置
-
-ビルド後、ファームウェアをビルドディレクトリに配置します。  
-`DriverHost_PX4.ini` はビルド時に自動コピーされますが、`it930x-firmware.bin` は自動コピーされません。
-
-	$ cp ./etc/it930x-firmware.bin ./macos/build/
+`test.ts` が 20 MB 前後のサイズで作られていれば受信できています。チャンネル番号は、お住まいの地域で受信できる物理チャンネルに置き換えてください。確認が済んだら、デーモンを起動したターミナルで `Ctrl-C` を押して終了します。
 
 ### 5. デーモンの起動
+
+常用する場合は、下の「[システムへインストールして launchd で起動](#システムへインストールして-launchd-で起動)」の手順で登録してください。Mac の起動時に root 権限で自動的に起動します。
 
 `DriverHost_PX4` は root 権限で起動します。一般ユーザーで起動してもプロセスは動きますが、チューナーを取得できず、ログに `libusb_claim_interface() failed` と表示されます。
 
@@ -473,18 +490,25 @@ macOS 版は、ユーザー空間デーモン `DriverHost_PX4` として動作�
 
 同じデーモンを複数起動することはできません。2つ目のプロセスはロックファイル `/tmp/px4_drv_host.lock` で既存プロセスを検出し、終了します。
 
-#### launchd で起動
+#### システムへインストールして launchd で起動
 
-Mac の起動時に root 権限で起動し、異常終了したときに launchd から再起動する場合は、LaunchDaemon として登録します。LaunchDaemon はログインしていなくても動作します。
+ビルドした一式を root 所有のディレクトリへインストールし、LaunchDaemon として登録します。Mac の起動時に root 権限で起動し、ログインしていなくても動作します。異常終了したときは launchd が再起動します。
 
-root で動かす実行ファイルを一般ユーザーが書き換えられる場所に置くと、そのユーザーが root 権限を得られてしまいます。ビルドした一式を root 所有のディレクトリへコピーしてから登録してください。
+root で動かす実行ファイルを一般ユーザーが書き換えられる場所 (ホームディレクトリ以下の `macos/build/` など) に置いたまま登録すると、そのユーザーが root 権限を得られてしまいます。必ず root 所有のディレクトリへコピーしてください。
+
+**1. ファイルのインストール**
 
 	$ sudo mkdir -p /usr/local/px4_drv
-	$ sudo cp macos/build/DriverHost_PX4 macos/build/DriverHost_PX4.ini macos/build/it930x-firmware.bin macos/build/px4rec /usr/local/px4_drv/
+	$ sudo cp macos/build/DriverHost_PX4 macos/build/px4rec macos/build/DriverHost_PX4.ini macos/build/it930x-firmware.bin /usr/local/px4_drv/
 	$ sudo chown -R root:wheel /usr/local/px4_drv
+	$ sudo chmod 755 /usr/local/px4_drv /usr/local/px4_drv/DriverHost_PX4 /usr/local/px4_drv/px4rec
+	$ sudo chmod 644 /usr/local/px4_drv/DriverHost_PX4.ini /usr/local/px4_drv/it930x-firmware.bin
 
-`/Library/LaunchDaemons/io.px4.DriverHost_PX4.plist` を次の内容で作成します。
+**2. LaunchDaemon の作成**
 
+次のコマンドをそのまま貼り付けると、`/Library/LaunchDaemons/io.px4.DriverHost_PX4.plist` が作成されます。
+
+	$ sudo tee /Library/LaunchDaemons/io.px4.DriverHost_PX4.plist > /dev/null <<-'EOF'
 	<?xml version="1.0" encoding="UTF-8"?>
 	<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
 	  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -513,22 +537,35 @@ root で動かす実行ファイルを一般ユーザーが書き換えられる
 	  <string>/var/log/DriverHost_PX4.error.log</string>
 	</dict>
 	</plist>
+	EOF
 
 LaunchDaemon の plist は、所有者が root、パーミッションが `644` でなければ読み込まれません。
 
 	$ sudo chown root:wheel /Library/LaunchDaemons/io.px4.DriverHost_PX4.plist
 	$ sudo chmod 644 /Library/LaunchDaemons/io.px4.DriverHost_PX4.plist
+	$ plutil -lint /Library/LaunchDaemons/io.px4.DriverHost_PX4.plist
 
-読み込みと状態確認:
+**3. 登録と起動**
 
+手動で起動したデーモンが残っている場合は、先に停止します。
+
+	$ sudo pkill DriverHost_PX4
 	$ sudo launchctl bootstrap system /Library/LaunchDaemons/io.px4.DriverHost_PX4.plist
-	$ sudo launchctl print system/io.px4.DriverHost_PX4
+
+**4. 確認**
+
+	$ sudo launchctl print system/io.px4.DriverHost_PX4 | grep -E 'state|pid|last exit'
+	$ ls -l /tmp/px4_ctrl_pipe.sock /tmp/px4_data_pipe.sock
+	$ cat /var/log/DriverHost_PX4.log /var/log/DriverHost_PX4.error.log
+	$ /usr/local/px4_drv/px4rec -d 10 T 27 test.ts
+
+`state = running` と表示され、ソケットが 2 つ存在し、`px4rec` で録画できれば完了です。以降は Mac を再起動しても自動的に起動します。
 
 デーモンは既定で常駐するため、起動オプションは不要です。`KeepAlive` の `SuccessfulExit` を `false` にしているので、launchd が再起動するのは異常終了したときだけです。`kill` による正常終了や、すでに別の `DriverHost_PX4` が動いていて二重起動を検出した場合 (どちらも終了コード 0) は再起動しません。`KeepAlive` を単に `true` にすると、手動起動したデーモンが残っている間、launchd が起動と終了を繰り返します。`ThrottleInterval` は、ファームウェアの配置漏れなどで起動に失敗し続けたときの再起動間隔 (秒) です。
 
 - plist を書き換えたときは、いったん `bootout` してから `bootstrap` し直します
 - デーモンだけを再起動するときは `sudo launchctl kickstart -k system/io.px4.DriverHost_PX4` を使います
-- 実行ファイルをビルドし直したときは、`/usr/local/px4_drv/` へコピーし直してから再起動します
+- ビルドし直したときは、「1. ファイルのインストール」のコマンドをもう一度実行してから再起動します
 - Mirakurun の `command:` には `/usr/local/px4_drv/px4rec` を指定します
 
 停止と登録解除:
@@ -536,7 +573,6 @@ LaunchDaemon の plist は、所有者が root、パーミッションが `644` 
 	$ sudo launchctl bootout system/io.px4.DriverHost_PX4
 
 録画中に停止すると TS が途中で終了します。録画処理を先に終了し、クライアントが切断されたことを確認してから停止します。
-
 #### tmux で起動
 
 ターミナルを閉じても動作させ、ログを確認したい場合は tmux を使用します。
