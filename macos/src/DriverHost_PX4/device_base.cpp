@@ -5,9 +5,24 @@
 #include <cinttypes>
 #include <cwchar>
 
+#include <unistd.h>
+
 #include "msg.h"
 
 namespace px4 {
+
+/*
+ * デバイスを開けなかった理由をログへ残します。
+ * 呼び出し元の DeviceManager は例外を握りつぶすため、ここで出力しないと
+ * 「起動しているのにチューナーが 1 台も見つからない」理由が分からなくなります。
+ */
+static void report_usb_error(const char *what, int ret)
+{
+	msg_err("px4::DeviceBase: %s failed: %s\n", what, libusb_error_name(ret));
+
+	if (ret == LIBUSB_ERROR_ACCESS && geteuid() != 0)
+		msg_err("px4::DeviceBase: USB デバイスを取得する権限がありません。sudo を付けて root 権限で起動してください。\n");
+}
 
 DeviceBase::DeviceBase(const std::wstring &path,
 		       const px4::DeviceDefinition &device_def,
@@ -78,13 +93,16 @@ DeviceBase::DeviceBase(const std::wstring &path,
 	int ret = libusb_open(found, &usb_dev_.handle);
 	libusb_free_device_list(list, 1); /* unrefs all including found */
 
-	if (ret < 0)
+	if (ret < 0) {
+		report_usb_error("libusb_open()", ret);
 		throw DeviceError("px4::DeviceBase: libusb_open() failed");
+	}
 
 	/* Detach kernel driver if needed and claim interface 0 */
 	libusb_set_auto_detach_kernel_driver(usb_dev_.handle, 1);
 	ret = libusb_claim_interface(usb_dev_.handle, 0);
 	if (ret < 0) {
+		report_usb_error("libusb_claim_interface()", ret);
 		libusb_close(usb_dev_.handle);
 		usb_dev_.handle = nullptr;
 		throw DeviceError("px4::DeviceBase: libusb_claim_interface() failed");

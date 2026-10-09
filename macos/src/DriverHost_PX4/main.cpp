@@ -133,6 +133,14 @@ int main(int argc, char *argv[])
 
 	msg_info("Start\n");
 
+	/*
+	 * macOS のドライバが掴んでいる USB デバイスを切り離して取得するには root 権限が必要です。
+	 * 権限なしでも起動自体はできてしまい、チューナーを 1 台も開けないまま待機するため、
+	 * 起動時に知らせます。
+	 */
+	if (geteuid() != 0)
+		msg_warn("root 権限なしで起動しています。チューナーを取得できない場合は sudo を付けて起動してください。\n");
+
 	try {
 		px4::DriverHost host;
 		host.Run(idle_timeout);

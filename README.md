@@ -367,8 +367,11 @@ macOS 版は、ユーザー空間デーモン `DriverHost_PX4` として動作�
 あわせて、デーモンのクライアントとして機能する `px4rec` コマンドも同時にビルドされます。  
 `px4rec` は録画した TS データを stdout または指定ファイルに出力するシンプルなコマンドラインツールで、Linux の `recpt1` に相当する役割を担います。
 
-`px4rec` は、制御ソケットに接続できない場合に、同じディレクトリに配置された `DriverHost_PX4` を自動起動してから再接続を試みます。  
-このため、`DriverHost_PX4` と `px4rec` は基本的に同じディレクトリに配置して使用してください。
+`DriverHost_PX4` は、macOS のドライバから USB デバイスを切り離して取得するため、**root 権限 (`sudo`) で起動する必要があります**。
+デーモンが作成するソケットは全ユーザーが接続できるため、`px4rec` や Mirakurun は一般ユーザーのままで利用できます。
+
+`px4rec` は、制御ソケットに接続できない場合に、同じディレクトリに配置された `DriverHost_PX4` を自動起動してから再接続を試みます。
+ただし、自動起動されるデーモンは `px4rec` と同じユーザーで動くため、`px4rec` を一般ユーザーで実行している場合はチューナーを取得できません。**デーモンはあらかじめ `sudo` または launchd で起動しておいてください。**
 
 > [!IMPORTANT]
 > **Linux の `/dev/px4video*` との互換性について**
@@ -419,19 +422,20 @@ macOS 版は、ユーザー空間デーモン `DriverHost_PX4` として動作�
 
 ### 5. デーモンの起動
 
-`px4rec` を使うだけであれば、この手順は必須ではありません。  
-`px4rec` 実行時に `DriverHost_PX4` が起動していなければ、同じディレクトリにある `DriverHost_PX4` が自動起動されます。
-自動起動されたデーモンは、`px4rec` の終了後も常駐し続けます。
+`DriverHost_PX4` は root 権限で起動します。一般ユーザーで起動してもプロセスは動きますが、チューナーを取得できず、ログに `libusb_claim_interface() failed` と表示されます。
+
+`px4rec` 実行時に `DriverHost_PX4` が起動していなければ、同じディレクトリにある `DriverHost_PX4` が自動起動されますが、`px4rec` と同じユーザーで動きます。`px4rec` を `sudo` で実行した場合に限り、自動起動されたデーモンがチューナーを取得でき、`px4rec` の終了後も常駐し続けます。
 
 #### 手動起動
 
-デーモンを手動で起動する場合は、ビルドディレクトリから実行します。
+デーモンを手動で起動する場合は、`sudo` を付けて実行します。バックグラウンドで起動するとパスワードを入力できないため、先に `sudo -v` で認証を済ませておきます。
 
-	$ ./macos/build/DriverHost_PX4 &
+	$ sudo -v
+	$ sudo ./macos/build/DriverHost_PX4 &
 
 標準出力と標準エラー出力をログへ保存する場合は、次のように起動します。
 
-	$ nohup ./macos/build/DriverHost_PX4 \
+	$ sudo nohup ./macos/build/DriverHost_PX4 \
 	    > /tmp/DriverHost_PX4.log 2>&1 &
 
 `DriverHost_PX4.ini` と `it930x-firmware.bin` は、実行ファイルと同じ `macos/build/` に配置します。実行時のカレントディレクトリは実行ファイルのディレクトリへ変更されるため、別のディレクトリから絶対パスで起動しても、この配置関係は維持されます。
@@ -448,11 +452,11 @@ macOS 版は、ユーザー空間デーモン `DriverHost_PX4` として動作�
 
 使っていないときはデーモンを終了させたい場合は、無接続のまま待つ秒数を指定します。次の例では、最後のクライアントが切断されてから 300 秒後に終了します。
 
-	$ ./macos/build/DriverHost_PX4 --idle-timeout=300 &
+	$ sudo ./macos/build/DriverHost_PX4 --idle-timeout=300 &
 
 デーモンは `SIGINT` または `SIGTERM` で終了処理を開始し、受信の停止とソケットの削除を行ってから終了します。`kill -9` で停止すると、この後始末を行いません。
 
-	$ kill $(pgrep -f macos/build/DriverHost_PX4)
+	$ sudo kill $(pgrep -f macos/build/DriverHost_PX4)
 
 #### デーモンの動作
 
@@ -463,13 +467,23 @@ macOS 版は、ユーザー空間デーモン `DriverHost_PX4` として動作�
 | チューナー制御 | `/tmp/px4_ctrl_pipe.sock` |
 | TS データ取得 | `/tmp/px4_data_pipe.sock` |
 
+ソケットのパーミッションは `0666` で、この Mac にログインできるユーザーであれば誰でもチューナーを利用できます。
+
 既定では、接続の有無にかかわらずデーモンは終了しません。`--idle-timeout` に 1 以上の秒数を指定した場合に限り、最後のクライアントが切断されてから 1 秒間隔で接続数を確認し、無接続のまま指定した秒数が経過したときに終了します。制御接続またはデータ接続が 1 つでも残っている間は終了しません。複数の `px4rec` や Mirakurun の録画処理から同時に接続できます。
 
 同じデーモンを複数起動することはできません。2つ目のプロセスはロックファイル `/tmp/px4_drv_host.lock` で既存プロセスを検出し、終了します。
 
 #### launchd で起動
 
-ログイン時に起動し、異常終了したときに launchd から再起動する場合は、ユーザー用 LaunchAgent を作成します。`/Users/ユーザー名/Library/LaunchAgents/io.px4.DriverHost_PX4.plist` を作成し、パスを実際の配置へ置き換えます。
+Mac の起動時に root 権限で起動し、異常終了したときに launchd から再起動する場合は、LaunchDaemon として登録します。LaunchDaemon はログインしていなくても動作します。
+
+root で動かす実行ファイルを一般ユーザーが書き換えられる場所に置くと、そのユーザーが root 権限を得られてしまいます。ビルドした一式を root 所有のディレクトリへコピーしてから登録してください。
+
+	$ sudo mkdir -p /usr/local/px4_drv
+	$ sudo cp macos/build/DriverHost_PX4 macos/build/DriverHost_PX4.ini macos/build/it930x-firmware.bin macos/build/px4rec /usr/local/px4_drv/
+	$ sudo chown -R root:wheel /usr/local/px4_drv
+
+`/Library/LaunchDaemons/io.px4.DriverHost_PX4.plist` を次の内容で作成します。
 
 	<?xml version="1.0" encoding="UTF-8"?>
 	<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
@@ -480,10 +494,10 @@ macOS 版は、ユーザー空間デーモン `DriverHost_PX4` として動作�
 	  <string>io.px4.DriverHost_PX4</string>
 	  <key>ProgramArguments</key>
 	  <array>
-	    <string>/Users/ユーザー名/px4_drv/macos/build/DriverHost_PX4</string>
+	    <string>/usr/local/px4_drv/DriverHost_PX4</string>
 	  </array>
 	  <key>WorkingDirectory</key>
-	  <string>/Users/ユーザー名/px4_drv/macos/build</string>
+	  <string>/usr/local/px4_drv</string>
 	  <key>RunAtLoad</key>
 	  <true/>
 	  <key>KeepAlive</key>
@@ -494,28 +508,32 @@ macOS 版は、ユーザー空間デーモン `DriverHost_PX4` として動作�
 	  <key>ThrottleInterval</key>
 	  <integer>30</integer>
 	  <key>StandardOutPath</key>
-	  <string>/tmp/DriverHost_PX4.log</string>
+	  <string>/var/log/DriverHost_PX4.log</string>
 	  <key>StandardErrorPath</key>
-	  <string>/tmp/DriverHost_PX4.error.log</string>
+	  <string>/var/log/DriverHost_PX4.error.log</string>
 	</dict>
 	</plist>
 
+LaunchDaemon の plist は、所有者が root、パーミッションが `644` でなければ読み込まれません。
+
+	$ sudo chown root:wheel /Library/LaunchDaemons/io.px4.DriverHost_PX4.plist
+	$ sudo chmod 644 /Library/LaunchDaemons/io.px4.DriverHost_PX4.plist
+
 読み込みと状態確認:
 
-	$ launchctl bootstrap gui/$(id -u) \
-	    ~/Library/LaunchAgents/io.px4.DriverHost_PX4.plist
-	$ launchctl print gui/$(id -u)/io.px4.DriverHost_PX4
+	$ sudo launchctl bootstrap system /Library/LaunchDaemons/io.px4.DriverHost_PX4.plist
+	$ sudo launchctl print system/io.px4.DriverHost_PX4
 
 デーモンは既定で常駐するため、起動オプションは不要です。`KeepAlive` の `SuccessfulExit` を `false` にしているので、launchd が再起動するのは異常終了したときだけです。`kill` による正常終了や、すでに別の `DriverHost_PX4` が動いていて二重起動を検出した場合 (どちらも終了コード 0) は再起動しません。`KeepAlive` を単に `true` にすると、手動起動したデーモンが残っている間、launchd が起動と終了を繰り返します。`ThrottleInterval` は、ファームウェアの配置漏れなどで起動に失敗し続けたときの再起動間隔 (秒) です。
 
-- LaunchAgent はログインしているユーザーのセッションで動きます。再起動後に自動で使えるようにするには、そのユーザーの自動ログインを有効にしてください。SSH だけで接続している状態では `gui/` ドメインへ登録できません
 - plist を書き換えたときは、いったん `bootout` してから `bootstrap` し直します
-- デーモンだけを再起動するときは `launchctl kickstart -k gui/$(id -u)/io.px4.DriverHost_PX4` を使います
-- `/tmp` のログは追記され続け、再起動で消えます。残したい場合は `StandardOutPath` / `StandardErrorPath` を `~/Library/Logs/` 以下へ変更してください
+- デーモンだけを再起動するときは `sudo launchctl kickstart -k system/io.px4.DriverHost_PX4` を使います
+- 実行ファイルをビルドし直したときは、`/usr/local/px4_drv/` へコピーし直してから再起動します
+- Mirakurun の `command:` には `/usr/local/px4_drv/px4rec` を指定します
 
 停止と登録解除:
 
-	$ launchctl bootout gui/$(id -u)/io.px4.DriverHost_PX4
+	$ sudo launchctl bootout system/io.px4.DriverHost_PX4
 
 録画中に停止すると TS が途中で終了します。録画処理を先に終了し、クライアントが切断されたことを確認してから停止します。
 
@@ -524,8 +542,8 @@ macOS 版は、ユーザー空間デーモン `DriverHost_PX4` として動作�
 ターミナルを閉じても動作させ、ログを確認したい場合は tmux を使用します。
 
 	$ tmux new-session -d -s px4-driver \
-	    './macos/build/DriverHost_PX4 2>&1 | tee /tmp/DriverHost_PX4.log'
-	$ tmux attach -t px4-driver
+	    'sudo ./macos/build/DriverHost_PX4 2>&1 | tee /tmp/DriverHost_PX4.log'
+	$ tmux attach -t px4-driver   # パスワードを求められていたら入力する
 
 デタッチは `Ctrl-b` の後に `d` です。セッションとデーモンの状態は次で確認できます。
 
@@ -544,10 +562,12 @@ macOS 版は、ユーザー空間デーモン `DriverHost_PX4` として動作�
 
 ソケットが存在してもプロセスが動いていなければ、前回の異常終了で残ったソケットの可能性があります。プロセスが存在しないことを確認してから、対象ファイルだけを削除し、再起動します。
 
-	$ rm -f /tmp/px4_ctrl_pipe.sock /tmp/px4_data_pipe.sock
-	$ ./macos/build/DriverHost_PX4
+	$ sudo rm -f /tmp/px4_ctrl_pipe.sock /tmp/px4_data_pipe.sock /tmp/px4_drv_host.lock
+	$ sudo ./macos/build/DriverHost_PX4
 
-起動時に `DriverHost_PX4.ini` または `it930x-firmware.bin` を読み込めない場合は、配置とファイル名を確認します。USB デバイスを認識できない場合は、USB 接続、対応機種、macOS の権限、ログのエラーを確認します。
+起動時に `DriverHost_PX4.ini` または `it930x-firmware.bin` を読み込めない場合は、配置とファイル名を確認します。USB デバイスを認識できない場合は、USB 接続、対応機種、ログのエラーを確認します。
+
+ログに `libusb_claim_interface() failed: LIBUSB_ERROR_ACCESS` や「USB デバイスを取得する権限がありません」と表示される場合は、デーモンを root 権限で起動していません。いったん停止し、`sudo` を付けて起動し直してください。`could not open lock file` と表示される場合は、別のユーザー (root) で起動したデーモンがすでに動いています。
 
 ### 6. 録画 (px4rec)
 
@@ -585,8 +605,8 @@ macOS 版は、ユーザー空間デーモン `DriverHost_PX4` として動作�
 
 `mirakurun` の設定ファイル (`tuners.yml`) に以下のように記述することで、mirakurun 経由で EPGStation や Chinachu から利用できます。
 
-`px4rec` が `DriverHost_PX4` を自動起動できるように、`DriverHost_PX4` / `DriverHost_PX4.ini` / `it930x-firmware.bin` / `px4rec` を同じディレクトリに配置し、`command:` には `px4rec` の絶対パスを指定してください。  
-`px4rec` から自動起動されたデーモンはそのまま常駐します。macOS の起動時から動かしておきたい場合や、異常終了時に自動で再起動させたい場合は、`DriverHost_PX4` を launchd で起動してください。
+`DriverHost_PX4` はあらかじめ launchd (または `sudo`) で起動しておき、`command:` には `px4rec` の絶対パスを指定してください。
+Mirakurun を一般ユーザーで動かしている場合、`px4rec` からの自動起動ではチューナーを取得できません。
 
 ```yaml
 - name: PX4-T1
@@ -608,7 +628,7 @@ macOS 版は、ユーザー空間デーモン `DriverHost_PX4` として動作�
 	$ ls /tmp/px4_ctrl_pipe.sock /tmp/px4_data_pipe.sock
 	/tmp/px4_ctrl_pipe.sock  /tmp/px4_data_pipe.sock
 
-ソケットファイルが存在していれば、デーモンは正常に起動しています。
+ソケットファイルが存在していれば、デーモンは起動しています。チューナーを取得できているかは、ログに `libusb_claim_interface() failed` が出ていないことで確認します。
 
 ## アンインストール (macOS)
 
@@ -616,16 +636,17 @@ macOS 版は、ユーザー空間デーモン `DriverHost_PX4` として動作�
 
 launchd に登録している場合は、先に登録を解除します。
 
-	$ launchctl bootout gui/$(id -u)/io.px4.DriverHost_PX4
-	$ rm ~/Library/LaunchAgents/io.px4.DriverHost_PX4.plist
+	$ sudo launchctl bootout system/io.px4.DriverHost_PX4
+	$ sudo rm /Library/LaunchDaemons/io.px4.DriverHost_PX4.plist
 
 実行中の `DriverHost_PX4` プロセスを停止します。
 
-	$ pkill DriverHost_PX4
+	$ sudo pkill DriverHost_PX4
 
 ### 2. ファイルの削除
 
 	$ rm -rf macos/build
+	$ sudo rm -rf /usr/local/px4_drv   # launchd 用にコピーした場合
 
 ## アンインストール (Windows)
 

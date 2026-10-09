@@ -9,6 +9,7 @@
 #include <unordered_map>
 
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <sys/un.h>
 #include <poll.h>
 #include <unistd.h>
@@ -47,6 +48,13 @@ static int get_or_create_server_sock(const std::string &path)
 		::close(srv_fd);
 		return -1;
 	}
+
+	/*
+	 * デーモンは USB デバイスを取得するために root で動かすことがあります。
+	 * そのままではソケットが root 以外から書き込めず、一般ユーザーで動く px4rec や
+	 * Mirakurun が接続できないため、全ユーザーが接続できるようにします。
+	 */
+	::chmod(path.c_str(), 0666);
 
 	if (::listen(srv_fd, 16) < 0) {
 		::close(srv_fd);
