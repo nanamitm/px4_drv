@@ -47,6 +47,10 @@ void StreamServer::StreamConnection::Worker() noexcept
 		if (!conn_->Read(buf.get(), size, read, quit_event_))
 			break;
 
+		/* 短い受信で未初期化領域を解釈しないよう、構造体の長さを先に検査する */
+		if (read < sizeof(px4::command::DataCmd))
+			break;
+
 		int ret = true;
 		auto *cmd = reinterpret_cast<px4::command::DataCmd *>(buf.get());
 
