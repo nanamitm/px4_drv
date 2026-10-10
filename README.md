@@ -54,7 +54,7 @@ PLEX 社の [Webサイト](http://plex-net.co.jp) にて配布されている公
 - [n0atl 氏のフォーク](https://github.com/n0atl/px4_drv) での更新を取り込み、PX-MLT 系チューナーで CATV のトランスモジュレーション方式 (ISDB-C / ITU-T J.83 Annex C) を受信できるようにする
   - WinUSB 版: 64QAM / 256QAM の受信、TSMF の Relative stream 抽出、dantto4k 連携用の生 TLV 出力に対応
   - Linux 版: 通常の ISDB-C TS 受信経路のみを実験的に含む (実機未検証)
-  - macOS 版: 未対応・未検証
+  - macOS 版: `px4rec C` による ISDB-C 選局、TSMF ストリーム選択、生 TLV 出力に対応。PX-MLT5PE と 1 つの CATV 回線で、64QAM の通常 TS 受信と、256QAM の TSMF から取り出した生 TLV の出力を確認済み (256QAM では誤りが残る場合があり、長時間受信は未検証)
   - 設定方法や制限事項は [docs/isdbc_winusb_experimental.md](docs/isdbc_winusb_experimental.md) を参照
 
 ### 変更点 (Linux 版)
@@ -607,7 +607,7 @@ LaunchDaemon の plist は、所有者が root、パーミッションが `644` 
 
 ### 6. 録画 (px4rec)
 
-`px4rec` を使用して TS データを録画します。
+`px4rec [options] T|S|C <channel> [output|-]` で TS データを録画できます。macOS 版の ISDB-C、TSMF、生 TLV 出力は実験的な対応です。PX-MLT5PE と 1 つの CATV 回線で受信を確認していますが、256QAM のチャンネルでは誤りが残る場合があり、長時間受信と、TSMF から通常の TS を取り出す経路は未検証です。
 
 > [!NOTE]
 > 接続されているチューナーが対応していない系統を指定した場合は `OPEN failed` で終了します。  
@@ -622,6 +622,15 @@ LaunchDaemon の plist は、所有者が root、パーミッションが `644` 
 	# B-CAS カードで B25 デスクランブルを行いながら録画 (--b25 オプション)
 	$ ./macos/build/px4rec --b25 -d 60 T 13 output_decoded.ts
 
+	# CATV C13 を 60 秒録画 (ISDB-C、変調方式は自動)
+	$ ./macos/build/px4rec -d 60 C 13 cable.ts
+
+	# 中心周波数を直接指定し、補正値と変調方式を固定
+	$ ./macos/build/px4rec --freq-khz 473000 --freq-offset -1 --modulation 256 C 13 relay.ts
+
+	# TSMF の Relative stream 0 を選択して生 TLV を保存
+	$ ./macos/build/px4rec --tsmf 0 --tsmf-slot-offset 0 --tlv C 13 stream.tlv
+
 オプション一覧:
 
 | オプション | 説明 |
@@ -629,9 +638,20 @@ LaunchDaemon の plist は、所有者が root、パーミッションが `644` 
 | `-i N` | 使用するチューナーのインデックス (0 始まり、デフォルト: -1 = 最初の空きチューナー) |
 | `-d N` | 録画時間を秒で指定 (省略すると SIGTERM/Ctrl+C まで継続) |
 | `--b25` | B-CAS カードを使って ARIB STD-B25 のデスクランブル処理を行う (macOS の PC/SC フレームワーク経由) |
-| `T` または `S` | ISDB-T (地上波) または ISDB-S (衛星) |
-| チャンネル | T: 物理チャンネル番号 13–62 / S: トランスポンダ番号 0–11 (BS), 12–23 (CS110) |
+| `--freq-khz kHz` | C 専用。中心周波数を直接指定 (1〜4294967295 kHz)。指定時はチャンネル番号からの周波数計算が不要 |
+| `--freq-offset kHz` | C 専用。中心周波数への補正値 (符号付き32bit整数、既定 0)。補正後は1〜4294967295 kHzが必要 |
+| `--modulation 64\|256` | C 専用。64QAM または256QAMを固定。省略時は自動 (64QAM、未ロック時に256QAM) |
+| `--tsmf 0-14` | C 専用。TSMF の Relative stream 番号を指定 |
+| `--tsmf-slot-offset n` | C 専用。TSMF slot offset (符号付き32bit整数、既定 0)。`--tsmf` が必要 |
+| `--tlv` | C 専用。TSMF 内の TLV 型ストリームを生 TLV で出力。`--tsmf` が必要。TS 用の復号処理である `--b25` との併用は対象外 |
+| `--help` / `-h` | usage を表示 |
+| `T` / `S` / `C` | ISDB-T (地上波) / ISDB-S (衛星) / ISDB-C (CATV トラモジ) |
+| チャンネル | T: 物理チャンネル番号 13–62 / S: トランスポンダ番号 0–11 (BS), 12–23 (CS110) / C: CATV Cチャンネル番号 13–63 |
 | 出力先 | ファイルパス、または `-` (標準出力、省略時も標準出力) |
+
+ISDB-C の C13〜C22 は物理チャンネル3〜12、C23〜C63 は物理チャンネル22〜62に対応します。中心周波数は `93000 + 物理チャンネル × 6000` kHzで、物理チャンネル12だけ2000 kHzを加算します。UHF/VHF帯の再送信などでは `--freq-khz` で中心周波数を指定できます。直接指定時も Cチャンネル番号13〜63が必要です。
+
+C専用オプションを T/S と併用した場合、値が範囲外の場合、`--tsmf` なしで slot offset または TLV を指定した場合は、選局前にエラーになります。TSMF未指定時は通常のTS、指定時は選択したストリームのTS、`--tlv` 併用時は生TLVが出力されます。
 
 > [!NOTE]
 > `--b25` を使用する場合は、macOS に接続された PC/SC 対応 IC カードリーダーに B-CAS カードを挿入してください。  

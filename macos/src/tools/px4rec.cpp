@@ -1,8 +1,8 @@
 // px4rec.cpp - TS recording client for DriverHost_PX4 on macOS
 //
 // Usage:
-//   px4rec [options] T|S <channel>
-//   px4rec [options] T|S <channel> <output_file>
+//   px4rec [options] T|S|C <channel>
+//   px4rec [options] T|S|C <channel> <output_file>
 //
 // Options:
 //   -i N   Tuner index (0-based; default: -1 = first available)
@@ -11,6 +11,7 @@
 // Channel encoding:
 //   T (ISDB-T): physical UHF channel number  13 – 62
 //   S (ISDB-S): transponder number  0–11 = BS,  12–23 = CS110
+//   C (ISDB-C): CATV channel number 13–63 (experimental)
 //
 // Output:
 //   File path, or '-' (or omitted) for stdout.
@@ -272,25 +273,185 @@ static uint32_t isdb_s_cs_freq_kHz(int tp)
 // Cleanup on exit
 // ---------------------------------------------------------------------------
 
+static bool close_session(int ctrl_fd, int &data_fd);
+
 static void send_close(int ctrl_fd)
 {
-	// SET_CAPTURE(false)
+	int data_fd = -1;
+	(void)close_session(ctrl_fd, data_fd);
+}
+
+static bool open_session(int ctrl_fd, px4::SystemType sys_type, int tuner_idx,
+	const char *sys_str, int &data_fd)
+{
+	// ---- OPEN --------------------------------------------------------------
+	// CtrlOpenCmd contains ReceiverInfo with wchar_t[96] fields.
+	// On macOS wchar_t = 4 bytes, so the struct is ~824 bytes total.
+	// Use a heap-allocated, zero-initialised buffer to avoid large stack frames.
+	uint32_t data_id = 0;
 	{
-		px4::command::CtrlCaptureCmd cmd{};
-		cmd.cmd     = px4::command::CtrlCmdCode::SET_CAPTURE;
+		const std::size_t cmd_size = sizeof(px4::command::CtrlOpenCmd);
+		auto *open_cmd = static_cast<px4::command::CtrlOpenCmd *>(
+			calloc(1, cmd_size));
+		if (!open_cmd) {
+			fprintf(stderr, "Error: out of memory\n");
+			return false;
+		}
+		open_cmd->cmd                   = px4::command::CtrlCmdCode::OPEN;
+		open_cmd->status                = px4::command::CtrlStatusCode::NONE;
+		open_cmd->receiver_info.systems = sys_type;
+		open_cmd->receiver_info.index   = tuner_idx; // -1 = any
+
+		bool ok = send_all(ctrl_fd, open_cmd, cmd_size) &&
+			  recv_all(ctrl_fd, open_cmd, cmd_size);
+		if (!ok ||
+		    open_cmd->status != px4::command::CtrlStatusCode::SUCCEEDED) {
+			fprintf(stderr,
+				"Error: OPEN failed – no %s receiver available"
+				" (index %d)\n", sys_str, tuner_idx);
+			free(open_cmd);
+			return false;
+		}
+		data_id = open_cmd->receiver_info.data_id;
+		free(open_cmd);
+	}
+
+	// OPEN で ID は有効になる。読み手は受信開始を待てるため、キャプチャより先に接続する。
+	// ---- Open data socket and send SET_DATA_ID -----------------------------
+	data_fd = unix_connect(DATA_SOCK);
+	if (data_fd < 0) {
+		fprintf(stderr, "Error: cannot connect to %s: %s\n",
+			DATA_SOCK, strerror(errno));
+		send_close(ctrl_fd);
+		return false;
+	}
+	{
+		px4::command::DataCmd dcmd{};
+		dcmd.cmd     = px4::command::DataCmdCode::SET_DATA_ID;
+		dcmd.data_id = data_id;
+		if (!send_all(data_fd, &dcmd, sizeof(dcmd))) {
+			fprintf(stderr, "Error: SET_DATA_ID failed\n");
+			close(data_fd);
+			data_fd = -1;
+			send_close(ctrl_fd);
+			return false;
+		}
+	}
+
+	return true;
+}
+
+static bool tune_session(int ctrl_fd, px4::SystemType sys_type, uint32_t freq_kHz,
+	bool is_c, int64_t modulation, int64_t tsmf, int64_t slot_offset, bool tlv,
+	const char *sys_str, int channel)
+{
+	// ---- SET_PARAMS --------------------------------------------------------
+	{
+		const uint32_t num = is_c ? (tsmf < 0 ? 3 : (tlv ? 7 : 6)) : 0;
+		// params[1] の末尾を拡張し、送受信とも同じ長さを使う。T/S の固定長は維持する。
+		const std::size_t size = sizeof(px4::command::CtrlParamsCmd) +
+			(num > 1 ? (num - 1) * sizeof(px4::command::Parameter) : 0);
+		auto *cmd = static_cast<px4::command::CtrlParamsCmd *>(calloc(1, size));
+		bool ok = false;
+		if (cmd) {
+			cmd->cmd = px4::command::CtrlCmdCode::SET_PARAMS;
+			cmd->status = px4::command::CtrlStatusCode::NONE;
+			cmd->param_set.system = sys_type;
+			cmd->param_set.freq = freq_kHz;
+			cmd->param_set.num = num;
+			if (is_c) {
+				using P = px4::command::ParameterType;
+				const px4::command::Parameter params[] = {
+					{P::BANDWIDTH, 6}, {P::SYMBOL_RATE, 5274},
+					{P::MODULATION, static_cast<uint32_t>(modulation)},
+					{P::TSMF_MODE, 1}, {P::TSMF_RELATIVE_STREAM, static_cast<uint32_t>(tsmf)},
+					{P::TSMF_SLOT_OFFSET, static_cast<uint32_t>(slot_offset)},
+					{P::TSMF_OUTPUT_TLV, 1}
+				};
+				memcpy(cmd->param_set.params, params, num * sizeof(params[0]));
+			}
+			ok = send_all(ctrl_fd, cmd, size) && recv_all(ctrl_fd, cmd, size) &&
+				cmd->status == px4::command::CtrlStatusCode::SUCCEEDED;
+			free(cmd);
+		}
+		if (!ok) {
+			fprintf(stderr, "Error: SET_PARAMS failed\n");
+			return false;
+		}
+	}
+
+	// ---- TUNE --------------------------------------------------------------
+	{
+		px4::command::CtrlTuneCmd cmd{};
+		cmd.cmd     = px4::command::CtrlCmdCode::TUNE;
 		cmd.status  = px4::command::CtrlStatusCode::NONE;
-		cmd.capture = false;
-		send_all(ctrl_fd, &cmd, sizeof(cmd));
-		recv_all(ctrl_fd, &cmd, sizeof(cmd));
+		cmd.timeout = 30000; // 30 s
+		if (!send_all(ctrl_fd, &cmd, sizeof(cmd)) ||
+		    !recv_all(ctrl_fd, &cmd, sizeof(cmd)) ||
+		    cmd.status != px4::command::CtrlStatusCode::SUCCEEDED) {
+			fprintf(stderr, "Error: TUNE failed (no lock on %s ch%d)\n",
+				sys_str, channel);
+			return false;
+		}
 	}
-	// CLOSE
-	{
-		px4::command::CtrlCloseCmd cmd{};
-		cmd.cmd    = px4::command::CtrlCmdCode::CLOSE;
-		cmd.status = px4::command::CtrlStatusCode::NONE;
-		send_all(ctrl_fd, &cmd, sizeof(cmd));
-		recv_all(ctrl_fd, &cmd, sizeof(cmd));
+
+	return true;
+}
+
+static bool set_capture(int ctrl_fd, bool capture)
+{
+	px4::command::CtrlCaptureCmd cmd{};
+	cmd.cmd = px4::command::CtrlCmdCode::SET_CAPTURE;
+	cmd.status = px4::command::CtrlStatusCode::NONE;
+	cmd.capture = capture;
+	if (send_all(ctrl_fd, &cmd, sizeof(cmd)) &&
+	    recv_all(ctrl_fd, &cmd, sizeof(cmd)) &&
+	    cmd.status == px4::command::CtrlStatusCode::SUCCEEDED)
+		return true;
+	fprintf(stderr, "Error: SET_CAPTURE(%s) failed\n", capture ? "true" : "false");
+	return false;
+}
+
+// 停止応答を待ってデータ接続を切り、CLOSE 応答で受信機と data_id の解放を確認する。
+static bool close_session(int ctrl_fd, int &data_fd)
+{
+	bool ok = set_capture(ctrl_fd, false);
+	if (data_fd >= 0) close(data_fd);
+	data_fd = -1;
+	px4::command::CtrlCloseCmd cmd{};
+	cmd.cmd = px4::command::CtrlCmdCode::CLOSE;
+	cmd.status = px4::command::CtrlStatusCode::NONE;
+	if (!send_all(ctrl_fd, &cmd, sizeof(cmd)) ||
+	    !recv_all(ctrl_fd, &cmd, sizeof(cmd)) ||
+	    cmd.status != px4::command::CtrlStatusCode::SUCCEEDED) {
+		fprintf(stderr, "Error: CLOSE failed\n");
+		ok = false;
 	}
+	return ok;
+}
+
+static void usage()
+{
+	fprintf(stderr,
+		"Usage: px4rec [options] T|S|C <channel> [output|-]\n"
+		"  -i N  tuner index; -d N  duration seconds; --b25  B-CAS decode\n"
+		"  T  ISDB-T physical channel 13-62\n"
+		"  S  ISDB-S transponder 0-11=BS, 12-23=CS110\n"
+		"  C  ISDB-C CATV channel 13-63 (experimental)\n"
+		"  C only: --freq-khz <1-4294967295> --freq-offset <signed kHz>\n"
+		"          --modulation <64|256> (default: automatic) --tsmf <0-14>\n"
+		"          --tsmf-slot-offset <signed n> (default: 0) --tlv\n"
+		"  --tsmf-slot-offset and --tlv require --tsmf; --tlv excludes --b25\n");
+}
+
+// 数値の欠落・桁あふれを選局前に検出し、誤った周波数で受信を開始しない。
+static bool parse_number(const char *text, int64_t min, int64_t max, int64_t &value)
+{
+	char *end = nullptr;
+	errno = 0;
+	value = strtoll(text, &end, 10);
+	return text[0] && end != text && !*end && errno != ERANGE &&
+		value >= min && value <= max;
 }
 
 // ---------------------------------------------------------------------------
@@ -306,9 +467,37 @@ int main(int argc, char *argv[])
 	int         channel    = -1;
 	const char *outfile    = "-";   // stdout
 
+	bool c_options = false, has_freq = false, has_slot = false, tlv = false;
+	int64_t direct_freq = 0, freq_offset = 0, modulation = 0, tsmf = -1, slot_offset = 0;
+
 	// Parse arguments
 	for (int i = 1; i < argc; ++i) {
-		if (strcmp(argv[i], "-i") == 0 && i + 1 < argc) {
+		if (!strcmp(argv[i], "--help") || !strcmp(argv[i], "-h")) {
+			usage();
+			return 0;
+		} else if (!strcmp(argv[i], "--tlv")) {
+			c_options = tlv = true;
+		} else if (!strcmp(argv[i], "--freq-khz") || !strcmp(argv[i], "--freq-offset") ||
+			   !strcmp(argv[i], "--modulation") || !strcmp(argv[i], "--tsmf") ||
+			   !strcmp(argv[i], "--tsmf-slot-offset")) {
+			const char *option = argv[i];
+			int64_t *value = &freq_offset, min = INT32_MIN, max = INT32_MAX;
+			c_options = true;
+			if (!strcmp(option, "--freq-khz")) {
+				value = &direct_freq; min = 1; max = UINT32_MAX; has_freq = true;
+			} else if (!strcmp(option, "--modulation")) {
+				value = &modulation; min = 64; max = 256;
+			} else if (!strcmp(option, "--tsmf")) {
+				value = &tsmf; min = 0; max = 14;
+			} else if (!strcmp(option, "--tsmf-slot-offset")) {
+				value = &slot_offset; has_slot = true;
+			}
+			if (i + 1 >= argc || !parse_number(argv[++i], min, max, *value) ||
+			    (value == &modulation && modulation != 64 && modulation != 256)) {
+				fprintf(stderr, "Error: invalid value for %s\n", option);
+				return 1;
+			}
+		} else if (strcmp(argv[i], "-i") == 0 && i + 1 < argc) {
 			tuner_idx = atoi(argv[++i]);
 		} else if (strcmp(argv[i], "-d") == 0 && i + 1 < argc) {
 			duration = atoi(argv[++i]);
@@ -317,29 +506,50 @@ int main(int argc, char *argv[])
 		} else if (!sys_str) {
 			sys_str = argv[i];
 		} else if (channel < 0) {
-			channel = atoi(argv[i]);
+			if (sys_str[0] == 'C' || sys_str[0] == 'c') {
+				int64_t value;
+				if (!parse_number(argv[i], 13, 63, value)) {
+					fprintf(stderr, "Error: ISDB-C channel must be 13-63\n");
+					return 1;
+				}
+				channel = static_cast<int>(value);
+			} else {
+				channel = atoi(argv[i]);
+			}
 		} else {
 			outfile = argv[i];
 		}
 	}
 
 	if (!sys_str || channel < 0) {
-		fprintf(stderr,
-			"Usage: px4rec [-i tuner_index] [-d duration_sec] [--b25]"
-			" T|S <channel> [output|-]\n"
-			"  T    ISDB-T terrestrial: physical channel 13-62\n"
-			"  S    ISDB-S satellite:   transponder 0-11=BS, 12-23=CS110\n"
-			"  --b25  decode ARIB STD-B25 scrambling via B-CAS card\n");
+		usage();
 		return 1;
 	}
 
+	bool is_c = (sys_str[0] == 'C' || sys_str[0] == 'c');
+	if ((c_options && !is_c) || ((has_slot || tlv) && tsmf < 0) || (tlv && use_b25)) {
+		fprintf(stderr, "Error: C options require C; slot offset/TLV require --tsmf; TLV excludes --b25\n");
+		return 1;
+	}
 	bool is_t = (sys_str[0] == 'T' || sys_str[0] == 't');
 	px4::SystemType sys_type =
+		is_c ? px4::SystemType::ISDB_C :
 		is_t ? px4::SystemType::ISDB_T : px4::SystemType::ISDB_S;
 
 	// Validate channel and compute frequency
 	uint32_t freq_kHz = 0;
-	if (is_t) {
+	if (is_c) {
+		// ChSet の C13-C22 は物理3-12、C23-C63 は物理22-62に対応する。
+		int physical_ch = channel <= 22 ? channel - 10 : channel - 1;
+		int64_t center = has_freq ? direct_freq :
+			93000 + physical_ch * 6000 + (physical_ch == 12 ? 2000 : 0);
+		center += freq_offset;
+		if (center <= 0 || center > UINT32_MAX) {
+			fprintf(stderr, "Error: adjusted ISDB-C frequency is out of range\n");
+			return 1;
+		}
+		freq_kHz = static_cast<uint32_t>(center);
+	} else if (is_t) {
 		if (channel < 13 || channel > 62) {
 			fprintf(stderr, "Error: ISDB-T channel must be 13-62 (got %d)\n",
 				channel);
@@ -404,117 +614,51 @@ int main(int argc, char *argv[])
 		}
 	}
 
-	// ---- OPEN --------------------------------------------------------------
-	// CtrlOpenCmd contains ReceiverInfo with wchar_t[96] fields.
-	// On macOS wchar_t = 4 bytes, so the struct is ~824 bytes total.
-	// Use a heap-allocated, zero-initialised buffer to avoid large stack frames.
-	uint32_t data_id = 0;
-	{
-		const std::size_t cmd_size = sizeof(px4::command::CtrlOpenCmd);
-		auto *open_cmd = static_cast<px4::command::CtrlOpenCmd *>(
-			calloc(1, cmd_size));
-		if (!open_cmd) {
-			fprintf(stderr, "Error: out of memory\n");
+	int data_fd = -1;
+	if (is_c && modulation == 0) {
+		// Tune の自動判定は TSMF 選別前の入力パケット数を使うため、判定に TSMF/TLV は不要。
+		// 選局中の送信データは PURGE で境界を確定できないため、判定用接続ごと破棄する。
+		bool ok = open_session(ctrl_fd, sys_type, tuner_idx, sys_str, data_fd);
+		if (ok) {
+			ok = set_capture(ctrl_fd, true) &&
+				tune_session(ctrl_fd, sys_type, freq_kHz, true, 0, -1, 0, false,
+					sys_str, channel);
+			if (ok) {
+				px4::command::CtrlParamsCmd cmd{};
+				cmd.cmd = px4::command::CtrlCmdCode::GET_PARAMS;
+				cmd.status = px4::command::CtrlStatusCode::NONE;
+				cmd.param_set.num = 1;
+				cmd.param_set.params[0].type = px4::command::ParameterType::MODULATION;
+				ok = send_all(ctrl_fd, &cmd, sizeof(cmd)) &&
+					recv_all(ctrl_fd, &cmd, sizeof(cmd)) &&
+					cmd.status == px4::command::CtrlStatusCode::SUCCEEDED;
+				if (!ok) {
+					fprintf(stderr, "Error: GET_PARAMS failed\n");
+				} else {
+					modulation = cmd.param_set.params[0].value;
+					ok = modulation == 64 || modulation == 256;
+					if (!ok)
+						fprintf(stderr, "Error: invalid detected modulation: %lld\n",
+							static_cast<long long>(modulation));
+				}
+			}
+			bool closed = close_session(ctrl_fd, data_fd);
+			ok = ok && closed;
+		}
+		if (!ok) {
 			close(ctrl_fd);
 			if (outfd != STDOUT_FILENO) close(outfd);
 			return 1;
 		}
-		open_cmd->cmd                   = px4::command::CtrlCmdCode::OPEN;
-		open_cmd->status                = px4::command::CtrlStatusCode::NONE;
-		open_cmd->receiver_info.systems = sys_type;
-		open_cmd->receiver_info.index   = tuner_idx; // -1 = any
-
-		bool ok = send_all(ctrl_fd, open_cmd, cmd_size) &&
-			  recv_all(ctrl_fd, open_cmd, cmd_size);
-		if (!ok ||
-		    open_cmd->status != px4::command::CtrlStatusCode::SUCCEEDED) {
-			fprintf(stderr,
-				"Error: OPEN failed – no %s receiver available"
-				" (index %d)\n", sys_str, tuner_idx);
-			free(open_cmd);
-			close(ctrl_fd);
-			if (outfd != STDOUT_FILENO) close(outfd);
-			return 1;
-		}
-		data_id = open_cmd->receiver_info.data_id;
-		free(open_cmd);
+		fprintf(stderr, "ISDB-C: detected modulation %lldQAM\n",
+			static_cast<long long>(modulation));
 	}
-
-	// ---- SET_PARAMS --------------------------------------------------------
-	{
-		px4::command::CtrlParamsCmd cmd{};
-		cmd.cmd            = px4::command::CtrlCmdCode::SET_PARAMS;
-		cmd.status         = px4::command::CtrlStatusCode::NONE;
-		cmd.param_set.system = sys_type;
-		cmd.param_set.freq   = freq_kHz;
-		cmd.param_set.num    = 0;
-		if (!send_all(ctrl_fd, &cmd, sizeof(cmd)) ||
-		    !recv_all(ctrl_fd, &cmd, sizeof(cmd)) ||
-		    cmd.status != px4::command::CtrlStatusCode::SUCCEEDED) {
-			fprintf(stderr, "Error: SET_PARAMS failed\n");
-			send_close(ctrl_fd);
-			close(ctrl_fd);
-			if (outfd != STDOUT_FILENO) close(outfd);
-			return 1;
-		}
-	}
-
-	// ---- TUNE --------------------------------------------------------------
-	{
-		px4::command::CtrlTuneCmd cmd{};
-		cmd.cmd     = px4::command::CtrlCmdCode::TUNE;
-		cmd.status  = px4::command::CtrlStatusCode::NONE;
-		cmd.timeout = 30000; // 30 s
-		if (!send_all(ctrl_fd, &cmd, sizeof(cmd)) ||
-		    !recv_all(ctrl_fd, &cmd, sizeof(cmd)) ||
-		    cmd.status != px4::command::CtrlStatusCode::SUCCEEDED) {
-			fprintf(stderr, "Error: TUNE failed (no lock on %s ch%d)\n",
-				sys_str, channel);
-			send_close(ctrl_fd);
-			close(ctrl_fd);
-			if (outfd != STDOUT_FILENO) close(outfd);
-			return 1;
-		}
-	}
-
-	// ---- SET_CAPTURE(true) -------------------------------------------------
-	{
-		px4::command::CtrlCaptureCmd cmd{};
-		cmd.cmd     = px4::command::CtrlCmdCode::SET_CAPTURE;
-		cmd.status  = px4::command::CtrlStatusCode::NONE;
-		cmd.capture = true;
-		if (!send_all(ctrl_fd, &cmd, sizeof(cmd)) ||
-		    !recv_all(ctrl_fd, &cmd, sizeof(cmd))) {
-			fprintf(stderr, "Error: SET_CAPTURE(true) I/O failed\n");
-			send_close(ctrl_fd);
-			close(ctrl_fd);
-			if (outfd != STDOUT_FILENO) close(outfd);
-			return 1;
-		}
-	}
-
-	// ---- Open data socket and send SET_DATA_ID -----------------------------
-	int data_fd = unix_connect(DATA_SOCK);
-	if (data_fd < 0) {
-		fprintf(stderr, "Error: cannot connect to %s: %s\n",
-			DATA_SOCK, strerror(errno));
-		send_close(ctrl_fd);
+	// CLOSE 応答前に受信機と data_id は解放される。ただし旧データ接続のスレッド回収とは同期されない。
+	// -i は両セッションで同じ値を使う。未指定時に受信機が変わっても変調方式はチャンネルの属性。
+	if (!open_session(ctrl_fd, sys_type, tuner_idx, sys_str, data_fd)) {
 		close(ctrl_fd);
 		if (outfd != STDOUT_FILENO) close(outfd);
 		return 1;
-	}
-	{
-		px4::command::DataCmd dcmd{};
-		dcmd.cmd     = px4::command::DataCmdCode::SET_DATA_ID;
-		dcmd.data_id = data_id;
-		if (!send_all(data_fd, &dcmd, sizeof(dcmd))) {
-			fprintf(stderr, "Error: SET_DATA_ID failed\n");
-			close(data_fd);
-			send_close(ctrl_fd);
-			close(ctrl_fd);
-			if (outfd != STDOUT_FILENO) close(outfd);
-			return 1;
-		}
 	}
 
 	// ---- Initialize B25 decoder if requested --------------------------------
@@ -583,6 +727,48 @@ int main(int argc, char *argv[])
 			fprintf(stderr, "Error: out of memory\n");
 			if (b25)  { b25->release(b25);   b25  = nullptr; }
 			if (bcas) { bcas->release(bcas); bcas = nullptr; }
+			close(data_fd);
+			send_close(ctrl_fd);
+			close(ctrl_fd);
+			if (outfd != STDOUT_FILENO) close(outfd);
+			return 1;
+		}
+
+		// PX-MLT5PE の実測で良好だった、選局・PURGE 後にキャプチャを始める順序を保つ。
+		// B25 初期化と読み出しバッファ確保は受信開始前に済ませる。
+		if (!tune_session(ctrl_fd, sys_type, freq_kHz, is_c, modulation,
+			tsmf, slot_offset, tlv, sys_str, channel)) {
+			free(rbuf);
+			if (b25) b25->release(b25);
+			if (bcas) bcas->release(bcas);
+			close(data_fd);
+			send_close(ctrl_fd);
+			close(ctrl_fd);
+			if (outfd != STDOUT_FILENO) close(outfd);
+			return 1;
+		}
+
+		// 選局後にホストのリングバッファと TSMF の途中状態を破棄する。
+		{
+			px4::command::DataCmd cmd{};
+			cmd.cmd = px4::command::DataCmdCode::PURGE;
+			if (!send_all(data_fd, &cmd, sizeof(cmd))) {
+				fprintf(stderr, "Error: PURGE failed\n");
+				free(rbuf);
+				if (b25) b25->release(b25);
+				if (bcas) bcas->release(bcas);
+				close(data_fd);
+				send_close(ctrl_fd);
+				close(ctrl_fd);
+				if (outfd != STDOUT_FILENO) close(outfd);
+				return 1;
+			}
+		}
+
+		if (!set_capture(ctrl_fd, true)) {
+			free(rbuf);
+			if (b25) b25->release(b25);
+			if (bcas) bcas->release(bcas);
 			close(data_fd);
 			send_close(ctrl_fd);
 			close(ctrl_fd);

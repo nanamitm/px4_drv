@@ -108,7 +108,8 @@ bool Config::Load(const std::wstring &path, const std::wstring &section) noexcep
 			value = value.substr(1, value.size() - 2);
 		}
 
-		values_.emplace(utf8_to_wstring(key), utf8_to_wstring(value));
+		// 重複キーは末尾を優先し、ForceISDBCModulation などの後続設定を反映する。
+		values_[utf8_to_wstring(key)] = utf8_to_wstring(value);
 	}
 
 	return found;
