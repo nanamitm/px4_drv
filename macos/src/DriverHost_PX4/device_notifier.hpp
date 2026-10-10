@@ -7,6 +7,9 @@
 #include <string>
 #include <thread>
 #include <atomic>
+#include <mutex>
+#include <condition_variable>
+#include <deque>
 #include <unordered_map>
 #include <stdexcept>
 
@@ -49,12 +52,25 @@ private:
 					       libusb_hotplug_event event,
 					       void *user_data);
 	void Worker();
+	void NotifyWorker();
+	void StopNotifyWorker();
+
+	struct Notification {
+		DeviceNotifyType type;
+		GUID interface_guid;
+		std::wstring path;
+	};
 
 	DeviceNotifyHandler *handler_;
 	std::unordered_map<uint32_t, GUID> vidpid_to_guid_;
 	libusb_hotplug_callback_handle hotplug_handle_;
 	std::atomic_bool running_;
 	std::thread th_;
+	std::mutex queue_mtx_;
+	std::condition_variable queue_cv_;
+	std::deque<Notification> queue_;
+	bool notify_stopping_ = false;
+	std::thread notify_th_;
 };
 
 class DeviceNotifierError : public std::runtime_error {

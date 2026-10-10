@@ -1,7 +1,13 @@
 // device_manager.cpp - macOS libusb-based device manager
 // (replaces Windows SetupAPI version)
 
+#ifdef msg_prefix
+#undef msg_prefix
+#endif
+#define msg_prefix "px4_libusb"
+
 #include "device_manager.hpp"
+#include "msg.h"
 
 #include <algorithm>
 #include <cwchar>
@@ -160,29 +166,41 @@ void DeviceManager::Add(const std::wstring &path,
 		case DeviceType::PX4: {
 			auto dev = std::make_unique<Px4Device>(
 				path, def.second, ++index_, receiver_manager_);
-			if (!dev->Init())
+			int ret = dev->Init();
+			if (!ret)
 				devices_.emplace(path, std::move(dev));
+			else
+				msg_err("DeviceManager::Add: Init() failed. (path: %ls, ret: %d)\n", path.c_str(), ret);
 			break;
 		}
 		case DeviceType::PXMLT: {
 			auto dev = std::make_unique<PxMltDevice>(
 				path, def.second, ++index_, receiver_manager_);
-			if (!dev->Init())
+			int ret = dev->Init();
+			if (!ret)
 				devices_.emplace(path, std::move(dev));
+			else
+				msg_err("DeviceManager::Add: Init() failed. (path: %ls, ret: %d)\n", path.c_str(), ret);
 			break;
 		}
 		case DeviceType::ISDB2056: {
 			auto dev = std::make_unique<Isdb2056Device>(
 				path, def.second, ++index_, receiver_manager_);
-			if (!dev->Init())
+			int ret = dev->Init();
+			if (!ret)
 				devices_.emplace(path, std::move(dev));
+			else
+				msg_err("DeviceManager::Add: Init() failed. (path: %ls, ret: %d)\n", path.c_str(), ret);
 			break;
 		}
 		case DeviceType::ISDBT2071: {
 			auto dev = std::make_unique<Isdbt2071Device>(
 				path, def.second, ++index_, receiver_manager_);
-			if (!dev->Init())
+			int ret = dev->Init();
+			if (!ret)
 				devices_.emplace(path, std::move(dev));
+			else
+				msg_err("DeviceManager::Add: Init() failed. (path: %ls, ret: %d)\n", path.c_str(), ret);
 			break;
 		}
 		default:
