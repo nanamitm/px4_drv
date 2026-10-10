@@ -19,6 +19,7 @@
 
 struct cxd2858er_config {
 	u32 xtal;
+	bool isdbc_reference_profile;
 	struct {
 		bool lna;
 	} ter;

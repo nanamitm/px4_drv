@@ -52,6 +52,7 @@ union cxd2856er_system_params {
 		u32 symbol_rate;
 		u32 modulation;
 		bool experimental_profile;
+		bool reference_profile;
 	} isdbc;
 };
 

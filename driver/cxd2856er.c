@@ -197,7 +197,8 @@ int cxd2856er_term(struct cxd2856er_demod *demod)
 }
 
 static int cxd2856er_set_ts_clock(struct cxd2856er_demod *demod,
-				  enum cxd2856er_system system)
+				  enum cxd2856er_system system,
+				  bool reference_profile)
 {
 	int ret = 0;
 	u8 tmp;
@@ -221,7 +222,7 @@ static int cxd2856er_set_ts_clock(struct cxd2856er_demod *demod,
 	if (ret)
 		return ret;
 
-	ret = cxd2856er_write_slvt_reg_mask(demod, 0xd3, 0x01, 0x01);
+	ret = cxd2856er_write_slvt_reg_mask(demod, 0xd3, reference_profile ? 0x00 : 0x01, 0x01);
 	if (ret)
 		return ret;
 
@@ -233,13 +234,19 @@ static int cxd2856er_set_ts_clock(struct cxd2856er_demod *demod,
 	if (ret)
 		return ret;
 
-	ret = cxd2856er_write_slvt_reg_mask(demod, 0xc4, 0x00, 0x03);
-	if (ret)
-		return ret;
-
-	ret = cxd2856er_write_slvt_reg_mask(demod, 0xd1, 0x02, 0x03);
-	if (ret)
-		return ret;
+	/* cxd2878.c の cxd2878_setTSClkModeAndFreq(): DVB-C は rate control
+	 * 有効、serial は continuous/full rate。parallel では C4/D1 を書かない。
+	 * 64QAM/256QAM の区別はなく、既存プロファイルだけ従来の値を保持する。 */
+	if (!reference_profile || (tmp & 0x80)) {
+		ret = cxd2856er_write_slvt_reg_mask(demod, 0xc4,
+			reference_profile ? 0x01 : 0x00, 0x03);
+		if (ret)
+			return ret;
+		ret = cxd2856er_write_slvt_reg_mask(demod, 0xd1,
+			reference_profile ? 0x01 : 0x02, 0x03);
+		if (ret)
+			return ret;
+	}
 
 	ret = cxd2856er_write_slvt_reg(demod, 0xd9, ts_clock_period);
 	if (ret)
@@ -252,7 +259,7 @@ static int cxd2856er_set_ts_clock(struct cxd2856er_demod *demod,
 	switch (system) {
 	case CXD2856ER_ISDB_T_SYSTEM:
 	case CXD2856ER_ISDB_C_SYSTEM:
-		ret = cxd2856er_write_slvt_reg_mask(demod, 0x33, 0x02, 0x03);
+		ret = cxd2856er_write_slvt_reg_mask(demod, 0x33, reference_profile ? 0x01 : 0x02, 0x03);
 		break;
 
 	case CXD2856ER_ISDB_S_SYSTEM:
@@ -688,7 +695,7 @@ static int cxd2856er_wakeup_isdbt(struct cxd2856er_demod *demod,
 	/* Read-only diagnostic counter; it does not alter the ISDB-T setup. */
 	demod->isdbt_lock_checks = 0;
 
-	ret = cxd2856er_set_ts_clock(demod, CXD2856ER_ISDB_T_SYSTEM);
+	ret = cxd2856er_set_ts_clock(demod, CXD2856ER_ISDB_T_SYSTEM, false);
 	if (ret)
 		return ret;
 
@@ -869,7 +876,7 @@ static int cxd2856er_wakeup_isdbs(struct cxd2856er_demod *demod)
 	int ret = 0;
 	u8 data[3];
 
-	ret = cxd2856er_set_ts_clock(demod, CXD2856ER_ISDB_S_SYSTEM);
+	ret = cxd2856er_set_ts_clock(demod, CXD2856ER_ISDB_S_SYSTEM, false);
 	if (ret)
 		return ret;
 
@@ -1009,6 +1016,7 @@ static int cxd2856er_wakeup_isdbc(struct cxd2856er_demod *demod,
 {
 	int ret;
 	u8 data[14];
+	const bool reference = params->isdbc.reference_profile;
 
 	if (params->isdbc.symbol_rate != 5274 ||
 		(params->isdbc.modulation != CXD2856ER_ISDBC_64QAM &&
@@ -1031,10 +1039,13 @@ static int cxd2856er_wakeup_isdbc(struct cxd2856er_demod *demod,
 	/* A new tune starts a new diagnostic sample sequence. */
 	demod->isdbc_lock_checks = 0;
 
-	dev_info(demod->dev, "CXD2856ER ISDB-C: experimental profile v11 (CXD2856ER baseline), symbol_rate=%u ksym/s, modulation=%uQAM\n",
+	dev_info(demod->dev, "CXD2856ER ISDB-C: %s, symbol_rate=%u ksym/s, modulation=%uQAM\n",
+		 reference ? "reference profile (Sony/TBS DVB-C 6 MHz)" :
+		 "experimental profile v11 (CXD2856ER baseline)",
 		 params->isdbc.symbol_rate, params->isdbc.modulation);
 
-	ret = cxd2856er_set_ts_clock(demod, CXD2856ER_ISDB_C_SYSTEM);
+	ret = cxd2856er_set_ts_clock(demod, CXD2856ER_ISDB_C_SYSTEM,
+		params->isdbc.reference_profile);
 	if (ret)
 		return ret;
 
@@ -1074,7 +1085,8 @@ static int cxd2856er_wakeup_isdbc(struct cxd2856er_demod *demod,
 	 * driver.  These registers precede the common 6 MHz cable filters below;
 	 * they are volatile and deliberately leave the proven 64QAM path intact.
 	 */
-	if (params->isdbc.modulation == CXD2856ER_ISDBC_256QAM) {
+	/* SLtoAC() にこの CXD2841ER 由来の追加アナログ設定はない。 */
+	if (!reference && params->isdbc.modulation == CXD2856ER_ISDBC_256QAM) {
 		data[0] = 0x09;
 		data[1] = 0x54;
 		ret = cxd2856er_write_slvt_reg(demod, 0x59, 0x00);
@@ -1100,10 +1112,13 @@ static int cxd2856er_wakeup_isdbc(struct cxd2856er_demod *demod,
 	ret = cxd2856er_write_slvt_reg(demod, 0x00, 0x10);
 	if (ret)
 		return ret;
-	ret = cxd2856er_write_slvt_reg_mask(demod, 0xd2, 0x09, 0x1f);
-	if (ret)
-		return ret;
-	ret = cxd2856er_write_slvt_reg_mask(demod, 0xa5, 0x01, 0x01);
+	/* SLtoAC() に D2 の書き込みはない。従来の IFAGC 設定は A/B 用に残す。 */
+	if (!reference) {
+		ret = cxd2856er_write_slvt_reg_mask(demod, 0xd2, 0x09, 0x1f);
+		if (ret)
+			return ret;
+	}
+	ret = cxd2856er_write_slvt_reg_mask(demod, 0xa5, 0x01, reference ? 0xff : 0x01);
 	if (ret)
 		return ret;
 
@@ -1114,6 +1129,24 @@ static int cxd2856er_wakeup_isdbc(struct cxd2856er_demod *demod,
 	if (ret)
 		return ret;
 
+	/* Sony/TBS 公開 cxd2878.c の SLtoAC() と SLtoAC_BandSetting()。
+	 * CXD2856=0x090 を含むドライバの DVB-C 6 MHz 経路で、QAM 別の分岐はない。
+	 * CXD2856 実機での品質は未確認のため、参照フラグ時だけ両 QAM に適用する。
+	 * ALP/TLV 用の bank 01/02/95 は CXD2856 への根拠が不足するため対象外。
+	 */
+	if (reference) {
+		data[0] = 0x00; data[1] = 0x03; data[2] = 0x3b;
+		ret = cxd2856er_write_slvt_regs(demod, 0x33, data, 3);
+		if (ret)
+			return ret;
+		ret = cxd2856er_write_slvt_reg(demod, 0x00, 0x48);
+		if (ret)
+			return ret;
+		ret = cxd2856er_write_slvt_reg(demod, 0x2c, 0x03);
+		if (ret)
+			return ret;
+	}
+
 	/* 6 MHz cable filter settings. */
 	ret = cxd2856er_write_slvt_reg(demod, 0x00, 0x10);
 	if (ret)
@@ -1122,6 +1155,12 @@ static int cxd2856er_wakeup_isdbc(struct cxd2856er_demod *demod,
 	data[4] = 0x02; data[5] = 0xf0; data[6] = 0x01; data[7] = 0xe8;
 	data[8] = 0x00; data[9] = 0xcf; data[10] = 0x00; data[11] = 0xe6;
 	data[12] = 0x23; data[13] = 0xa4;
+	if (reference) {
+		data[0] = 0x31; data[1] = 0xa8; data[2] = 0x29; data[3] = 0x9b;
+		data[4] = 0x27; data[5] = 0x9c; data[6] = 0x28; data[7] = 0x9e;
+		data[8] = 0x29; data[9] = 0xa4; data[10] = 0x29; data[11] = 0xa2;
+		data[12] = 0x29; data[13] = 0xa8;
+	}
 	ret = cxd2856er_write_slvt_regs(demod, 0xa6, data, 14);
 	if (ret)
 		return ret;
@@ -1130,7 +1169,9 @@ static int cxd2856er_wakeup_isdbc(struct cxd2856er_demod *demod,
 	 * matching CXD2841ER DVB-C 6 MHz conversion (0x13bbbb); 3.55 MHz is
 	 * specific to the ISDB-T tuner profile and cannot lock this signal.
 	 */
-	data[0] = 0x13; data[1] = 0xbb; data[2] = 0xbb;
+	/* 参照の SONY_DEMOD_MAKE_IFFREQ_CONFIG(3.7) は四捨五入で 0x13bbbc。
+	 * 従来の切り捨て値 0x13bbbb は false 時の比較基準として保持する。 */
+	data[0] = 0x13; data[1] = 0xbb; data[2] = reference ? 0xbc : 0xbb;
 	ret = cxd2856er_write_slvt_regs(demod, 0xb6, data, 3);
 	if (ret)
 		return ret;
@@ -1138,22 +1179,30 @@ static int cxd2856er_wakeup_isdbc(struct cxd2856er_demod *demod,
 	ret = cxd2856er_write_slvt_reg(demod, 0x00, 0x11);
 	if (ret)
 		return ret;
-	ret = cxd2856er_write_slvt_reg_mask(demod, 0xa3, 0x14, 0x1f);
+	ret = cxd2856er_write_slvt_reg_mask(demod, 0xa3, 0x14, reference ? 0xff : 0x1f);
 	if (ret)
 		return ret;
 
 	ret = cxd2856er_write_slvt_reg(demod, 0x00, 0x40);
 	if (ret)
 		return ret;
-	ret = cxd2856er_write_slvt_reg_mask(demod, 0xc3, 0x00, 0x04);
-	if (ret)
-		return ret;
-	ret = cxd2856er_write_slvt_reg_mask(demod, 0x26, 0x08, 0x0f);
-	if (ret)
-		return ret;
-	ret = cxd2856er_write_slvt_reg(demod, 0x27, 0x6e);
-	if (ret)
-		return ret;
+	if (reference) {
+		/* SLtoAC_BandSetting(): 5274 固定値ではなく 6 MHz の探索範囲。 */
+		data[0] = 0x07; data[1] = 0x33; data[2] = 0x00; data[3] = 0xee;
+		ret = cxd2856er_write_slvt_regs(demod, 0x26, data, 4);
+		if (ret)
+			return ret;
+	} else {
+		ret = cxd2856er_write_slvt_reg_mask(demod, 0xc3, 0x00, 0x04);
+		if (ret)
+			return ret;
+		ret = cxd2856er_write_slvt_reg_mask(demod, 0x26, 0x08, 0x0f);
+		if (ret)
+			return ret;
+		ret = cxd2856er_write_slvt_reg(demod, 0x27, 0x6e);
+		if (ret)
+			return ret;
+	}
 
 	ret = cxd2856er_write_slvt_reg(demod, 0x00, 0x00);
 	if (ret)
@@ -1164,11 +1213,11 @@ static int cxd2856er_wakeup_isdbc(struct cxd2856er_demod *demod,
 	if (ret)
 		return ret;
 	ret = cxd2856er_write_slvt_reg_mask(demod, 0x80,
-		(params->isdbc.modulation == CXD2856ER_ISDBC_256QAM) ? 0x28 : 0x08,
+		(!reference && params->isdbc.modulation == CXD2856ER_ISDBC_256QAM) ? 0x28 : 0x08,
 		0x1f);
 	if (ret)
 		return ret;
-	if (params->isdbc.modulation == CXD2856ER_ISDBC_256QAM) {
+	if (!reference && params->isdbc.modulation == CXD2856ER_ISDBC_256QAM) {
 		ret = cxd2856er_set_isdbc_256_tsif(demod);
 		if (ret)
 			return ret;

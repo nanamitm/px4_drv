@@ -462,7 +462,10 @@ int cxd2858er_set_params_c(struct cxd2858er_tuner *tuner,
 	data[1] = 0x02;
 	data[2] = 0x1e;
 	data[3] = 0x67;
-	data[4] = 0x18;
+	/* cxd2878.c helene_tune_terr(): cable の REF_R は水晶周波数依存。
+	 * PXMLT は 16 MHz。既存値は比較用に参照フラグ false で保持する。 */
+	data[4] = tuner->config.isdbc_reference_profile &&
+		(tuner->config.xtal == 16000) ? 0x10 : 0x18;
 	data[5] = 0x1c;
 	data[6] = 0x78;
 	data[7] = 0x08;
@@ -476,7 +479,11 @@ int cxd2858er_set_params_c(struct cxd2858er_tuner *tuner,
 		goto exit;
 
 	data[0] = 0x00;
-	data[1] = 0x85;
+	/* Sony/TBS g_terr_param_table_helene の SONY_HELENE_DTV_DVBC_6:
+	 * RF_GAIN=AUTO / IF_BPF_GC=4。64QAM と 256QAM の設定は共通。
+	 * 参照の helene_tune_terr() は FREIA enum で表を引くため1行ずれるが、
+	 * ここでは指定された HELENE DVB-C 6 MHz 行の値を採用する。 */
+	data[1] = tuner->config.isdbc_reference_profile ? 0x84 : 0x85;
 	data[2] = 0x00;
 	data[3] = 0x02;
 	data[4] = 0x21;

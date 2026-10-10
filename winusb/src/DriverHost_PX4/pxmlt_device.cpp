@@ -110,6 +110,9 @@ void PxMltDevice::LoadConfig()
 	if (configs.Exists(L"ExperimentalISDBC"))
 		config_.device.experimental_isdbc = px4::util::wtob(configs.Get(L"ExperimentalISDBC"));
 
+	if (configs.Exists(L"ISDBCReferenceProfile"))
+		config_.device.isdbc_reference_profile = px4::util::wtob(configs.Get(L"ISDBCReferenceProfile"));
+
 	if (configs.Exists(L"ForceISDBCModulation")) {
 		const auto &raw_value = configs.Get(L"ForceISDBCModulation");
 		const auto value = px4::util::wtoui(raw_value);
@@ -699,6 +702,7 @@ PxMltDevice::PxMltReceiver::PxMltReceiver(PxMltDevice &parent, std::uintptr_t in
 	cxd2858er_.i2c = &cxd2856er_.i2c_master;
 	cxd2858er_.i2c_addr = 0x60;
 	cxd2858er_.config.xtal = 16000;
+	cxd2858er_.config.isdbc_reference_profile = parent_.config_.device.isdbc_reference_profile;
 	cxd2858er_.config.ter.lna = true;
 	cxd2858er_.config.sat.lna = true;
 
@@ -897,6 +901,7 @@ int PxMltDevice::PxMltReceiver::SetFrequency()
 		demod_params.isdbc.symbol_rate = params_.symbol_rate;
 		demod_params.isdbc.modulation = modulation;
 		demod_params.isdbc.experimental_profile = parent_.config_.device.experimental_isdbc;
+		demod_params.isdbc.reference_profile = parent_.config_.device.isdbc_reference_profile;
 		dev_info(&parent_.dev_, "px4::PxMltDevice::PxMltReceiver::SetFrequency(%u): ISDB-C freq=%u kHz, bandwidth=%u MHz, symbol_rate=%u ksym/s, modulation=%uQAM%s, experimental=%s\n",
 			 index_, params_.freq, params_.bandwidth, params_.symbol_rate, modulation,
 			 parent_.config_.device.force_isdbc_modulation ? " (DriverHost override)" : "",
@@ -936,6 +941,7 @@ int PxMltDevice::PxMltReceiver::SetFrequency()
 			break;
 
 		case px4::SystemType::ISDB_C:
+			cxd2858er_.config.isdbc_reference_profile = parent_.config_.device.isdbc_reference_profile;
 			ret = cxd2858er_set_params_c(&cxd2858er_, params_.freq, params_.bandwidth);
 			if (ret)
 				dev_err(&parent_.dev_, "px4::PxMltDevice::PxMltReceiver::SetFrequency(%u): cxd2858er_set_params_c(%u) failed. (ret: %d)\n", index_, params_.bandwidth, ret);
