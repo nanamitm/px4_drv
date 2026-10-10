@@ -133,6 +133,8 @@ public:
 	virtual int ReadStat(px4::command::StatType type, std::int32_t &value) = 0;
 
 protected:
+	/* 機種固有の正規化を自動 QAM 判定より先に行う。既存機種は変更なし。 */
+	virtual int PrepareTune() { return 0; }
 	virtual int SetFrequency() = 0;
 	virtual int SetStreamId() = 0;
 

@@ -3,6 +3,10 @@
  * Sony CXD2856ER driver (cxd2856er.c)
  *
  * Copyright (c) 2018-2021 nns779
+ * J.83B reference portions:
+ * Copyright (c) 2022 Sony Semiconductor Solutions Corporation
+ * Copyright (c) 2021 Davin zhang <Davin@tbsdtv.com>
+ * Copyright (c) 2026 Yoonji Park <koreapyj@dcmys.kr>
  */
 
 #include "print_format.h"
@@ -121,6 +125,7 @@ int cxd2856er_init(struct cxd2856er_demod *demod)
 	demod->i2c_master.request = cxd2856er_i2c_master_request;
 	demod->i2c_master.priv = demod;
 
+	demod->j83b_active = false;
 	demod->state = CXD2856ER_UNKNOWN_STATE;
 	demod->system = CXD2856ER_UNSPECIFIED_SYSTEM;
 
@@ -569,10 +574,83 @@ static int cxd2856er_sleep_isdbs(struct cxd2856er_demod *demod)
 	return 0;
 }
 
+/* 出典: Sony/TBS cxd2878_sleep() の SONY_DTV_SYSTEM_J83B (GPL-2.0)。
+ * 共通のアナログ停止だけでは J.83B 固有値が残るため、既存 T/C の前に戻す。
+ */
+static int cxd2856er_sleep_j83b(struct cxd2856er_demod *demod)
+{
+	int ret;
+	u8 data[4];
+	/* 固有値を戻す前に TS を停止する順序も出典の sleep と揃える。 */
+	ret = cxd2856er_write_slvt_reg(demod, 0x00, 0x00);
+	if (ret)
+		return ret;
+	ret = cxd2856er_write_slvt_reg(demod, 0xc3, 0x01);
+	if (ret)
+		return ret;
+	ret = cxd2856er_write_slvt_reg_mask(demod, 0x80, 0x1f, 0x1f);
+	if (ret)
+		return ret;
+	ret = cxd2856er_set_ts_pin_state(demod, false);
+	if (ret)
+		return ret;
+	ret = cxd2856er_write_slvt_reg(demod, 0x00, 0x11);
+	if (ret)
+		return ret;
+	ret = cxd2856er_write_slvt_reg(demod, 0xa3, 0x00);
+	if (ret)
+		return ret;
+	ret = cxd2856er_write_slvt_reg(demod, 0x00, 0x40);
+	if (ret)
+		return ret;
+	ret = cxd2856er_write_slvt_reg(demod, 0x21, 0x00);
+	if (ret)
+		return ret;
+	ret = cxd2856er_write_slvt_reg(demod, 0xc3, 0x00);
+	if (ret)
+		return ret;
+	ret = cxd2856er_write_slvt_reg(demod, 0xb3, 0x02);
+	if (ret)
+		return ret;
+	ret = cxd2856er_write_slvt_reg(demod, 0x1e, 0x00);
+	if (ret)
+		return ret;
+	ret = cxd2856er_write_slvt_reg(demod, 0x8e, 0x0e);
+	if (ret)
+		return ret;
+	ret = cxd2856er_write_slvt_reg(demod, 0x00, 0x41);
+	if (ret)
+		return ret;
+	ret = cxd2856er_write_slvt_reg(demod, 0xcf, 0x77);
+	if (ret)
+		return ret;
+	ret = cxd2856er_write_slvt_reg(demod, 0x00, 0x40);
+	if (ret)
+		return ret;
+	ret = cxd2856er_write_slvt_reg(demod, 0x14, 0x1f);
+	if (ret)
+		return ret;
+	data[0] = 0x09; data[1] = 0x9a; data[2] = 0x00; data[3] = 0xee;
+	ret = cxd2856er_write_slvt_regs(demod, 0x26, data, 4);
+	if (ret)
+		return ret;
+	return cxd2856er_sleep_isdbt(demod);
+}
+
 int cxd2856er_sleep(struct cxd2856er_demod *demod)
 {
 	if (demod->state == CXD2856ER_SLEEP_STATE)
 		return -EALREADY;
+
+	if (demod->j83b_active) {
+		int ret = cxd2856er_sleep_j83b(demod);
+		if (ret)
+			return ret;
+		demod->j83b_active = false;
+		demod->state = CXD2856ER_SLEEP_STATE;
+		demod->system = CXD2856ER_UNSPECIFIED_SYSTEM;
+		return 0;
+	}
 
 	switch (demod->system) {
 	case CXD2856ER_ISDB_T_SYSTEM:
@@ -1011,6 +1089,133 @@ static int cxd2856er_reset_isdbs(struct cxd2856er_demod *demod)
  * verified sequence can be added without accidentally programming terrestrial
  * settings into a cable channel.
  */
+/* Sony/TBS 公開 cxd2878.c (GPL-2.0) の SLtoACC() と
+ * SLtoACC_BandSetting(): SONY_DTV_BW_J83B_5_60_MSPS のみを移植。
+ * TS 出力は DTV02A-4TS-P で受信済みの DVB-C 参照プロファイルを再利用。
+ * J.83B 信号がない環境では非ロックと既存系統への復帰までが試験範囲で、
+ * J.83B のロック・TS 品質は未検証。5.06/5.36 Msps は対象外。
+ * IF は cxd2878.h の SONY_DEMOD_MAKE_IFFREQ_CONFIG と同じ
+ * round(3.75 / 48 * 2^24) = 0x140000。48 MHz は復調器内部の基準であり、
+ * 外部水晶 24 MHz を代入する式ではない（DVB-C 3.7 MHz と同じ基準）。
+ */
+static int cxd2856er_wakeup_j83b(struct cxd2856er_demod *demod)
+{
+	int ret;
+	u8 data[14];
+
+	demod->isdbc_lock_checks = 0;
+	dev_info(demod->dev, "CXD2856ER J.83B 5.6 Msps (experimental, unverified)\n");
+	ret = cxd2856er_set_ts_clock(demod, CXD2856ER_ISDB_C_SYSTEM, true);
+	if (ret)
+		return ret;
+	/* 途中の I/O 失敗でも次回 sleep が J.83B 固有状態を解除できるよう保持する。 */
+	demod->j83b_active = true;
+	demod->system = CXD2856ER_ISDB_C_SYSTEM;
+	demod->state = CXD2856ER_ACTIVE_STATE;
+	ret = cxd2856er_write_slvx_reg(demod, 0x00, 0x00);
+	if (ret)
+		return ret;
+	ret = cxd2856er_write_slvx_reg(demod, 0x17, 0x08);
+	if (ret)
+		return ret;
+	ret = cxd2856er_write_slvt_reg(demod, 0x00, 0x00);
+	if (ret)
+		return ret;
+	ret = cxd2856er_write_slvt_reg(demod, 0xa9, 0x00);
+	if (ret)
+		return ret;
+	ret = cxd2856er_write_slvt_reg(demod, 0x2c, 0x01);
+	if (ret)
+		return ret;
+	ret = cxd2856er_write_slvt_reg(demod, 0x4b, 0x74);
+	if (ret)
+		return ret;
+	ret = cxd2856er_write_slvt_reg(demod, 0x49, 0x00);
+	if (ret)
+		return ret;
+	ret = cxd2856er_write_slvx_reg(demod, 0x18, 0x00);
+	if (ret)
+		return ret;
+	ret = cxd2856er_write_slvt_reg(demod, 0x00, 0x11);
+	if (ret)
+		return ret;
+	ret = cxd2856er_write_slvt_reg(demod, 0x6a, 0x48);
+	if (ret)
+		return ret;
+	ret = cxd2856er_write_slvt_reg(demod, 0x00, 0x10);
+	if (ret)
+		return ret;
+	ret = cxd2856er_write_slvt_reg(demod, 0xa5, 0x01);
+	if (ret)
+		return ret;
+	ret = cxd2856er_write_slvt_reg(demod, 0x00, 0x40);
+	if (ret)
+		return ret;
+	ret = cxd2856er_write_slvt_reg(demod, 0x21, 0x04);
+	if (ret)
+		return ret;
+	ret = cxd2856er_write_slvt_reg(demod, 0xb3, 0x05);
+	if (ret)
+		return ret;
+	ret = cxd2856er_write_slvt_reg(demod, 0x1e, 0x80);
+	if (ret)
+		return ret;
+	ret = cxd2856er_write_slvt_reg(demod, 0x8e, 0x58);
+	if (ret)
+		return ret;
+	ret = cxd2856er_write_slvt_reg(demod, 0x00, 0x41);
+	if (ret)
+		return ret;
+	ret = cxd2856er_write_slvt_reg(demod, 0xcf, 0x99);
+	if (ret)
+		return ret;
+	ret = cxd2856er_write_slvt_reg(demod, 0x00, 0x11);
+	if (ret)
+		return ret;
+	ret = cxd2856er_write_slvt_reg(demod, 0xa3, 0x14);
+	if (ret)
+		return ret;
+	data[0] = 0x00; data[1] = 0x03; data[2] = 0x3b;
+	ret = cxd2856er_write_slvt_regs(demod, 0x33, data, 3);
+	if (ret)
+		return ret;
+	ret = cxd2856er_write_slvt_reg(demod, 0x00, 0x00);
+	if (ret)
+		return ret;
+	data[0] = 0x01; data[1] = 0x01;
+	ret = cxd2856er_write_slvt_regs(demod, 0xce, data, 2);
+	if (ret)
+		return ret;
+	ret = cxd2856er_write_slvt_reg(demod, 0x00, 0x10);
+	if (ret)
+		return ret;
+	data[0] = 0x31; data[1] = 0xa8; data[2] = 0x29; data[3] = 0x9b; data[4] = 0x27; data[5] = 0x9c; data[6] = 0x28; data[7] = 0x9e; data[8] = 0x29; data[9] = 0xa4; data[10] = 0x29; data[11] = 0xa2; data[12] = 0x29; data[13] = 0xa8;
+	ret = cxd2856er_write_slvt_regs(demod, 0xa6, data, 14);
+	if (ret)
+		return ret;
+	data[0] = 0x14; data[1] = 0x00; data[2] = 0x00;
+	ret = cxd2856er_write_slvt_regs(demod, 0xb6, data, 3);
+	if (ret)
+		return ret;
+	ret = cxd2856er_write_slvt_reg(demod, 0x00, 0x40);
+	if (ret)
+		return ret;
+	ret = cxd2856er_write_slvt_reg(demod, 0x14, 0x10);
+	if (ret)
+		return ret;
+	data[0] = 0x07; data[1] = 0x77; data[2] = 0x07; data[3] = 0x77;
+	ret = cxd2856er_write_slvt_regs(demod, 0x26, data, 4);
+	if (ret)
+		return ret;
+	ret = cxd2856er_write_slvt_reg(demod, 0x00, 0x00);
+	if (ret)
+		return ret;
+	ret = cxd2856er_write_slvt_reg_mask(demod, 0x80, 0x08, 0x1f);
+	if (ret)
+		return ret;
+	return cxd2856er_set_ts_pin_state(demod, true);
+}
+
 static int cxd2856er_wakeup_isdbc(struct cxd2856er_demod *demod,
 					  union cxd2856er_system_params *params)
 {
@@ -1231,6 +1436,16 @@ int cxd2856er_wakeup(struct cxd2856er_demod *demod,
 		     union cxd2856er_system_params *params)
 {
 	int ret = 0;
+	const bool j83b = system == CXD2856ER_ISDB_C_SYSTEM &&
+		params->isdbc.experimental_j83b;
+
+	/* 公開系統が同じでも J.83B と DVB-C は別モード。Sony/TBS set_mcns()
+	 * と同様に sleep を経由する。J.83B 再選局も完全な列で再構築する。 */
+	if (demod->state == CXD2856ER_ACTIVE_STATE && (j83b || demod->j83b_active)) {
+		ret = cxd2856er_sleep(demod);
+		if (ret)
+			return ret;
+	}
 
 	if (demod->state == CXD2856ER_ACTIVE_STATE) {
 		if (demod->system == system) {
@@ -1268,7 +1483,8 @@ int cxd2856er_wakeup(struct cxd2856er_demod *demod,
 		break;
 
 	case CXD2856ER_ISDB_C_SYSTEM:
-		ret = cxd2856er_wakeup_isdbc(demod, params);
+		ret = j83b ? cxd2856er_wakeup_j83b(demod) :
+			cxd2856er_wakeup_isdbc(demod, params);
 		break;
 
 	default:
@@ -1398,6 +1614,25 @@ int cxd2856er_is_ts_locked_isdbc(struct cxd2856er_demod *demod, bool *locked)
 	bool log_sample;
 
 	*locked = false;
+	if (demod->j83b_active) {
+		/* Sony/TBS read_status: Annex A/B/C 共通の bank 40:88 bit0 と
+		 * 10 bit5。FEC 計数は J.83B で意味を確認できていないため読まない。 */
+		u8 qam;
+		ret = cxd2856er_write_slvt_reg(demod, 0x00, 0x40);
+		if (ret)
+			return ret;
+		ret = cxd2856er_read_slvt_reg(demod, 0x88, &qam);
+		if (ret)
+			return ret;
+		ret = cxd2856er_read_slvt_reg(demod, 0x10, &status);
+		if (ret)
+			return ret;
+		*locked = (qam & 0x01) && (status & 0x20);
+		if ((demod->isdbc_lock_checks++ % 25) == 0 || *locked)
+			dev_info(demod->dev, "CXD2856ER J.83B: QAM sync=%u, TS lock=%u, status88=0x%02x, status10=0x%02x (unverified)\n",
+				 !!(qam & 0x01), *locked, qam, status);
+		return 0;
+	}
 	/* The lock callback runs about every 20 ms.  One sample per 500 ms keeps
 	 * the diagnostic useful without drowning the actual tune events in logs. */
 	log_sample = ((demod->isdbc_lock_checks++ % 25) == 0);

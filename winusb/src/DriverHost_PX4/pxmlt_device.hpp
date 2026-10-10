@@ -39,7 +39,7 @@ enum class PxMltDeviceModel {
 struct PxMltDeviceConfig final {
 	PxMltDeviceConfig()
 		: usb{ 816, 816, 5, false },
-		device{ 2048, 2000, true, false, false, false, 0, false }
+		device{ 2048, 2000, true, false, false, false, 0, false, false }
 	{}
 	struct {
 		unsigned int xfer_packets;
@@ -63,6 +63,8 @@ struct PxMltDeviceConfig final {
 		unsigned int force_isdbc_modulation;
 		/* Sony/TBS DVB-C 6 MHz 参照値との比較用。既定 false。 */
 		bool isdbc_reference_profile;
+		/* 信号で検証するまで ISDB-C 要求を J.83B に置換する暫定設定。 */
+		bool experimental_j83b;
 	} device;
 };
 
@@ -124,6 +126,7 @@ private:
 		int ReadStat(px4::command::StatType type, std::int32_t &value) override;
 
 	protected:
+		int PrepareTune() override;
 		int SetFrequency() override;
 		int SetStreamId() override;
 

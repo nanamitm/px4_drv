@@ -3,6 +3,10 @@
  * Sony CXD2858ER driver (cxd2858er.c)
  *
  * Copyright (c) 2018-2021 nns779
+ * J.83B reference portions:
+ * Copyright (c) 2022 Sony Semiconductor Solutions Corporation
+ * Copyright (c) 2021 Davin zhang <Davin@tbsdtv.com>
+ * Copyright (c) 2026 Yoonji Park <koreapyj@dcmys.kr>
  */
 
 #include "print_format.h"
@@ -417,6 +421,10 @@ int cxd2858er_set_params_c(struct cxd2858er_tuner *tuner,
 
 	if (bandwidth != 6)
 		return -EINVAL;
+	/* J.83B の REF_R は出典で値を確定できる水晶だけに限定する。 */
+	if (tuner->config.experimental_j83b && tuner->config.xtal != 16000 &&
+		tuner->config.xtal != 24000)
+		return -EINVAL;
 
 	ret = i2c_comm_master_gate_ctrl(tuner->i2c, true);
 	if (ret)
@@ -464,7 +472,7 @@ int cxd2858er_set_params_c(struct cxd2858er_tuner *tuner,
 	data[3] = 0x67;
 	/* cxd2878.c helene_tune_terr(): cable の REF_R は水晶周波数依存。
 	 * PXMLT は 16 MHz。既存値は比較用に参照フラグ false で保持する。 */
-	data[4] = tuner->config.isdbc_reference_profile &&
+	data[4] = (tuner->config.isdbc_reference_profile || tuner->config.experimental_j83b) &&
 		(tuner->config.xtal == 16000) ? 0x10 : 0x18;
 	data[5] = 0x1c;
 	data[6] = 0x78;
@@ -483,13 +491,18 @@ int cxd2858er_set_params_c(struct cxd2858er_tuner *tuner,
 	 * RF_GAIN=AUTO / IF_BPF_GC=4。64QAM と 256QAM の設定は共通。
 	 * 参照の helene_tune_terr() は FREIA enum で表を引くため1行ずれるが、
 	 * ここでは指定された HELENE DVB-C 6 MHz 行の値を採用する。 */
-	data[1] = tuner->config.isdbc_reference_profile ? 0x84 : 0x85;
+	data[1] = (tuner->config.isdbc_reference_profile || tuner->config.experimental_j83b) ? 0x84 : 0x85;
 	data[2] = 0x00;
 	data[3] = 0x02;
 	data[4] = 0x21;
 	data[5] = 0x00;
-	data[6] = 0x1a;
-	data[7] = 0x1c;
+	/* 出典: Sony/TBS cxd2878.c (GPL-2.0), g_terr_param_table_helene の
+	 * SONY_HELENE_DTV_J83B_5_6 と helene_tune_terr()。他の列は DVB-C 6 と
+	 * 同一。FIF_OFFSET=-5, BW_OFFSET=+2 を5bitで格納する。
+	 * 参照関数の FREIA enum と HELENE 表の添字ずれは移植せず名前で選ぶ。
+	 * 待機 50 ms は既存/出典共通の校正手順で、短縮の実測根拠がない。 */
+	data[6] = tuner->config.experimental_j83b ? 0x1b : 0x1a;
+	data[7] = tuner->config.experimental_j83b ? 0x02 : 0x1c;
 	data[8] = freq & 0xff;
 	data[9] = (freq >> 8) & 0xff;
 	data[10] = (freq >> 16) & 0x0f;

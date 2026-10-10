@@ -161,6 +161,8 @@ bool ReceiverBase::Tune(std::uint32_t timeout)
 {
 	int ret = 0;
 	std::lock_guard<std::mutex> lock(lock_);
+	if (PrepareTune())
+		return false;
 	const bool isdbc_auto_qam = params_.system == px4::SystemType::ISDB_C &&
 		params_.modulation == 0;
 
