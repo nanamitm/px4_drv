@@ -1188,18 +1188,19 @@ int PxMltDevice::PxMltReceiver::ReadStat(px4::command::StatType type, std::int32
 		case px4::SystemType::ISDB_C:
 		{
 			std::uint16_t val;
-			/* 既存の64QAM換算を J.83B 256QAM に流用する根拠がないため、
-			 * C/N 数値は未対応とする。ロックは別の共通ステータスで判定する。 */
-			if (parent_.config_.device.experimental_j83b) {
-				ret = -ENOSYS;
-				break;
-			}
-
+			/* J.83B (実験) でも同じ推定値を返す。公開ドライバ cxd2841er.c の
+			 * cxd2841er_read_snr() は Annex A / B / C のすべてで
+			 * cxd2841er_read_snr_c() (bank 0x40, reg 0x4c-0x4d) を呼び、
+			 * 16 / 64 / 256QAM は同じ換算式 -9.50 * ln(reg / 24320) を使う。
+			 * 以前は J.83B 256QAM への流用を保留して -ENOSYS を返していたため、
+			 * BonDriver の GetSignalLevel が受信中も 0 のままになり、TVTest の
+			 * チャンネルスキャンが「信号レベルが低い」としてチャンネルを飛ばし得た。
+			 * J.83B の実信号に対する値の妥当性は、受信報告での確認待ち。 */
 			ret = cxd2856er_read_cnr_raw_isdbc(&cxd2856er_, &val);
 			if (ret)
 				break;
 
-			/* QAM 64 C/N estimate: -9.50 * ln(estimate / 24320), in mdB. */
+			/* 16/64/256QAM C/N estimate: -9.50 * ln(estimate / 24320), in mdB. */
 			if (val) {
 				const double estimate = static_cast<double>((val < 126) ? 126 : val);
 				value = static_cast<std::int32_t>(-9500.0 * std::log(estimate) + 95941.0);
