@@ -61,20 +61,9 @@ bool BonDriver::Init()
 {
 	try {
 		const std::wstring &dir_path = px4::util::path::GetDir();
-		/* GetFileBase() already contains the module's full path.  Prefixing
-		 * dir_path once more produced an invalid path when this DLL was loaded
-		 * as dantto4k's inner BonDriver, hiding the useful Init diagnostics. */
-		const std::wstring log_path = px4::util::path::GetFileBase() + L".log";
 
-		/* ISDB-C diagnostic build: retain every SetChannel decision in a file. */
-		if (msg_open_file(log_path.c_str()))
-			msg_set_mode(MSG_MODE_LOG_FILE);
-		msg_info("Init: directory configured\n");
-
-		if (!configs_.Load(px4::util::path::GetFileBase() + L".ini")) {
-			msg_err("Init: cannot load configuration\n");
+		if (!configs_.Load(px4::util::path::GetFileBase() + L".ini"))
 			return false;
-		}
 
 		std::size_t num_packets = 1024;
 		std::uintptr_t max_buffers = 64, min_buffers = 4;
@@ -84,6 +73,24 @@ bool BonDriver::Init()
 			const px4::Config &bon_config = configs_.Get(L"BonDriver");
 			const std::wstring &mode = bon_config.Get(L"System", L"ISDB-T");
 			WCHAR path[MAX_PATH];
+
+			/* 選局ごとの判断を残す診断ログ。ログ出力のない従来の動作を既定とし、
+			 * DriverHost_PX4.ini と同じ DebugLog / DebugLogPath で有効にする。
+			 * ファイルは開くたびに作り直すため、前回の内容は残らない。
+			 * DLL は TVTest や dantto4k など任意の作業フォルダーから読み込まれるため、
+			 * 相対パスは DLL のフォルダーを基準に解決する。 */
+			if (px4::util::wtob(bon_config.Get(L"DebugLog", L"false"))) {
+				/* GetFileBase() already contains the module's full path.  Prefixing
+				 * dir_path once more produced an invalid path when this DLL was loaded
+				 * as dantto4k's inner BonDriver, hiding the useful Init diagnostics. */
+				std::wstring log_path = bon_config.Get(L"DebugLogPath", px4::util::path::GetFileBase() + L".log");
+
+				if (PathIsRelativeW(log_path.c_str()) && PathCanonicalizeW(path, (dir_path + log_path).c_str()))
+					log_path = path;
+
+				if (msg_open_file(log_path.c_str()))
+					msg_set_mode(MSG_MODE_LOG_FILE);
+			}
 
 			if (!px4::util::ParseSystemStr(mode, systems_))
 				return false;

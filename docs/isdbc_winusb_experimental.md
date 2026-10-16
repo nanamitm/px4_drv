@@ -116,6 +116,16 @@ DebugLogPath="DriverHost_PX4.log"
 
 `DebugLog=false` にするとログを作成しません。ログには選局した方式・周波数・復調ロック状態が出力されます。
 
+BonDriver 側の選局ログ (ChSet から解決した周波数、周波数補正、変調方式、選局の成否) は、`BonDriver_PX-MLT.ini` の `[BonDriver]` で同じ名前の設定を使って有効にできます。既定は `DebugLog=false` で、ログファイルを作成しません。
+
+```ini
+[BonDriver]
+DebugLog=true
+DebugLogPath="BonDriver_PX-MLT.log"
+```
+
+`DebugLogPath` を省略すると、DLL と同じ名前の `.log` へ出力します。相対パスは DLL と同じフォルダを基準にします。ファイルは BonDriver を開くたびに作り直されるため、前回の内容を残す場合は開き直す前にコピーしてください。
+
 ## Linux
 
 > [!WARNING]
