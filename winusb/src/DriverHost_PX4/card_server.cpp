@@ -310,7 +310,12 @@ void CardServer::CardConnection::Worker() noexcept
 					/* 監視用パイプが生きている間だけカード状態と ATR を保持する */
 					monitored_cards_.emplace(command.reader_name, status_card);
 				}
-				std::lock_guard<std::recursive_mutex> lock(status_card->io_mutex);
+				/* 状態監視を他接続のトランザクション待ちへ入れると、API 側の期限とキャンセルを確認できない */
+				std::unique_lock<std::recursive_mutex> lock(status_card->io_mutex, std::try_to_lock);
+				if (!lock.owns_lock()) {
+					SetError(command, -EBUSY);
+					break;
+				}
 				ret = status_card->card.GetStatus(command.card_present,
 					command.card_initialized, atr);
 				if (ret) {

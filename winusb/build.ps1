@@ -71,6 +71,11 @@ foreach ($build_platform in $build_platforms) {
     & "build/$build_platform/Release-static/pipe_shutdown_test.exe"
     if ($LASTEXITCODE -ne 0) { throw "Pipe shutdown test failed. platform: $build_platform" }
 
+    msbuild tests/card_status_wait_test.vcxproj /p:"Configuration=Release-static;Platform=$build_platform;PlatformToolset=v143"
+    if ($LASTEXITCODE -ne 0) { throw "Card status wait test build failed. platform: $build_platform" }
+    & "build/$build_platform/Release-static/card_status_wait_test.exe"
+    if ($LASTEXITCODE -ne 0) { throw "Card status wait test failed. platform: $build_platform" }
+
     # 選局時の TS バッファ初期化が読み書きと競合しても止まらないことを毎回検証
     & "build/$build_platform/Release-static/ringbuffer_purge_test.exe"
     if ($LASTEXITCODE -ne 0) {

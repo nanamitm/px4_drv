@@ -428,6 +428,11 @@ LONG GetStatusChange(SCARDCONTEXT context_handle, DWORD timeout,
 				bool initialized = false;
 				std::vector<std::uint8_t> atr;
 				LONG result = QueryStatus(*px4_client, reader, present, initialized, atr);
+				if (result == SCARD_E_SHARING_VIOLATION) {
+					/* 監視がトランザクションへ割り込まず、共通の期限・キャンセル判定まで戻る */
+					states[index].dwEventState = states[index].dwCurrentState & ~SCARD_STATE_CHANGED;
+					continue;
+				}
 				DWORD event_state;
 				/* Windows は不明なリーダーを以後の監視対象から外す */
 				if (result == SCARD_E_UNKNOWN_READER)
