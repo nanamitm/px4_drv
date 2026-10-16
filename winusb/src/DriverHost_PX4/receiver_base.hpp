@@ -43,6 +43,7 @@ public:
 		void Start() noexcept;
 		void Stop() noexcept;
 		void StopRequest() noexcept;
+		void PrepareRead() noexcept;
 		/* The input side must retain null packets for a TSMF frame.  This
 		 * filter runs at the final output stage: after TSMF selection when
 		 * enabled, and directly on ordinary TS otherwise. */
@@ -70,6 +71,7 @@ public:
 		std::mutex tsmf_mtx_;
 		px4::RingBuffer ringbuf_;
 		std::atomic_bool stop_;
+		bool read_stop_;
 		std::atomic_uint64_t input_packet_count_;
 		std::condition_variable cond_;
 		std::size_t write_size_;

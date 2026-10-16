@@ -65,6 +65,7 @@ void StreamServer::StreamConnection::Worker() noexcept
 				break;
 			}
 
+			receiver->GetStreamBuffer()->PrepareRead();
 			try {
 				stream_th.reset(new std::thread(&px4::StreamServer::StreamConnection::StreamWorker, this, receiver->GetStreamBuffer()));
 			} catch (...) {

@@ -61,6 +61,7 @@ void StreamServer::StreamConnection::Worker() noexcept
 			receiver = receiver_manager_.SearchByDataId(cmd->data_id);
 			if (!receiver) { ret = false; break; }
 
+			receiver->GetStreamBuffer()->PrepareRead();
 			try {
 				stream_th.reset(new std::thread(
 					&px4::StreamServer::StreamConnection::StreamWorker,
