@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <memory>
 #include <mutex>
 #include <unordered_map>
@@ -23,6 +24,8 @@ private:
 		std::shared_ptr<DeviceBase> device;
 		SmartCard card;
 		std::recursive_mutex io_mutex;
+		/* io_mutex を保持中の処理が、短い I/O か接続をまたぐトランザクションかを STATUS が区別する */
+		std::atomic_bool transaction_active{false};
 		std::size_t shared_connections = 0;
 		bool exclusive_connection = false;
 	};

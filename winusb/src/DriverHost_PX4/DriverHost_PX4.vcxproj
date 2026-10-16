@@ -301,6 +301,7 @@
     <ClInclude Include="..\common\util.hpp" />
     <ClInclude Include="ctrl_server.hpp" />
 	<ClInclude Include="card_server.hpp" />
+	<ClInclude Include="card_status_lock.hpp" />
 	<ClInclude Include="card_device.hpp" />
     <ClInclude Include="device_base.hpp" />
     <ClInclude Include="device_definition_set.hpp" />

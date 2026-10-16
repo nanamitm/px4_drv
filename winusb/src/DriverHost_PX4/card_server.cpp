@@ -5,6 +5,7 @@
 #include <vector>
 
 #include "card_command.hpp"
+#include "card_status_lock.hpp"
 
 namespace px4 {
 
@@ -136,6 +137,7 @@ void CardServer::CardConnection::ReleaseCard() noexcept
 	if (!card_)
 		return;
 	if (transaction_) {
+		card_->transaction_active = false;
 		card_->io_mutex.unlock();
 		transaction_ = false;
 	}
@@ -311,8 +313,8 @@ void CardServer::CardConnection::Worker() noexcept
 					monitored_cards_.emplace(command.reader_name, status_card);
 				}
 				/* 状態監視を他接続のトランザクション待ちへ入れると、API 側の期限とキャンセルを確認できない */
-				std::unique_lock<std::recursive_mutex> lock(status_card->io_mutex, std::try_to_lock);
-				if (!lock.owns_lock()) {
+				std::unique_lock<std::recursive_mutex> lock(status_card->io_mutex, std::defer_lock);
+				if (!LockCardForStatus(lock, status_card->transaction_active)) {
 					SetError(command, -EBUSY);
 					break;
 				}
@@ -375,6 +377,7 @@ void CardServer::CardConnection::Worker() noexcept
 					break;
 				}
 				card_->io_mutex.lock();
+				card_->transaction_active = true;
 				transaction_ = true;
 				break;
 
@@ -404,6 +407,7 @@ void CardServer::CardConnection::Worker() noexcept
 						}
 					}
 					/* disposition の成否にかかわらず、終了要求で排他状態を解除する */
+					card_->transaction_active = false;
 					card_->io_mutex.unlock();
 					transaction_ = false;
 					if (ret)
