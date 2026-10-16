@@ -3,6 +3,7 @@
 // ReceiverInfo (with wchar_t[96] fields) is ~820 bytes vs ~428 on Windows.
 
 #include "ctrl_server.hpp"
+#include "command_reader.hpp"
 
 namespace px4 {
 
@@ -101,7 +102,7 @@ void CtrlServer::CtrlConnection::Worker() noexcept
 		bool ret = true;
 		std::size_t read;
 
-		if (!conn_->Read(buf.get(), size, read, quit_event_))
+		if (!px4::ReadControlCommand(*conn_, buf.get(), size, read, quit_event_))
 			break;
 
 		/* 短いメッセージで未受信領域を解釈しないよう、ヘッダーを先に検査する */

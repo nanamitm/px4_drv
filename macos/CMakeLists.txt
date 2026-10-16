@@ -193,3 +193,8 @@ add_custom_command(TARGET DriverHost_PX4 POST_BUILD
         "$<TARGET_FILE_DIR:DriverHost_PX4>/DriverHost_PX4.ini"
     COMMENT "Copying DriverHost_PX4.ini to build directory"
 )
+
+include(CTest)
+if(BUILD_TESTING)
+    add_subdirectory(tests)
+endif()

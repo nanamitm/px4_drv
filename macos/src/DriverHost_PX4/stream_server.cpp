@@ -8,6 +8,7 @@
 
 #include "msg.h"
 #include "command.hpp"
+#include "command_reader.hpp"
 #include "misc_posix.h"
 
 namespace px4 {
@@ -42,13 +43,8 @@ void StreamServer::StreamConnection::Worker() noexcept
 	std::unique_ptr<std::thread> stream_th;
 
 	while (true) {
-		std::size_t read;
-
-		if (!conn_->Read(buf.get(), size, read, quit_event_))
-			break;
-
-		/* 短い受信で未初期化領域を解釈しないよう、構造体の長さを先に検査する */
-		if (read < sizeof(px4::command::DataCmd))
+		/* データ接続にもコマンド全体が揃うまで待ち、次のコマンドを読み込まない */
+		if (!px4::ReadExact(*conn_, buf.get(), sizeof(px4::command::DataCmd), quit_event_))
 			break;
 
 		int ret = true;
