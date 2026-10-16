@@ -178,7 +178,8 @@ DriverHost_PX4 は、カードリーダー名ごとに `SharedCard` を共有し
 他接続の `TRANSMIT` や `RESET` は有限時間で終わるため、`STATUS` はその終了を待ってから照会し、APDU 送信中の照会を `BUSY` にしません。
 他接続のトランザクションは利用者が終了するまで続くため、その間の `STATUS` コマンドは待機せず `BUSY` を返します。
 `SCardGetStatusChange*()` はこの応答を状態未確定として扱い、呼び出し全体のタイムアウトとキャンセルを確認しながら再照会します。
-`SCardConnect()` と `SCardStatus*()` などの単発照会には `SCARD_E_SHARING_VIOLATION` が返るため、トランザクション終了後に再照会できます。
+`SCardStatus*()` などの単発照会には `SCARD_E_SHARING_VIOLATION` が返るため、トランザクション終了後に再照会できます。
+`SCardConnect()` は接続失敗を再試行しない利用者がカードなしで処理を始めないよう、従来どおりトランザクションの終了を待ってから接続します。待機中にコンテキストが解放された場合は `SCARD_E_INVALID_HANDLE` を返します。
 IPC の構造体と版番号に変更はありません。タイムアウト0の監視では、照会できたリーダーの変化がなければ `SCARD_E_TIMEOUT` が返ります。
 
 ## カード状態の管理

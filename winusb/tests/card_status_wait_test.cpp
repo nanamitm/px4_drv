@@ -49,8 +49,26 @@ int main()
  busy = false;
  ok = ok && SCardGetStatusChangeW(context, 0, &state, 1) == SCARD_S_SUCCESS;
  ok = ok && (state.dwEventState & SCARD_STATE_PRESENT);
+ // 他接続のトランザクション中の接続は失敗させず、終了を待って成功させる。
+ busy = true;
+ queries = 0;
+ std::atomic_bool connected{false};
+ LONG connect_result = SCARD_F_INTERNAL_ERROR;
+ SCARDHANDLE card = 0;
+ DWORD protocol = 0;
+ std::thread connector([&] {
+  connect_result = SCardConnectW(context, L"PX4 test reader", SCARD_SHARE_SHARED,
+   SCARD_PROTOCOL_T1, &card, &protocol);
+  connected = true;
+ });
+ while (queries < 3) std::this_thread::yield();
+ ok = ok && !connected;
+ busy = false;
+ connector.join();
+ ok = ok && connect_result == SCARD_S_SUCCESS && card && protocol == SCARD_PROTOCOL_T1;
+ ok = ok && SCardDisconnect(card, SCARD_LEAVE_CARD) == SCARD_S_SUCCESS;
  ok = ok && SCardReleaseContext(context) == SCARD_S_SUCCESS;
  done = true; watchdog.join();
- std::puts(ok ? "card_status_wait_test: passed (zero/finite timeout, cancel, recovery)" : "card_status_wait_test: failed");
+ std::puts(ok ? "card_status_wait_test: passed (zero/finite timeout, cancel, recovery, connect wait)" : "card_status_wait_test: failed");
  return ok ? 0 : 1;
 }

@@ -610,6 +610,18 @@ LONG ConnectCard(SCARDCONTEXT context_handle, const ReaderChar *reader_name,
 	bool initialized = false;
 	std::vector<std::uint8_t> atr;
 	result = QueryStatus(*client, reader, present, initialized, atr);
+	/* STATUS は他接続のトランザクション中に待たず BUSY を返すが、SCardConnect() は
+	 * 従来どおりトランザクションの終了を待って接続する。録画ソフトが接続失敗を
+	 * 再試行しない場合に、カードなしで録画を始めさせないため。
+	 * 間隔は状態変化の監視と同じ 50 ms とし、待機中にコンテキストが解放されたら止める。 */
+	while (result == SCARD_E_SHARING_VIOLATION) {
+		if (!FindContext(context_handle)) {
+			result = SCARD_E_INVALID_HANDLE;
+			break;
+		}
+		std::this_thread::sleep_for(std::chrono::milliseconds(50));
+		result = QueryStatus(*client, reader, present, initialized, atr);
+	}
 	if (result != SCARD_S_SUCCESS || !present || !initialized) {
 		disconnect();
 		return result == SCARD_S_SUCCESS ? SCARD_E_NO_SMARTCARD : result;
