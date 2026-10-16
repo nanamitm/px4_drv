@@ -19,7 +19,7 @@ PipeServer::~PipeServer()
 	if (!IsConnected())
 		return;
 
-	FlushFileBuffers(handle_);
+	/* 読み出しを止めたクライアントは終了を妨げるため、破棄時は未読データを待たず切断する */
 	DisconnectNamedPipe(handle_);
 }
 

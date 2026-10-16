@@ -66,6 +66,11 @@ foreach ($build_platform in $build_platforms) {
     & "build/$build_platform/Release-static/stream_stop_test.exe"
     if ($LASTEXITCODE -ne 0) { throw "Stream stop test failed. platform: $build_platform" }
 
+    msbuild tests/pipe_shutdown_test.vcxproj /p:"Configuration=Release-static;Platform=$build_platform;PlatformToolset=v143"
+    if ($LASTEXITCODE -ne 0) { throw "Pipe shutdown test build failed. platform: $build_platform" }
+    & "build/$build_platform/Release-static/pipe_shutdown_test.exe"
+    if ($LASTEXITCODE -ne 0) { throw "Pipe shutdown test failed. platform: $build_platform" }
+
     # 選局時の TS バッファ初期化が読み書きと競合しても止まらないことを毎回検証
     & "build/$build_platform/Release-static/ringbuffer_purge_test.exe"
     if ($LASTEXITCODE -ne 0) {

@@ -115,7 +115,7 @@ void CtrlServer::CtrlConnection::Worker() noexcept
 			std::size_t written;
 
 			hdr->status = px4::command::CtrlStatusCode::FAILED;
-			if (!conn_->Write(buf.get(), read, written) || read != written)
+			if (!conn_->Write(buf.get(), read, written, quit_event_) || read != written)
 				break;
 
 			continue;
@@ -267,7 +267,7 @@ void CtrlServer::CtrlConnection::Worker() noexcept
 			break;
 
 		std::size_t written;
-		if (!conn_->Write(buf.get(), read, written) || read != written)
+		if (!conn_->Write(buf.get(), read, written, quit_event_) || read != written)
 			break;
 	}
 

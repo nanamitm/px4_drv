@@ -415,7 +415,7 @@ void CardServer::CardConnection::Worker() noexcept
 		}
 
 		std::size_t written = 0;
-		if (!conn_->Write(&command, sizeof(command), written) || written != sizeof(command))
+		if (!conn_->Write(&command, sizeof(command), written, quit_event_) || written != sizeof(command))
 			break;
 	}
 
