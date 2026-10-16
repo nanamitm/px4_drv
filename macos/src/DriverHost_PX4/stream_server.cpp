@@ -31,12 +31,17 @@ StreamServer::CreateConnection(std::unique_ptr<px4::PipeServer> &pipe)
 
 StreamServer::StreamConnection::StreamConnection(
 	ServerBase &parent, std::unique_ptr<px4::PipeServer> &pipe) noexcept
-	: Connection(parent, pipe)
+	: Connection(parent, pipe),
+	stream_quit_event_(CreateEventW(nullptr, TRUE, FALSE, nullptr))
 {
 }
 
 void StreamServer::StreamConnection::Worker() noexcept
 {
+	if (!stream_quit_event_) {
+		delete this;
+		return;
+	}
 	std::size_t size = config_.in_buffer_size;
 	std::unique_ptr<std::uint8_t[]> buf(new std::uint8_t[size]);
 	px4::ReceiverBase *receiver = nullptr;
@@ -80,6 +85,8 @@ void StreamServer::StreamConnection::Worker() noexcept
 		if (!ret) break;
 	}
 
+	/* 接続終了時はホスト全体の停止を待たず、詰まった送信も取り消す */
+	SetEvent(stream_quit_event_);
 	if (receiver && stream_th) {
 		receiver->GetStreamBuffer()->StopRequest();
 		stream_th->join();
@@ -99,7 +106,7 @@ void StreamServer::StreamConnection::StreamWorker(
 	stream_buf->HandleRead(
 		config_.out_buffer_size / 4,
 		[this](const void *buf, std::size_t size) {
-			return conn_->Write(buf, size, size, quit_event_);
+			return conn_->Write(buf, size, size, stream_quit_event_);
 		});
 
 	msg_dbg("px4::StreamServer::StreamConnection::StreamWorker: exit\n");
