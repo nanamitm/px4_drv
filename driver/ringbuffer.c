@@ -202,16 +202,20 @@ int ringbuffer_read_user(struct ringbuffer *ringbuf,
 			size_t tmp = buf_size - head;
 
 			res = copy_to_user(buf, p + head, tmp);
-			if (likely(!res))
+			if (unlikely(res)) {
+				/* 前半で失敗した場合、未実行の後半を消費量へ含めない */
+				read_size = tmp - res;
+				ret = -EFAULT;
+			} else {
 				res = copy_to_user(((u8 *)buf) + tmp, p,
 						   read_size - tmp);
-
-			if (unlikely(res)) {
 				read_size -= res;
-				ret = -EFAULT;
+				if (unlikely(res))
+					ret = -EFAULT;
 			}
 
-			head = read_size - tmp;
+			/* 前半の途中で止まった場合は、折り返し前の位置を維持する */
+			head = (head + read_size) % buf_size;
 		}
 
 		atomic_xchg(&ringbuf->head, head);

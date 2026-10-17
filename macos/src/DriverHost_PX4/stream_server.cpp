@@ -8,6 +8,7 @@
 
 #include "msg.h"
 #include "command.hpp"
+#include "command_reader.hpp"
 #include "misc_posix.h"
 
 namespace px4 {
@@ -30,25 +31,25 @@ StreamServer::CreateConnection(std::unique_ptr<px4::PipeServer> &pipe)
 
 StreamServer::StreamConnection::StreamConnection(
 	ServerBase &parent, std::unique_ptr<px4::PipeServer> &pipe) noexcept
-	: Connection(parent, pipe)
+	: Connection(parent, pipe),
+	stream_quit_event_(CreateEventW(nullptr, TRUE, FALSE, nullptr))
 {
 }
 
 void StreamServer::StreamConnection::Worker() noexcept
 {
+	if (!stream_quit_event_) {
+		delete this;
+		return;
+	}
 	std::size_t size = config_.in_buffer_size;
 	std::unique_ptr<std::uint8_t[]> buf(new std::uint8_t[size]);
 	px4::ReceiverBase *receiver = nullptr;
 	std::unique_ptr<std::thread> stream_th;
 
 	while (true) {
-		std::size_t read;
-
-		if (!conn_->Read(buf.get(), size, read, quit_event_))
-			break;
-
-		/* 短い受信で未初期化領域を解釈しないよう、構造体の長さを先に検査する */
-		if (read < sizeof(px4::command::DataCmd))
+		/* データ接続にもコマンド全体が揃うまで待ち、次のコマンドを読み込まない */
+		if (!px4::ReadExact(*conn_, buf.get(), sizeof(px4::command::DataCmd), quit_event_))
 			break;
 
 		int ret = true;
@@ -61,6 +62,7 @@ void StreamServer::StreamConnection::Worker() noexcept
 			receiver = receiver_manager_.SearchByDataId(cmd->data_id);
 			if (!receiver) { ret = false; break; }
 
+			receiver->GetStreamBuffer()->PrepareRead();
 			try {
 				stream_th.reset(new std::thread(
 					&px4::StreamServer::StreamConnection::StreamWorker,
@@ -83,6 +85,8 @@ void StreamServer::StreamConnection::Worker() noexcept
 		if (!ret) break;
 	}
 
+	/* 接続終了時はホスト全体の停止を待たず、詰まった送信も取り消す */
+	SetEvent(stream_quit_event_);
 	if (receiver && stream_th) {
 		receiver->GetStreamBuffer()->StopRequest();
 		stream_th->join();
@@ -102,7 +106,7 @@ void StreamServer::StreamConnection::StreamWorker(
 	stream_buf->HandleRead(
 		config_.out_buffer_size / 4,
 		[this](const void *buf, std::size_t size) {
-			return conn_->Write(buf, size, size, quit_event_);
+			return conn_->Write(buf, size, size, stream_quit_event_);
 		});
 
 	msg_dbg("px4::StreamServer::StreamConnection::StreamWorker: exit\n");

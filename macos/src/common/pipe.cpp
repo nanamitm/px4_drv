@@ -4,6 +4,7 @@
 #include "pipe.hpp"
 
 #include <cerrno>
+#include <cstdint>
 #include <cstring>
 
 #include <sys/socket.h>
@@ -88,10 +89,14 @@ bool Pipe::Read(void *buf, std::size_t size, std::size_t &return_size,
 			return false;
 		}
 
+		if (pfds[0].revents & (POLLERR | POLLNVAL)) {
+			error_.assign(EIO, std::generic_category());
+			return false;
+		}
 		if (pfds[0].revents & (POLLIN | POLLHUP)) {
-			ssize_t n = ::recv(fd, buf, size, 0);
+			ssize_t n = ::recv(fd, buf, size, MSG_DONTWAIT);
 			if (n < 0) {
-				if (errno == EINTR) continue;
+				if (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK) continue;
 				error_.assign(errno, std::generic_category());
 				return false;
 			}
@@ -156,11 +161,20 @@ bool Pipe::Write(const void *buf, std::size_t size, std::size_t &return_size,
 			return false;
 		}
 
+		/* poll() 後も send() 自体が待機しないようにし、毎回キャンセルを確認する */
+		if (pfds[0].revents & (POLLERR | POLLHUP | POLLNVAL)) {
+			error_.assign(EPIPE, std::generic_category());
+			return false;
+		}
 		if (pfds[0].revents & POLLOUT) {
-			ssize_t n = ::send(fd, p, left, MSG_NOSIGNAL);
+			ssize_t n = ::send(fd, p, left, MSG_NOSIGNAL | MSG_DONTWAIT);
 			if (n < 0) {
-				if (errno == EINTR) continue;
+				if (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK) continue;
 				error_.assign(errno, std::generic_category());
+				return false;
+			}
+			if (n == 0) {
+				error_.assign(EPIPE, std::generic_category());
 				return false;
 			}
 			p           += n;
@@ -189,8 +203,14 @@ bool Pipe::Call(const void *buf_in, std::size_t size_in,
 	if (!Write(buf_in, size_in, ret_size) || ret_size != size_in)
 		return false;
 
-	if (!Read(buf_out, size_out, ret_size) || ret_size != size_out)
-		return false;
+	/* 応答側も SOCK_STREAM の分割を吸収し、要求した長さだけ消費する */
+	auto *out = static_cast<std::uint8_t *>(buf_out);
+	while (size_out) {
+		if (!Read(out, size_out, ret_size) || !ret_size)
+			return false;
+		out += ret_size;
+		size_out -= ret_size;
+	}
 
 	return true;
 }

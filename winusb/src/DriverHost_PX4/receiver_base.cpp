@@ -273,7 +273,9 @@ bool ReceiverBase::ReadStats(px4::command::StatSet &stat_set)
 }
 
 ReceiverBase::StreamBuffer::StreamBuffer()
-	: input_packet_count_(0),
+	: stop_(false),
+	read_stop_(false),
+	input_packet_count_(0),
 	write_size_(0),
 	threshold_size_(0),
 	discard_null_packets_on_output_(false),
@@ -324,7 +326,10 @@ bool ReceiverBase::StreamBuffer::Alloc(std::size_t size)
 
 void ReceiverBase::StreamBuffer::Start() noexcept
 {
-	stop_ = false;
+	{
+		std::lock_guard<std::mutex> lock(mtx_);
+		stop_ = false;
+	}
 	write_size_ = 0;
 	input_packet_count_ = 0;
 	{
@@ -345,18 +350,31 @@ void ReceiverBase::StreamBuffer::Stop() noexcept
 {
 	ringbuf_.Stop();
 
-	stop_ = true;
+	{
+		std::lock_guard<std::mutex> lock(mtx_);
+		stop_ = true;
+	}
 	cond_.notify_all();
 
 	return;
 }
 
+void ReceiverBase::StreamBuffer::PrepareRead() noexcept
+{
+	std::lock_guard<std::mutex> lock(mtx_);
+	/* 新しい接続の開始前にだけ解除し、遅れて起動したスレッドに停止要求を消させない */
+	stop_ = false;
+	read_stop_ = false;
+}
+
 void ReceiverBase::StreamBuffer::StopRequest() noexcept
 {
-	stop_ = true;
+	{
+		std::lock_guard<std::mutex> lock(mtx_);
+		/* 受信開始による stop_ の解除と、接続を閉じる要求を分ける */
+		read_stop_ = true;
+	}
 	cond_.notify_all();
-
-	return;
 }
 
 void ReceiverBase::StreamBuffer::SetDiscardNullPacketsOnOutput(bool enabled) noexcept
@@ -657,6 +675,8 @@ bool ReceiverBase::StreamBuffer::TsmfSelectPacket(const std::uint8_t *packet) no
 void ReceiverBase::StreamBuffer::NotifyWrite() noexcept
 {
 	if (write_size_ >= threshold_size_) {
+		/* 条件確認と wait() の間へ通知が落ちないよう、待機側と同期する */
+		std::lock_guard<std::mutex> lock(mtx_);
 		cond_.notify_all();
 		write_size_ -= threshold_size_;
 	}
@@ -665,32 +685,30 @@ void ReceiverBase::StreamBuffer::NotifyWrite() noexcept
 
 void ReceiverBase::StreamBuffer::HandleRead(std::size_t buf_size, std::function<bool(const void *buf, std::size_t size)> handler)
 {
-	stop_ = false;
-
 	std::unique_ptr<std::uint8_t[]> buf(new std::uint8_t[buf_size]);
 	std::uint8_t *p = buf.get();
 	std::unique_lock<std::mutex> lock(mtx_);
 
-	while (!ringbuf_.IsActive() && !stop_)
+	while (!ringbuf_.IsActive() && !stop_ && !read_stop_)
 		cond_.wait(lock);
 
 	while (true) {
-		while (!ringbuf_.GetReadableSize() && !stop_)
+		while (!ringbuf_.GetReadableSize() && !stop_ && !read_stop_)
 			cond_.wait(lock);
 
-		if (stop_)
+		if (stop_ || read_stop_)
 			break;
 
+		/* パイプ送信が待機しても受信側の通知と停止要求を塞がない */
+		lock.unlock();
 		std::size_t size = buf_size;
 
 		if (!ringbuf_.Read(p, size))
 			break;
 
-		if (!size)
-			continue;
-
-		if (!handler(p, size))
+		if (size && !handler(p, size))
 			break;
+		lock.lock();
 	}
 
 	return;
