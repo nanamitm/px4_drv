@@ -9,7 +9,10 @@ enum msg_mode {
 	MSG_MODE_NONE = 0x0000,
 	MSG_MODE_CONSOLE = 0x0001,
 	MSG_MODE_DEBUGGER = 0x0002,
-	MSG_MODE_LOG_FILE = 0x0004
+	MSG_MODE_LOG_FILE = 0x0004,
+	/* 行頭へローカル時刻 (ミリ秒まで) を付ける。録画ソフトのドロップ記録と
+	 * 照合するための指定で、既存の出力書式を保つため既定では付けない。 */
+	MSG_MODE_TIMESTAMP = 0x0008
 };
 
 #ifdef __cplusplus
