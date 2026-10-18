@@ -497,6 +497,7 @@ int PxMltDevice::StartCapture()
 		it930x_.bus.usb.streaming.no_raw_io = config_.usb.no_raw_io;
 
 		stream_ctx_.remain_len = 0;
+		stream_ctx_.stats = {};
 
 		ret = itedtv_bus_start_streaming(&it930x_.bus, StreamHandler, this);
 		if (ret) {
@@ -523,6 +524,9 @@ int PxMltDevice::StopCapture()
 	if (!streaming_count_) {
 		dev_dbg(&dev_, "px4::PxMltDevice::StopCapture: stopping...\n");
 		itedtv_bus_stop_streaming(&it930x_.bus);
+		/* 受信スレッドの停止後に、間引きで出力されなかった分を含む累計を残す */
+		if (stream_ctx_.stats.resync_events)
+			LogStreamStats(true);
 	} else {
 		dev_dbg(&dev_, "px4::PxMltDevice::StopCapture: streaming_count_: %u\n", streaming_count_);
 	}
@@ -530,7 +534,7 @@ int PxMltDevice::StopCapture()
 	return 0;
 }
 
-void PxMltDevice::StreamProcess(std::shared_ptr<px4::ReceiverBase::StreamBuffer> stream_buf[], int num, std::uint8_t **buf, std::size_t &len)
+void PxMltDevice::StreamProcess(std::shared_ptr<px4::ReceiverBase::StreamBuffer> stream_buf[], int num, std::uint8_t **buf, std::size_t &len, StreamStats &stats)
 {
 	std::uint8_t *p = *buf;
 	std::size_t remain = len;
@@ -553,6 +557,38 @@ void PxMltDevice::StreamProcess(std::shared_ptr<px4::ReceiverBase::StreamBuffer>
 			break;
 
 		if (i < PXMLT_DEVICE_TS_SYNC_COUNT) {
+			if (stats.aligned) {
+				/* 配信済みパケットの直後で同期を失ったため、ここはパケット境界と分かる。
+				 * 境界を保ったまま先読みし、bit7 以外は同期値と一致するパケットを
+				 * 誤りフラグ付きとして数える。読み飛ばし処理そのものは変えない。 */
+				const std::uint8_t *q = p;
+				std::size_t r = remain;
+				int good_run = 0;
+
+				while (r >= 188 && good_run < PXMLT_DEVICE_TS_SYNC_COUNT) {
+					if (px4_ts_has_tagged_sync(q[0])) {
+						good_run++;
+					} else if ((q[0] & 0x0f) == 0x07) {
+						u8 id = (q[0] & 0x70) >> 4;
+
+						if (id && id <= 5)
+							stats.error_flagged[id - 1]++;
+						good_run = 0;
+					} else {
+						break;
+					}
+					q += 188;
+					r -= 188;
+				}
+
+				stats.aligned = false;
+			}
+			if (!stats.in_resync) {
+				stats.in_resync = true;
+				stats.resync_events++;
+			}
+			stats.skipped_bytes++;
+
 			p++;
 			remain--;
 			continue;
@@ -570,6 +606,8 @@ void PxMltDevice::StreamProcess(std::shared_ptr<px4::ReceiverBase::StreamBuffer>
 
 			p += 188;
 			remain -= 188;
+			stats.aligned = true;
+			stats.in_resync = false;
 		}
 	}
 
@@ -596,12 +634,21 @@ int PxMltDevice::StreamHandler(void *context, void *buf, std::uint32_t len)
 			std::size_t t = PXMLT_DEVICE_TS_SYNC_SIZE - stream_ctx.remain_len;
 
 			memcpy(remain_buf + stream_ctx.remain_len, p, t);
+			std::size_t prev_len = stream_ctx.remain_len;
+			std::uint64_t prev_skipped = stream_ctx.stats.skipped_bytes;
+
 			stream_ctx.remain_len = PXMLT_DEVICE_TS_SYNC_SIZE;
 
-			StreamProcess(stream_ctx.stream_buf, receiver_num, &remain_buf, stream_ctx.remain_len);
+			StreamProcess(stream_ctx.stream_buf, receiver_num, &remain_buf, stream_ctx.remain_len, stream_ctx.stats);
 			if (!stream_ctx.remain_len) {
 				p += t;
 				remain -= t;
+			} else {
+				/* 同期できなかった場合、前回の端数は捨てられ、今回の先頭 t バイトは
+				 * 下の処理で読み直される。読み直す分を二重に数えないよう、
+				 * 捨てられる前回の端数だけを読み飛ばし数とする。 */
+				stream_ctx.stats.skipped_bytes = prev_skipped + prev_len;
+				stream_ctx.stats.aligned = false;
 			}
 
 			stream_ctx.remain_len = 0;
@@ -613,7 +660,7 @@ int PxMltDevice::StreamHandler(void *context, void *buf, std::uint32_t len)
 		}
 	}
 
-	StreamProcess(stream_ctx.stream_buf, receiver_num, &p, remain);
+	StreamProcess(stream_ctx.stream_buf, receiver_num, &p, remain, stream_ctx.stats);
 
 	if (remain) {
 		dev_dbg(&obj.dev_, "px4::PxMltDevice::StreamHandler: remain: %lu\n", remain);
@@ -621,7 +668,35 @@ int PxMltDevice::StreamHandler(void *context, void *buf, std::uint32_t len)
 		stream_ctx.remain_len = remain;
 	}
 
+	/* ログはファイルへ同期書き込みされるため、受信スレッドでの出力は
+	 * 同期の回復後に限り、1秒に1回までへ間引く。 */
+	if (stream_ctx.stats.resync_events != stream_ctx.stats.logged_resync_events &&
+		!stream_ctx.stats.in_resync &&
+		(GetTickCount64() - stream_ctx.stats.last_log_tick) >= 1000)
+		obj.LogStreamStats(false);
+
 	return 0;
+}
+
+void PxMltDevice::LogStreamStats(bool total)
+{
+	StreamStats &s = stream_ctx_.stats;
+	std::uint64_t f[5];
+
+	for (int i = 0; i < 5; i++)
+		f[i] = s.error_flagged[i] - (total ? 0 : s.logged_error_flagged[i]);
+
+	dev_info(&dev_, "px4::PxMltDevice::StreamHandler: TS sync %s: resync events: %llu, skipped bytes: %llu, error-flagged packets (receiver 1-5): %llu %llu %llu %llu %llu\n",
+		total ? "total" : "lost",
+		s.resync_events - (total ? 0 : s.logged_resync_events),
+		s.skipped_bytes - (total ? 0 : s.logged_skipped_bytes),
+		f[0], f[1], f[2], f[3], f[4]);
+
+	s.logged_resync_events = s.resync_events;
+	s.logged_skipped_bytes = s.skipped_bytes;
+	for (int i = 0; i < 5; i++)
+		s.logged_error_flagged[i] = s.error_flagged[i];
+	s.last_log_tick = GetTickCount64();
 }
 
 const PxMltDevice::PxMltReceiver::PxMltReceiverCnTableIsdbS PxMltDevice::PxMltReceiver::isdbs_cn_table_[] = {

@@ -97,11 +97,34 @@ public:
 	int WriteCardData(const std::uint8_t *buf, std::uint8_t len) override;
 
 private:
+	/* 同期探索で捨てた TS を計測する。受信結果には影響させず、ログだけに使う。
+	 * 欠落が復調器の誤り判定 (同期バイト bit7) によるものか、境界の喪失によるものかを
+	 * EDCB などのドロップ記録と時刻で照合できるようにする。 */
+	struct StreamStats final {
+		/* 同期を失ってから次のパケットを配信するまでを1回と数える */
+		std::uint64_t resync_events;
+		/* 同期探索で読み飛ばしたバイト数。誤りフラグ付きパケットのバイトも含む */
+		std::uint64_t skipped_bytes;
+		/* 境界が揃った位置で見つかった bit7 付きパケット数 (受信機番号 1-5 別)。
+		 * 境界が不明な位置の誤りパケットは数えられないため下限値として扱う */
+		std::uint64_t error_flagged[5];
+		/* 直前に配信したパケットの直後を処理中なら true */
+		bool aligned;
+		/* 同期を失い、まだ次のパケットを配信していなければ true */
+		bool in_resync;
+		/* ログ出力の間引き用。前回出力時の値と時刻 */
+		std::uint64_t logged_resync_events;
+		std::uint64_t logged_skipped_bytes;
+		std::uint64_t logged_error_flagged[5];
+		std::uint64_t last_log_tick;
+	};
+
 	struct StreamContext final {
 		std::shared_ptr<px4::ReceiverBase::StreamBuffer> stream_buf[5];
 		/* 最初のコールバック前も未処理データなしの状態として初期化 */
 		std::uint8_t remain_buf[PXMLT_DEVICE_TS_SYNC_SIZE] = {};
 		std::size_t remain_len = 0;
+		StreamStats stats = {};
 	};
 
 	class PxMltReceiver final : public px4::ReceiverBase {
@@ -160,7 +183,8 @@ private:
 	int StartCapture();
 	int StopCapture();
 
-	static void StreamProcess(std::shared_ptr<px4::ReceiverBase::StreamBuffer> stream_buf[], int num, std::uint8_t **buf, std::size_t &len);
+	static void StreamProcess(std::shared_ptr<px4::ReceiverBase::StreamBuffer> stream_buf[], int num, std::uint8_t **buf, std::size_t &len, StreamStats &stats);
+	void LogStreamStats(bool total);
 	static int StreamHandler(void *context, void *buf, std::uint32_t len);
 
 	static const struct PxMltDeviceParam final {
