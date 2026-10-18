@@ -113,6 +113,9 @@ void PxMltDevice::LoadConfig()
 	if (configs.Exists(L"ExperimentalJ83B"))
 		config_.device.experimental_j83b = px4::util::wtob(configs.Get(L"ExperimentalJ83B"));
 
+	if (configs.Exists(L"ExperimentalJ83BMonitor"))
+		config_.device.experimental_j83b_monitor = px4::util::wtob(configs.Get(L"ExperimentalJ83BMonitor"));
+
 	if (configs.Exists(L"ISDBCReferenceProfile"))
 		config_.device.isdbc_reference_profile = px4::util::wtob(configs.Get(L"ISDBCReferenceProfile"));
 
@@ -1180,6 +1183,19 @@ int PxMltDevice::PxMltReceiver::SetCapture(bool capture)
 			stream_buf_->Start();
 		} else {
 			stream_buf_->Stop();
+			/* 書き込み拒否の計数は常に更新し、出力だけを実験的な ISDB-C/J.83B
+			 * 設定の有効時に限る。値は今回の受信開始からの合計で、選局・
+			 * パージ・停止の区間も含む。表示する周波数は最後の選局値。 */
+			if ((parent_.config_.device.experimental_isdbc || parent_.config_.device.experimental_j83b) &&
+				params_.system == px4::SystemType::ISDB_C) {
+				const auto diagnostics = stream_buf_->GetWriteDiagnostics();
+				dev_info(&parent_.dev_, "TS output diagnostics input=%u freq=%u receiver_max_packets=%u rejected_bytes=%llu rejected_writes=%llu purge_write_discarded_bytes=%llu purge_requests=%llu (capture interval, rejection may include inactive output)\n",
+					index_, params_.freq, parent_.config_.device.receiver_max_packets,
+					static_cast<unsigned long long>(diagnostics.rejected_bytes),
+					static_cast<unsigned long long>(diagnostics.rejected_writes),
+					static_cast<unsigned long long>(diagnostics.purge_write_discarded_bytes),
+					static_cast<unsigned long long>(diagnostics.purge_requests));
+			}
 		}
 		streaming_ = capture;
 	}
@@ -1271,6 +1287,28 @@ int PxMltDevice::PxMltReceiver::ReadStat(px4::command::StatType type, std::int32
 			 * BonDriver の GetSignalLevel が受信中も 0 のままになり、TVTest の
 			 * チャンネルスキャンが「信号レベルが低い」としてチャンネルを飛ばし得た。
 			 * J.83B の実信号に対する値の妥当性は、受信報告での確認待ち。 */
+			if (parent_.config_.device.experimental_j83b &&
+				parent_.config_.device.experimental_j83b_monitor) {
+				/* 診断専用。読み取りの失敗は C/N の返却を妨げない。 */
+				cxd2856er_j83b_monitor monitor;
+				const int mret = cxd2856er_read_j83b_monitor(&cxd2856er_, &monitor);
+
+				if (mret) {
+					dev_warn(&parent_.dev_, "J83B monitor input=%u freq=%u read failed. (ret: %d)\n", index_, params_.freq, mret);
+				} else {
+					dev_info(&parent_.dev_, "J83B monitor input=%u freq=%u QAMraw=%u CNRraw=%u IFAGCraw=%u (uncalibrated)\n",
+						index_, params_.freq, monitor.qam, monitor.cnr_raw, monitor.if_agc_raw);
+					dev_info(&parent_.dev_, "J83B stages input=%u freq=%u ARraw=%u TSraw=%u VQraw=%u ICWvalid=%u INTERraw=%u IQREVraw=%u OffsetRaw=%d TrialSRraw=%u TLFraw=%d TSMraw=%u BERvalid=%u BERerrors=%u BERexp=%u PERvalid=%u PERerrors=%u PERexp=%u RSvalid=%u RSerrors=%u\n",
+						index_, params_.freq, monitor.ar_status_raw, monitor.ts_status_raw,
+						monitor.vq_status_raw, monitor.interleave_valid, monitor.interleave_raw,
+						monitor.spectrum_raw, monitor.carrier_offset_raw, monitor.trial_symbol_rate_raw,
+						monitor.timing_integral_raw, monitor.sampling_rate_mode_raw,
+						monitor.ber_valid, monitor.ber_bit_errors, monitor.ber_period_exp,
+						monitor.per_valid, monitor.per_packet_errors, monitor.per_period_exp,
+						monitor.rs_valid, monitor.rs_packet_errors);
+				}
+			}
+
 			ret = cxd2856er_read_cnr_raw_isdbc(&cxd2856er_, &val);
 			if (ret)
 				break;

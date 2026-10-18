@@ -212,6 +212,35 @@ J.83B でも ISDB-C と同じ推定値を返します。公開ドライバ `cxd2
 
 以前の版は J.83B で C/N を返さず（`-ENOSYS`）、BonDriver の `GetSignalLevel` が受信中も 0 のままでした。TVTest のチャンネルスキャン（`ChannelScan.cpp`）は、信号レベルが閾値（既定 7 dB）未満のチャンネルを、チャンネル切り替え後の待ち時間（既定 5 秒）のうちに SDT が届いた場合しか調べません。信号レベルが 0 のままだと、SDT の到着が遅いチャンネルは再試行なしで飛ばされます。古い版を使う場合は、TVTest のチャンネルスキャン設定で「信号レベルを無視する」にチェックを入れてください。
 
+### 診断ログ（取得段階・FEC 計数と TS 出力）
+
+録画のドロップが復調器の誤り訂正の限界によるものか、ホスト内の TS 出力で失われたものかを分けるため、2種類の診断ログを用意しています。どちらも受信設定、C/N の返却値、公開プロトコル、BonDriver ABI を変えません。出力には `[DriverHost_PX4]` の `DebugLog=true` と `DebugLogPath` も必要です。
+
+**取得段階・FEC 計数のモニター**は、デバイス節に `ExperimentalJ83BMonitor=true` を指定すると、J.83B で C/N を取得するたびに次の2行を出力します。既定値は `false` です。`ExperimentalJ83B=false` の場合は出力されません。
+
+- `J83B monitor input=... freq=... QAMraw=... CNRraw=... IFAGCraw=...`: QAM 種別、C/N 推定器、IF AGC の生値。
+- `J83B stages input=... freq=... ARraw=... TSraw=... VQraw=... ICWvalid=... INTERraw=... IQREVraw=... OffsetRaw=... TrialSRraw=... TLFraw=... TSMraw=... BERvalid=... BERerrors=... BERexp=... PERvalid=... PERerrors=... PERexp=... RSvalid=... RSerrors=...`: 取得・TS・VQ の各同期段階、インターリーブ、スペクトル反転、搬送波オフセット、シンボルレート推定、タイミング、RS 訂正前のビット誤り、パケット誤り、RS 訂正不能パケット数。
+
+値はすべて未校正の生値で、dB や誤り率への換算は含みません。各計数は復調器の計測期間ごとの標本で、録画全体の累計ではありません。`BERvalid` / `PERvalid` / `RSvalid` が 0 の計数は、誤り 0 の証拠として扱えません。搬送波オフセットとシンボルレート推定は、取得同期（`ARraw` bit 0）が成立している場合だけ読み出します。読み取りに失敗した場合は `J83B monitor ... read failed` を警告として出力し、C/N はそのまま返します。
+
+1回のモニター読み取りは、bank 選択と freeze の解除を含めて同期時 19 回、非同期時 16 回の I²C 操作を共有制御バスへ追加します。BonDriver が信号レベルを取得する頻度でこの操作が発生するため、同じ USB デバイスの他チューナーの受信へ影響しないことは確認していません。通常の録画環境ではこの設定を無効のままにし、問題の搬送波と正常な搬送波を同じ受信機で比較する試験に限って有効にしてください。
+
+レジスタの位置と有効ビットの条件は、CXD2856 向けに公開されている `sony_demod_j83b_monitor.c` に基づきます。実装は aoiro-labo/px4_drv のコミット 55917e5 から移植しました。ロック判定は従来どおり前節のステータスだけを参照し、モニターの計数は判定に使いません。
+
+**TS 出力の書き込み拒否の計数**は、受信機の StreamBuffer から RingBuffer への書き込みで失われたバイトを数えます。計数は常に行い、`ExperimentalISDBC=true` または `ExperimentalJ83B=true` のデバイスで ISDB-C の受信を止めたときだけ、次の1行を出力します。
+
+```text
+TS output diagnostics input=... freq=... receiver_max_packets=... rejected_bytes=... rejected_writes=... purge_write_discarded_bytes=... purge_requests=...
+```
+
+| 項目 | 意味 |
+| --- | --- |
+| `rejected_bytes` / `rejected_writes` | RingBuffer の満杯または停止中に受け付けられなかったバイト数と、その書き込み回数。 |
+| `purge_write_discarded_bytes` | パージ処理中に書き込まれなかったバイト数。 |
+| `purge_requests` | StreamBuffer のパージ要求の回数（失敗した要求を含む）。 |
+
+計数は受信開始で 0 に戻り、受信停止までの区間（選局、パージ、停止を含む）の合計です。同じ受信開始のまま複数の周波数を選局した場合、表示する `freq` は最後の周波数です。PID 選別や TSMF のスロット選択で除いたパケットは、拒否として数えません。USB 転送での欠落、TS 同期の回復で読み飛ばしたバイト、名前付きパイプ以降での欠落、復調器で発生した誤りは、この計数の対象外です。値が 0 でも受信経路全体の無欠落を示すものではありません。
+
 ### 設定値の出典
 
 出典は Sony / TBS 公開ドライバの `cxd28xx/cxd2878.c`、`cxd2878_priv.h`、`cxd2878.h`（GPL-2.0）です。参照箇所は次のとおりです。

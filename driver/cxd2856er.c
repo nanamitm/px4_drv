@@ -1752,6 +1752,99 @@ int cxd2856er_read_cnr_raw_isdbs(struct cxd2856er_demod *demod, u16 *value)
 	return 0;
 }
 
+/* 出典: aoiro-labo/px4_drv 55917e5 の J.83B モニター (GPL-2.0)。
+ * 受信設定と計数期間は変えずに、取得段階と FEC 計数の生値だけを読む。
+ * 値は未校正で、各 valid ビットが立っていない計数を誤り 0 とは扱えない。 */
+int cxd2856er_read_j83b_monitor(struct cxd2856er_demod *demod,
+			      struct cxd2856er_j83b_monitor *value)
+{
+	int ret, cleanup;
+	u8 agc[2], cnr[2], offset[2] = {0}, srate[2] = {0}, timing[5] = {0};
+	u8 ber[3], per[4], rs[3], interleave[3];
+	u16 offset_bits;
+	u32 timing_bits;
+	struct cxd2856er_j83b_monitor sample = {0};
+
+	if (!value)
+		return -EINVAL;
+	memset(value, 0, sizeof(*value));
+	if (!demod || demod->state != CXD2856ER_ACTIVE_STATE || !demod->j83b_active)
+		return -EINVAL;
+	/* CXD2856 向け公開 sony_demod_j83b_monitor.c のレジスタ定義を参照。 */
+	ret = cxd2856er_write_slvt_reg(demod, 0x01, 0x01);
+	if (ret)
+		return ret;
+	ret = cxd2856er_write_slvt_reg(demod, 0x00, 0x40);
+	if (!ret)
+		ret = cxd2856er_read_slvt_reg(demod, 0x88, &sample.ar_status_raw);
+	if (!ret)
+		ret = cxd2856er_read_slvt_reg(demod, 0x10, &sample.ts_status_raw);
+	if (!ret)
+		ret = cxd2856er_read_slvt_reg(demod, 0x19, &sample.qam);
+	if (!ret)
+		ret = cxd2856er_read_slvt_regs(demod, 0x49, agc, 2);
+	if (!ret)
+		ret = cxd2856er_read_slvt_regs(demod, 0x4c, cnr, 2);
+	/* 周波数・シンボルレート推定は AR 同期成立時だけ意味を持つ。 */
+	if (!ret && (sample.ar_status_raw & 0x01))
+		ret = cxd2856er_read_slvt_regs(demod, 0x15, offset, 2);
+	if (!ret && (sample.ar_status_raw & 0x01))
+		ret = cxd2856er_read_slvt_regs(demod, 0x1a, srate, 2);
+	if (!ret && (sample.ar_status_raw & 0x01))
+		ret = cxd2856er_read_slvt_regs(demod, 0x9b, timing, 5);
+	if (!ret)
+		ret = cxd2856er_read_slvt_regs(demod, 0x62, ber, 3);
+	if (!ret)
+		ret = cxd2856er_read_slvt_reg(demod, 0x60, &sample.ber_period_exp);
+	if (!ret)
+		ret = cxd2856er_read_slvt_regs(demod, 0x5c, per, 4);
+	if (!ret)
+		ret = cxd2856er_read_slvt_regs(demod, 0xea, rs, 3);
+	if (!ret)
+		ret = cxd2856er_write_slvt_reg(demod, 0x00, 0x80);
+	if (!ret)
+		ret = cxd2856er_read_slvt_reg(demod, 0x50, &sample.vq_status_raw);
+	if (!ret)
+		ret = cxd2856er_read_slvt_regs(demod, 0x53, interleave, 3);
+	/* 途中失敗でも元のモニターバンクと freeze 解除を試み、先のエラーを保持する。
+	 * freeze を残すと以降の C/N・ロック判定が凍結値を読み続けるため。 */
+	cleanup = cxd2856er_write_slvt_reg(demod, 0x00, 0x40);
+	if (!ret)
+		ret = cleanup;
+	cleanup = cxd2856er_write_slvt_reg(demod, 0x01, 0x00);
+	if (!ret)
+		ret = cleanup;
+	if (!ret) {
+		sample.qam &= 0x07;
+		sample.if_agc_raw = ((agc[0] & 0x0f) << 8) | agc[1];
+		sample.cnr_raw = ((cnr[0] & 0x1f) << 8) | cnr[1];
+		offset_bits = ((offset[0] & 0x3f) << 8) | offset[1];
+		sample.carrier_offset_raw = (s16)((s32)offset_bits -
+			((offset_bits & 0x2000) ? 0x4000 : 0));
+		sample.trial_symbol_rate_raw = ((srate[0] & 0x0f) << 8) | srate[1];
+		timing_bits = ((u32)timing[0] << 24) | ((u32)timing[1] << 16) |
+			((u32)timing[2] << 8) | timing[3];
+		sample.timing_integral_raw = (timing_bits & 0x80000000U) ?
+			(-1 - (s32)(~timing_bits)) : (s32)timing_bits;
+		sample.sampling_rate_mode_raw = timing[4] & 0x03;
+		sample.ber_bit_errors = ((u32)(ber[0] & 0x3f) << 16) |
+			((u32)ber[1] << 8) | ber[2];
+		sample.ber_period_exp &= 0x1f;
+		sample.ber_valid = !!(ber[0] & 0x80);
+		sample.per_packet_errors = ((u32)(per[1] & 0x03) << 16) |
+			((u32)per[2] << 8) | per[3];
+		sample.per_period_exp = per[0] & 0x1f;
+		sample.per_valid = !!(per[1] & 0x04);
+		sample.rs_packet_errors = ((u16)rs[0] << 8) | rs[1];
+		sample.rs_valid = !!(rs[2] & 0x01);
+		sample.interleave_raw = interleave[1] & 0x0f;
+		sample.interleave_valid = !!(interleave[0] & 0x01);
+		sample.spectrum_raw = interleave[2] & 0x01;
+		*value = sample;
+	}
+	return ret;
+}
+
 int cxd2856er_read_cnr_raw_isdbc(struct cxd2856er_demod *demod, u16 *value)
 {
 	int ret;
