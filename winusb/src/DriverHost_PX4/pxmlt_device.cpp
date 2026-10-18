@@ -762,7 +762,8 @@ PxMltDevice::PxMltReceiver::PxMltReceiver(PxMltDevice &parent, std::uintptr_t in
 	close_cond_(),
 	lnb_power_(false),
 	current_system_(px4::SystemType::UNSPECIFIED),
-	streaming_(false)
+	streaming_(false),
+	lock_log_state_(LOCK_LOG_STATE_UNKNOWN)
 {
 	auto i2c_addr = parent_.params_[static_cast<int>(parent_.model_)][index_].i2c_addr;
 	auto i2c_bus = parent_.params_[static_cast<int>(parent_.model_)][index_].i2c_bus;
@@ -977,10 +978,15 @@ int PxMltDevice::PxMltReceiver::SetFrequency()
 		parent_.config_.device.discard_tsmf_header_packets);
 
 	current_system_ = px4::SystemType::UNSPECIFIED;
+	lock_log_state_ = LOCK_LOG_STATE_UNKNOWN;
 
 	switch (params_.system) {
 	case px4::SystemType::ISDB_T:
 		demod_params.bandwidth = (params_.bandwidth) ? params_.bandwidth : 6;
+		/* 同じ USB デバイスの他受信機への影響を時刻で照合できるよう、
+		 * ISDB-C と同様に受信機番号と周波数を残す。 */
+		dev_info(&parent_.dev_, "px4::PxMltDevice::PxMltReceiver::SetFrequency(%u): ISDB-T freq=%u kHz, bandwidth=%u MHz\n",
+			 index_, params_.freq, demod_params.bandwidth);
 
 		ret = cxd2856er_wakeup(&cxd2856er_, CXD2856ER_ISDB_T_SYSTEM, &demod_params);
 		if (ret)
@@ -989,6 +995,8 @@ int PxMltDevice::PxMltReceiver::SetFrequency()
 		break;
 
 	case px4::SystemType::ISDB_S:
+		dev_info(&parent_.dev_, "px4::PxMltDevice::PxMltReceiver::SetFrequency(%u): ISDB-S freq=%u kHz\n",
+			 index_, params_.freq);
 		ret = cxd2856er_wakeup(&cxd2856er_, CXD2856ER_ISDB_S_SYSTEM, &demod_params);
 		if (ret)
 			dev_err(&parent_.dev_, "px4::PxMltDevice::PxMltReceiver::SetFrequency(%u): cxd2856er_wakeup(CXD2856ER_ISDB_S_SYSTEM) failed. (ret: %d)\n", index_, ret);
@@ -1034,14 +1042,14 @@ int PxMltDevice::PxMltReceiver::SetFrequency()
 		case px4::SystemType::ISDB_T:
 			ret = cxd2858er_set_params_t(&cxd2858er_, CXD2858ER_ISDB_T_SYSTEM, params_.freq, 6);
 			if (ret)
-				dev_err(&parent_.dev_, "px4::PxMltDevice::PxMltReceiver::SetFrequency(%u): cxd2858er_set_params_t(%u, 6) failed. (ret: %d)\n");
+				dev_err(&parent_.dev_, "px4::PxMltDevice::PxMltReceiver::SetFrequency(%u): cxd2858er_set_params_t(%u, 6) failed. (ret: %d)\n", index_, params_.freq, ret);
 
 			break;
 
 		case px4::SystemType::ISDB_S:
 			ret = cxd2858er_set_params_s(&cxd2858er_, CXD2858ER_ISDB_S_SYSTEM, params_.freq, 28860);
 			if (ret)
-				dev_err(&parent_.dev_, "px4::PxMltDevice::PxMltReceiver::SetFrequency(%u): cxd2858er_set_params_s(%u, 28860) failed. (ret: %d)\n");
+				dev_err(&parent_.dev_, "px4::PxMltDevice::PxMltReceiver::SetFrequency(%u): cxd2858er_set_params_s(%u, 28860) failed. (ret: %d)\n", index_, params_.freq, ret);
 
 			break;
 
@@ -1064,7 +1072,7 @@ int PxMltDevice::PxMltReceiver::SetFrequency()
 
 	ret = cxd2856er_post_tune(&cxd2856er_);
 	if (ret) {
-		dev_err(&parent_.dev_, "px4::PxMltDevice::PxMltReceiver::SetFrequency(%u): cxd2856er_post_tune() failed. (ret: %d)\n");
+		dev_err(&parent_.dev_, "px4::PxMltDevice::PxMltReceiver::SetFrequency(%u): cxd2856er_post_tune() failed. (ret: %d)\n", index_, ret);
 		return ret;
 	}
 
@@ -1106,6 +1114,25 @@ int PxMltDevice::PxMltReceiver::CheckLock(bool &locked)
 		break;
 	}
 
+	/* 復調器のロックログには受信機番号がないため、同じ選局内で状態が
+	 * 変わったときだけ受信機番号付きで残す。ロック待ちは約 20 ms ごとに
+	 * 呼ばれるため、毎回は出力しない。判定結果は変えない。 */
+	if (!ret || ret == -ECANCELED) {
+		const int state = (ret == -ECANCELED) ? LOCK_LOG_STATE_UNLOCKED :
+			(locked ? LOCK_LOG_STATE_LOCKED : LOCK_LOG_STATE_WAITING);
+
+		if (state != lock_log_state_) {
+			static const char *const state_names[] = { "waiting", "locked", "unlocked" };
+			const char *system_name =
+				(current_system_ == px4::SystemType::ISDB_T) ? "ISDB-T" :
+				(current_system_ == px4::SystemType::ISDB_S) ? "ISDB-S" : "ISDB-C";
+
+			dev_info(&parent_.dev_, "px4::PxMltDevice::PxMltReceiver::CheckLock(%u): %s freq=%u kHz, lock=%s\n",
+				 index_, system_name, params_.freq, state_names[state]);
+			lock_log_state_ = state;
+		}
+	}
+
 	return ret;
 }
 
@@ -1119,6 +1146,9 @@ int PxMltDevice::PxMltReceiver::SetStreamId()
 
 	int ret = 0;
 	std::lock_guard<std::mutex> lock(lock_);
+
+	dev_info(&parent_.dev_, "px4::PxMltDevice::PxMltReceiver::SetStreamId(%u): ISDB-S freq=%u kHz, %s=%u\n",
+		 index_, params_.freq, (params_.stream_id < 12) ? "slot" : "tsid", params_.stream_id);
 
 	if (params_.stream_id < 12) {
 		ret = cxd2856er_set_slot_isdbs(&cxd2856er_, params_.stream_id);

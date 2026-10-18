@@ -174,6 +174,15 @@ private:
 		cxd2858er_tuner cxd2858er_;
 		px4::SystemType current_system_;
 		bool streaming_;
+		/* CheckLock のログ出力を状態変化時に限るための、直前に出力した状態。
+		 * 値は state_names の添字と一致させる。 */
+		enum : int {
+			LOCK_LOG_STATE_UNKNOWN = -1,
+			LOCK_LOG_STATE_WAITING = 0,
+			LOCK_LOG_STATE_LOCKED = 1,
+			LOCK_LOG_STATE_UNLOCKED = 2
+		};
+		int lock_log_state_;
 	};
 
 	void LoadConfig();
