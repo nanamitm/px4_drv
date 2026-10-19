@@ -161,6 +161,20 @@ BonDriver と同じフォルダに DriverHost_PX4.exe / DriverHost_PX4.ini / it9
 使用にあたり、特段 ini ファイルの設定変更などは必要ありません。ソフトウェアごとにチャンネルスキャンを行えばそのまま視聴できます。  
 なお、BonDriver の ini ファイル内の `DisplayErrorMessage` を 1 に設定すると、オリジナル同様にエラー発生時にメッセージボックスを表示します。
 
+#### PX-MLT8PE で J.83B を受信する場合
+
+BonDriver は ini ファイルの `[ReceiverDefinitionN]` を `OpenPriority` の大きい順に試し、最初に開けた受信機を使います。`OpenPriority` の既定値は 0 で、同じ値の定義は記載順に試します。  
+PX-MLT8PE は 1 枚の基板に 5 チューナー側 (デバイス名 `PLEX PX-MLT8PE5`) と 3 チューナー側 (`PLEX PX-MLT8PE3`) の 2 つのデバイスを持ちます。J.83B (ISDB-C の実験的対応) の再現試験では、3 チューナー側で受信中に 5 チューナー側の電源が入ったときと、3 チューナー側の別の受信機を開いて選局したときに、受信中の TS へ連続性エラーが記録されました。5 チューナー側で受信中の場合は、どちらの操作でも記録されませんでした。地デジ・BS では、どちらの側でも記録されていません。  
+このため、同梱の `BonDriver_PX-MLT.ini` は 3 チューナー側に `OpenPriority=-1` を指定し、5 チューナー側の 5 チューナーを先に使います。J.83B 用に BonDriver を分けて ini を書く場合も、3 チューナー側の定義に同じ指定を入れると 5 チューナー側が優先されます。
+
+J.83B の同時受信が 6 本以上になる場合や、3 チューナー側だけを使う BonDriver を用意する場合など、3 チューナー側で J.83B を受信するときは、`DriverHost_PX4.ini` の 5 チューナー側の節 (`DeviceName="PLEX PX-MLT8PE5"` を持つ `[DeviceDefinitionN]` に対応する `[DeviceDefinitionN.Config]`) に `HoldBackendPower=true` を設定してください。
+
+```ini
+HoldBackendPower=true
+```
+
+この設定では、5 チューナー側の電源が DriverHost_PX4 の起動時に入り、終了まで切れないため、3 チューナー側の受信中に電源投入が起きません。その分、5 チューナー側を使っていない間も消費電力が増えます。3 チューナー側の同じデバイス内の選局による誤りは、この設定では防げません。詳細は [docs/isdbc_winusb_experimental.md](docs/isdbc_winusb_experimental.md) の「バックエンド電源の保持」を参照してください。
+
 ### 4. 内蔵 B-CAS カードリーダーの利用
 
 **v0.6.0 以降、winUSB 版 px4_drv 専用の WinSCard.dll を TVTest.exe や EpgDataCap_Bon.exe と同じフォルダに配置することで、内蔵カードリーダーが利用できるようになりました！**
