@@ -508,8 +508,16 @@ int cxd2858er_set_params_c(struct cxd2858er_tuner *tuner,
 	data[10] = (freq >> 16) & 0x0f;
 	data[11] = 0xff;
 	data[12] = 0x01;
-	data[13] = 0xd9;
-	data[14] = 0x0f;
+	/* 0x75-0x76 は RF/IF 過大入力の検出レベルと推定される (意味は未確認)。
+	 * 同じ基板の別受信機の起動時に J.83B の C/N が瞬間的に約 6 dB 下がるため、
+	 * 地デジの値 (0x99, 0x00) で落ち込みが減るかを試す設定を用意する。 */
+	if (tuner->config.experimental_j83b && tuner->config.j83b_ter_overload_level) {
+		data[13] = 0x99;
+		data[14] = 0x00;
+	} else {
+		data[13] = 0xd9;
+		data[14] = 0x0f;
+	}
 	data[15] = 0x24;
 	data[16] = 0x87;
 	ret = cxd2858er_write_regs(tuner, 0x68, data, 17);

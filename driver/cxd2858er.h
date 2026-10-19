@@ -22,6 +22,8 @@ struct cxd2858er_config {
 	bool isdbc_reference_profile;
 	/* Sony/TBS HELENE J83B_5_6 行。既定無効、信号で未検証。 */
 	bool experimental_j83b;
+	/* J.83B でも RF/IF 過大入力の検出レベルに地デジの値を使う試験用設定。既定無効。 */
+	bool j83b_ter_overload_level;
 	struct {
 		bool lna;
 	} ter;

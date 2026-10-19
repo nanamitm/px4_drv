@@ -195,6 +195,17 @@ struct cxd2856er_j83b_monitor {
 };
 int cxd2856er_read_j83b_monitor(struct cxd2856er_demod *demod,
 			      struct cxd2856er_j83b_monitor *value);
+
+/* 他受信機の選局直後を短い間隔で記録するための縮小版。未校正の生値。 */
+struct cxd2856er_j83b_rs_sample {
+	u8 ar_status_raw;
+	u8 ts_status_raw;
+	u16 if_agc_raw;
+	u16 rs_packet_errors;
+	bool rs_valid;
+};
+int cxd2856er_read_j83b_rs_sample(struct cxd2856er_demod *demod,
+				  struct cxd2856er_j83b_rs_sample *value);
 #ifdef __cplusplus
 }
 #endif

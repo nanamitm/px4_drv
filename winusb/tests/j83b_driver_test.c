@@ -193,6 +193,44 @@ int main(void)
 			CHECK(!bus.gate_open);
 		}
 		printf("J83B %u tuner I/O failure boundaries and gate release: PASS\n", count);
+		{
+			/* バースト記録用の縮小モニター。非稼働時の拒否、値の復号、freeze 解除、
+			 * 全 I/O 境界での失敗時に部分的な値を返さないことを確かめる。 */
+			struct cxd2856er_j83b_rs_sample sample;
+			unsigned int base;
+
+			reset(&demod, &tuner);
+			memset(&sample, 0xff, sizeof(sample));
+			CHECK(cxd2856er_read_j83b_rs_sample(&demod, &sample) == -EINVAL);
+			CHECK(sample.rs_packet_errors == 0 && !sample.rs_valid && sample.if_agc_raw == 0);
+			memset(&params, 0, sizeof(params));
+			params.isdbc.experimental_j83b = true;
+			CHECK(cxd2856er_wakeup(&demod, CXD2856ER_ISDB_C_SYSTEM, &params) == 0);
+			bus.regs[1][0x40][0x88] = 0x35;
+			bus.regs[1][0x40][0x10] = 0x20;
+			bus.regs[1][0x40][0x49] = 0xf4;	/* 上位 4 bit は IF AGC に含めない */
+			bus.regs[1][0x40][0x4a] = 0x88;
+			bus.regs[1][0x40][0xea] = 0x01;
+			bus.regs[1][0x40][0xeb] = 0x17;
+			bus.regs[1][0x40][0xec] = 0x01;
+			base = bus.calls;
+			CHECK(cxd2856er_read_j83b_rs_sample(&demod, &sample) == 0);
+			count = bus.calls - base;
+			CHECK(sample.ar_status_raw == 0x35 && sample.ts_status_raw == 0x20);
+			CHECK(sample.if_agc_raw == 0x488);
+			CHECK(sample.rs_packet_errors == 0x117 && sample.rs_valid);
+			CHECK(bus.regs[1][0x40][0x01] == 0);
+			bus.regs[1][0x40][0xec] = 0x00;
+			CHECK(cxd2856er_read_j83b_rs_sample(&demod, &sample) == 0 && !sample.rs_valid);
+			for (fail = 1; fail <= count; fail++) {
+				bus.fail_at = bus.calls + fail;
+				memset(&sample, 0xff, sizeof(sample));
+				CHECK(cxd2856er_read_j83b_rs_sample(&demod, &sample) == -EIO);
+				CHECK(sample.rs_packet_errors == 0 && !sample.rs_valid && sample.if_agc_raw == 0);
+				bus.fail_at = 0;
+			}
+			printf("J83B burst sample decode and %u I/O failure boundaries: PASS\n", count);
+		}
 	}
 #endif
 	return 0;

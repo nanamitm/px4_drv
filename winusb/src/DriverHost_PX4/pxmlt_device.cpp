@@ -33,9 +33,19 @@ PxMltDevice::PxMltDevice(const std::wstring &path, const px4::DeviceDefinition &
 	init_(false),
 	open_count_(0),
 	card_open_(false),
+	power_hold_(false),
 	lnb_power_count_(0),
 	streaming_count_(0),
-	tuner_lock_{}
+	tuner_lock_{},
+	/* true は記録スレッドが動いていない状態。開始時だけ false にする。 */
+	burst_quit_(true),
+	burst_pending_(false),
+	burst_active_(false),
+	burst_seq_(0),
+	burst_trigger_index_(0),
+	burst_reason_(""),
+	burst_begin_(),
+	burst_deadline_()
 {
 	if (usb_dev_.descriptor.idVendor != 0x0511)
 		throw DeviceError("px4::PxMltDevice::PxMltDevice: unsupported device. (unknown vendor id)");
@@ -115,6 +125,35 @@ void PxMltDevice::LoadConfig()
 
 	if (configs.Exists(L"ExperimentalJ83BMonitor"))
 		config_.device.experimental_j83b_monitor = px4::util::wtob(configs.Get(L"ExperimentalJ83BMonitor"));
+
+	if (configs.Exists(L"ExperimentalJ83BTerOverloadLevel"))
+		config_.device.j83b_ter_overload_level = px4::util::wtob(configs.Get(L"ExperimentalJ83BTerOverloadLevel"));
+
+	if (configs.Exists(L"HoldBackendPower"))
+		config_.device.hold_backend_power = px4::util::wtob(configs.Get(L"HoldBackendPower"));
+
+	if (configs.Exists(L"ExperimentalJ83BBurstMonitor"))
+		config_.device.experimental_j83b_burst_monitor = px4::util::wtob(configs.Get(L"ExperimentalJ83BBurstMonitor"));
+
+	/* 範囲外の値は既定値に戻す。間隔の下限は共有制御バスの占有を抑えるため、
+	 * 記録時間の上限は録画開始が続く時間帯にバスを占有し続けないためのもの。 */
+	if (configs.Exists(L"J83BBurstWindowMs")) {
+		const auto value = px4::util::wtoui(configs.Get(L"J83BBurstWindowMs"));
+		if (value >= 500 && value <= 10000)
+			config_.device.j83b_burst_window_ms = value;
+		else
+			dev_warn(&dev_, "px4::PxMltDevice::LoadConfig: J83BBurstWindowMs=%u is out of range (500-10000); using %u.\n",
+				 value, config_.device.j83b_burst_window_ms);
+	}
+
+	if (configs.Exists(L"J83BBurstIntervalMs")) {
+		const auto value = px4::util::wtoui(configs.Get(L"J83BBurstIntervalMs"));
+		if (value >= 20 && value <= 1000)
+			config_.device.j83b_burst_interval_ms = value;
+		else
+			dev_warn(&dev_, "px4::PxMltDevice::LoadConfig: J83BBurstIntervalMs=%u is out of range (20-1000); using %u.\n",
+				 value, config_.device.j83b_burst_interval_ms);
+	}
 
 	if (configs.Exists(L"ISDBCReferenceProfile"))
 		config_.device.isdbc_reference_profile = px4::util::wtob(configs.Get(L"ISDBCReferenceProfile"));
@@ -279,6 +318,22 @@ int PxMltDevice::Init()
 		receiver_manager_.Register(ri, receivers_[it->index].get());
 	}
 
+	/* 受信機が開かれる前に電源を入れ、以後は終了まで切らない。同じ基板の別 USB
+	 * デバイスで録画中に、このデバイスの電源投入が起きることを避ける。投入に失敗した
+	 * 場合は保持せず、従来どおり最初の利用者が投入する。 */
+	if (config_.device.hold_backend_power) {
+		const int pret = SetBackendPower(true);
+		if (pret) {
+			dev_warn(&dev_, "px4::PxMltDevice::Init: HoldBackendPower: SetBackendPower(true) failed. (ret: %d)\n", pret);
+		} else {
+			power_hold_ = true;
+			dev_info(&dev_, "px4::PxMltDevice::Init: HoldBackendPower: backend power on\n");
+		}
+	}
+
+	if (config_.device.experimental_j83b && config_.device.experimental_j83b_burst_monitor)
+		StartJ83BBurstWorker();
+
 	return 0;
 
 fail_device:
@@ -310,12 +365,25 @@ void PxMltDevice::Term()
 
 	lock.unlock();
 
+	/* 記録スレッドは受信機を参照するため、受信機の破棄より先に止める。 */
+	StopJ83BBurstWorker();
+
 	for (int i = 0; i < receiver_num_; i++) {
 		stream_ctx_.stream_buf[i] = nullptr;
 		receivers_[i].reset();
 	}
 
 	lock.lock();
+
+	/* 受信機の破棄で開いていた受信機は閉じられているため、保持を外して電源を切る。
+	 * 切断済みの場合は SetBackendPower が I/O を行わない。 */
+	if (power_hold_) {
+		power_hold_ = false;
+		if (!open_count_ && !card_open_) {
+			SetBackendPower(false);
+			dev_info(&dev_, "px4::PxMltDevice::Term: HoldBackendPower: backend power off\n");
+		}
+	}
 
 	it930x_term(&it930x_);
 	itedtv_bus_term(&it930x_.bus);
@@ -327,9 +395,12 @@ void PxMltDevice::Term()
 void PxMltDevice::SetAvailability(bool available)
 {
 	std::lock_guard<std::recursive_mutex> lock(lock_);
-	/* 切断後の古いカードセッションから USB 制御転送を発行しない */
-	if (available_ && !available)
+	/* 切断後の古いカードセッションから USB 制御転送を発行しない。電源の保持も
+	 * 切断で無効になるため外し、再接続後の初期化で改めて投入する。 */
+	if (available_ && !available) {
 		card_open_ = false;
+		power_hold_ = false;
+	}
 	available_ = available;
 }
 
@@ -351,7 +422,7 @@ int PxMltDevice::OpenCard()
 		return -EBUSY;
 
 	/* チューナー未使用時だけ基板の電源を投入し、視聴中の電源状態には触れない */
-	if (!open_count_) {
+	if (!open_count_ && !power_hold_) {
 		int ret = SetBackendPower(true);
 		if (ret)
 			return ret;
@@ -359,7 +430,7 @@ int PxMltDevice::OpenCard()
 
 	int ret = it930x_bcas_init(&it930x_);
 	if (ret) {
-		if (!open_count_)
+		if (!open_count_ && !power_hold_)
 			SetBackendPower(false);
 		return ret;
 	}
@@ -376,7 +447,7 @@ void PxMltDevice::CloseCard()
 		return;
 
 	card_open_ = false;
-	if (!open_count_)
+	if (!open_count_ && !power_hold_)
 		SetBackendPower(false);
 }
 
@@ -702,6 +773,182 @@ void PxMltDevice::LogStreamStats(bool total)
 	s.last_log_tick = GetTickCount64();
 }
 
+/* 選局・Open の経路から呼ばれるため、期限と要求元を記録して記録スレッドを
+ * 起こすだけにする。I2C や待機をここへ持ち込むと選局そのものを遅らせる。 */
+void PxMltDevice::RequestJ83BBurst(std::uintptr_t trigger_index, const char *reason)
+{
+	if (!config_.device.experimental_j83b || !config_.device.experimental_j83b_burst_monitor)
+		return;
+
+	const auto now = std::chrono::steady_clock::now();
+	{
+		std::lock_guard<std::mutex> lock(burst_mtx_);
+
+		if (burst_quit_)
+			return;
+
+		burst_deadline_ = now + std::chrono::milliseconds(config_.device.j83b_burst_window_ms);
+		burst_trigger_index_ = trigger_index;
+		burst_reason_ = reason;
+		if (!burst_active_ && !burst_pending_) {
+			burst_begin_ = now;
+			burst_pending_ = true;
+		}
+	}
+	burst_cond_.notify_all();
+}
+
+void PxMltDevice::StartJ83BBurstWorker()
+{
+	{
+		std::lock_guard<std::mutex> lock(burst_mtx_);
+
+		if (!burst_quit_)
+			return;
+
+		burst_quit_ = false;
+		burst_pending_ = false;
+		burst_active_ = false;
+	}
+	burst_thread_ = std::thread(&PxMltDevice::J83BBurstWorker, this);
+
+	dev_info(&dev_, "px4::PxMltDevice: J83B burst monitor enabled (window=%u ms, interval=%u ms)\n",
+		 config_.device.j83b_burst_window_ms, config_.device.j83b_burst_interval_ms);
+}
+
+void PxMltDevice::StopJ83BBurstWorker()
+{
+	{
+		std::lock_guard<std::mutex> lock(burst_mtx_);
+		burst_quit_ = true;
+	}
+	burst_cond_.notify_all();
+
+	if (burst_thread_.joinable())
+		burst_thread_.join();
+}
+
+void PxMltDevice::J83BBurstWorker()
+{
+	struct Stats {
+		unsigned int samples, busy, errors, rs_invalid, rs_nonzero, rs_max;
+		unsigned long long rs_sum, read_us_sum, read_us_max;
+		unsigned int agc_first, agc_min, agc_max;
+		std::uint32_t freq;
+	};
+
+	std::unique_lock<std::mutex> lock(burst_mtx_);
+
+	while (true) {
+		burst_cond_.wait(lock, [this] { return burst_quit_ || burst_pending_; });
+		if (burst_quit_)
+			break;
+
+		burst_pending_ = false;
+		burst_active_ = true;
+
+		const std::uint32_t seq = ++burst_seq_;
+		const auto begin = burst_begin_;
+		std::uintptr_t trigger = burst_trigger_index_;
+		const char *reason = burst_reason_;
+		const auto interval = std::chrono::milliseconds(config_.device.j83b_burst_interval_ms);
+		Stats stats[5] = {};
+
+		lock.unlock();
+		dev_info(&dev_, "J83B burst #%u begin: trigger receiver=%u (%s), window=%u ms, interval=%u ms\n",
+			 seq, static_cast<unsigned int>(trigger), reason,
+			 config_.device.j83b_burst_window_ms, config_.device.j83b_burst_interval_ms);
+		lock.lock();
+
+		while (!burst_quit_ && std::chrono::steady_clock::now() < burst_deadline_) {
+			const auto tick = std::chrono::steady_clock::now();
+			const long long rel_ms = static_cast<long long>(
+				std::chrono::duration_cast<std::chrono::milliseconds>(tick - begin).count());
+
+			/* 記録中に別の Open・選局が来た場合は期限が延び、要求元も更新される。 */
+			const bool trigger_changed = (burst_trigger_index_ != trigger || burst_reason_ != reason);
+			trigger = burst_trigger_index_;
+			reason = burst_reason_;
+			lock.unlock();
+
+			if (trigger_changed)
+				dev_info(&dev_, "J83B burst #%u +%lld ms: trigger receiver=%u (%s)\n",
+					 seq, rel_ms, static_cast<unsigned int>(trigger), reason);
+
+			/* 要求元の受信機は自身の Open・選局中のため読まない。録画中 (TS 出力中) の
+			 * J.83B 受信機だけを対象とし、処理中で受信機のロックを取れない場合は飛ばす。 */
+			for (int i = 0; i < receiver_num_; i++) {
+				if (static_cast<std::uintptr_t>(i) == trigger || !receivers_[i])
+					continue;
+
+				PxMltReceiver::BurstSample s;
+				receivers_[i]->SampleJ83BBurst(s);
+
+				Stats &st = stats[i];
+				if (s.busy) {
+					st.busy++;
+					continue;
+				}
+				if (!s.sampled)
+					continue;
+
+				st.freq = s.freq;
+				if (s.ret) {
+					st.errors++;
+					dev_warn(&dev_, "J83B burst #%u +%lld ms input=%d freq=%u read failed. (ret: %d, read_us=%llu)\n",
+						 seq, rel_ms, i, s.freq, s.ret, static_cast<unsigned long long>(s.read_us));
+					continue;
+				}
+
+				const unsigned int agc = s.value.if_agc_raw;
+				const unsigned int rs = s.value.rs_packet_errors;
+
+				if (!st.samples) {
+					st.agc_first = agc;
+					st.agc_min = agc;
+					st.agc_max = agc;
+				}
+				st.samples++;
+				st.agc_min = (agc < st.agc_min) ? agc : st.agc_min;
+				st.agc_max = (agc > st.agc_max) ? agc : st.agc_max;
+				st.read_us_sum += s.read_us;
+				st.read_us_max = (s.read_us > st.read_us_max) ? s.read_us : st.read_us_max;
+				if (!s.value.rs_valid) {
+					st.rs_invalid++;
+				} else if (rs) {
+					st.rs_nonzero++;
+					st.rs_sum += rs;
+					st.rs_max = (rs > st.rs_max) ? rs : st.rs_max;
+				}
+
+				dev_info(&dev_, "J83B burst #%u +%lld ms input=%d freq=%u ARraw=%u TSraw=%u IFAGCraw=%u RSvalid=%u RSerrors=%u read_us=%llu\n",
+					 seq, rel_ms, i, s.freq, s.value.ar_status_raw, s.value.ts_status_raw, agc,
+					 s.value.rs_valid ? 1 : 0, rs, static_cast<unsigned long long>(s.read_us));
+			}
+
+			lock.lock();
+			burst_cond_.wait_until(lock, tick + interval, [this] { return burst_quit_; });
+		}
+
+		burst_active_ = false;
+		lock.unlock();
+
+		for (int i = 0; i < receiver_num_; i++) {
+			const Stats &st = stats[i];
+
+			if (!st.samples && !st.busy && !st.errors)
+				continue;
+
+			dev_info(&dev_, "J83B burst #%u end: input=%d freq=%u samples=%u busy=%u errors=%u RSinvalid=%u RSnonzero=%u RSmax=%u RSsum=%llu IFAGC first=%u min=%u max=%u read_us avg=%llu max=%llu\n",
+				 seq, i, st.freq, st.samples, st.busy, st.errors, st.rs_invalid, st.rs_nonzero, st.rs_max, st.rs_sum,
+				 st.agc_first, st.agc_min, st.agc_max,
+				 st.samples ? (st.read_us_sum / st.samples) : 0ULL, st.read_us_max);
+		}
+
+		lock.lock();
+	}
+}
+
 const PxMltDevice::PxMltReceiver::PxMltReceiverCnTableIsdbS PxMltDevice::PxMltReceiver::isdbs_cn_table_[] = {
 	{ 0x5af, 0 }, { 0x597, 100 }, { 0x57e, 200 }, { 0x567, 300 },
 	{ 0x550, 400 }, { 0x539, 500 }, { 0x522, 600 }, { 0x50c, 700 },
@@ -814,12 +1061,20 @@ int PxMltDevice::PxMltReceiver::Open()
 	if (open_)
 		return -EALREADY;
 
-	if (!parent_.open_count_ && !parent_.card_open_) {
+	/* 同じデバイスの他受信機の IF AGC 変化や RS 訂正不能が、受信機の初期化
+	 * (電源投入) と選局のどちらに続いて起きるかを時刻で区別できるよう、
+	 * 各段階を受信機番号付きで残す。処理の順序とロックは変えない。 */
+	dev_info(&parent_.dev_, "px4::PxMltDevice::PxMltReceiver::Open(%u): begin (open receivers: %u, card open: %s)\n",
+		 index_, parent_.open_count_, (parent_.card_open_) ? "true" : "false");
+	parent_.RequestJ83BBurst(index_, "open");
+
+	if (!parent_.open_count_ && !parent_.card_open_ && !parent_.power_hold_) {
 		ret = parent_.SetBackendPower(true);
 		if (ret) {
 			dev_err(&parent_.dev_, "px4::PxMltDevice::PxMltReceiver::Open(%u): SetBackendPower(true) failed. (ret: %d)\n", index_, ret);
 			goto fail_power;
 		}
+		dev_info(&parent_.dev_, "px4::PxMltDevice::PxMltReceiver::Open(%u): backend power on\n", index_);
 	}
 
 	ret = cxd2856er_init(&cxd2856er_);
@@ -837,6 +1092,7 @@ int PxMltDevice::PxMltReceiver::Open()
 			goto fail_tuner_init;
 		}
 	}
+	dev_info(&parent_.dev_, "px4::PxMltDevice::PxMltReceiver::Open(%u): demodulator and tuner initialized\n", index_);
 
 	ret = cxd2856er_write_slvt_reg(&cxd2856er_, 0x00, 0x00);
 	if (ret)
@@ -887,6 +1143,9 @@ int PxMltDevice::PxMltReceiver::Open()
 	parent_.open_count_++;
 	open_ = true;
 
+	dev_info(&parent_.dev_, "px4::PxMltDevice::PxMltReceiver::Open(%u): end (open receivers: %u)\n",
+		 index_, parent_.open_count_);
+
 	return 0;
 
 fail_backend:
@@ -899,8 +1158,8 @@ fail_tuner_init:
 	cxd2856er_term(&cxd2856er_);
 
 fail_demod_init:
-	/* カードもチューナーも未使用なら、初期化前に入れた電源を切る */
-	if (!parent_.open_count_ && !parent_.card_open_)
+	/* カードもチューナーも未使用で保持もないなら、初期化前に入れた電源を切る */
+	if (!parent_.open_count_ && !parent_.card_open_ && !parent_.power_hold_)
 		parent_.SetBackendPower(false);
 
 fail_power:
@@ -922,18 +1181,26 @@ void PxMltDevice::PxMltReceiver::Close()
 
 	assert(parent_.open_count_ > 0);
 
+	dev_info(&parent_.dev_, "px4::PxMltDevice::PxMltReceiver::Close(%u): begin (open receivers: %u)\n",
+		 index_, parent_.open_count_);
+
 	{
 		std::lock_guard<std::mutex> tuner_lock(*tuner_lock_);
 		cxd2858er_term(&cxd2858er_);
 	}
 
 	cxd2856er_term(&cxd2856er_);
+	dev_info(&parent_.dev_, "px4::PxMltDevice::PxMltReceiver::Close(%u): demodulator and tuner terminated\n", index_);
 
 	parent_.open_count_--;
-	if (!parent_.open_count_ && !parent_.card_open_)
+	if (!parent_.open_count_ && !parent_.card_open_ && !parent_.power_hold_) {
 		parent_.SetBackendPower(false);
+		dev_info(&parent_.dev_, "px4::PxMltDevice::PxMltReceiver::Close(%u): backend power off\n", index_);
+	}
 
 	open_ = false;
+	dev_info(&parent_.dev_, "px4::PxMltDevice::PxMltReceiver::Close(%u): end (open receivers: %u)\n",
+		 index_, parent_.open_count_);
 
 	lock.unlock();
 	close_cond_.notify_all();
@@ -965,6 +1232,7 @@ int PxMltDevice::PxMltReceiver::SetFrequency()
 		return -EINVAL;
 
 	dev_dbg(&parent_.dev_, "px4::PxMltDevice::PxMltReceiver::SetFrequency(%u): freq: %u\n", index_, params_.freq);
+	parent_.RequestJ83BBurst(index_, "tune");
 
 	int ret = 0;
 	cxd2856er_system_params demod_params = { 0 };
@@ -1056,6 +1324,7 @@ int PxMltDevice::PxMltReceiver::SetFrequency()
 		case px4::SystemType::ISDB_C:
 			cxd2858er_.config.experimental_j83b = parent_.config_.device.experimental_j83b;
 			cxd2858er_.config.isdbc_reference_profile = parent_.config_.device.isdbc_reference_profile;
+			cxd2858er_.config.j83b_ter_overload_level = parent_.config_.device.j83b_ter_overload_level;
 			ret = cxd2858er_set_params_c(&cxd2858er_, params_.freq, params_.bandwidth);
 			if (ret)
 				dev_err(&parent_.dev_, "px4::PxMltDevice::PxMltReceiver::SetFrequency(%u): cxd2858er_set_params_c(%u) failed. (ret: %d)\n", index_, params_.bandwidth, ret);
@@ -1233,6 +1502,32 @@ int PxMltDevice::PxMltReceiver::SetCapture(bool capture)
 	return ret;
 }
 
+void PxMltDevice::PxMltReceiver::SampleJ83BBurst(BurstSample &out)
+{
+	out = BurstSample();
+
+	if (!open_ || !parent_.available_)
+		return;
+
+	/* 選局・C/N 取得・Close の最中に待つと、記録のために受信機の処理を遅らせる。
+	 * ロックを取れないときは標本を飛ばし、busy として数える。 */
+	std::unique_lock<std::mutex> lock(lock_, std::try_to_lock);
+	if (!lock.owns_lock()) {
+		out.busy = true;
+		return;
+	}
+
+	if (!open_ || !streaming_ || current_system_ != px4::SystemType::ISDB_C || !cxd2856er_.j83b_active)
+		return;
+
+	const auto t0 = std::chrono::steady_clock::now();
+	out.ret = cxd2856er_read_j83b_rs_sample(&cxd2856er_, &out.value);
+	out.read_us = static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
+		std::chrono::steady_clock::now() - t0).count());
+	out.freq = params_.freq;
+	out.sampled = true;
+}
+
 int PxMltDevice::PxMltReceiver::ReadStat(px4::command::StatType type, std::int32_t &value)
 {
 	if (!open_)
@@ -1319,15 +1614,19 @@ int PxMltDevice::PxMltReceiver::ReadStat(px4::command::StatType type, std::int32
 			 * J.83B の実信号に対する値の妥当性は、受信報告での確認待ち。 */
 			if (parent_.config_.device.experimental_j83b &&
 				parent_.config_.device.experimental_j83b_monitor) {
-				/* 診断専用。読み取りの失敗は C/N の返却を妨げない。 */
+				/* 診断専用。読み取りの失敗は C/N の返却を妨げない。
+				 * 共有制御バスの占有時間を見積もるため、読み取り時間も残す。 */
 				cxd2856er_j83b_monitor monitor;
+				const auto t0 = std::chrono::steady_clock::now();
 				const int mret = cxd2856er_read_j83b_monitor(&cxd2856er_, &monitor);
+				const auto read_us = static_cast<unsigned long long>(std::chrono::duration_cast<std::chrono::microseconds>(
+					std::chrono::steady_clock::now() - t0).count());
 
 				if (mret) {
-					dev_warn(&parent_.dev_, "J83B monitor input=%u freq=%u read failed. (ret: %d)\n", index_, params_.freq, mret);
+					dev_warn(&parent_.dev_, "J83B monitor input=%u freq=%u read failed. (ret: %d, read_us=%llu)\n", index_, params_.freq, mret, read_us);
 				} else {
-					dev_info(&parent_.dev_, "J83B monitor input=%u freq=%u QAMraw=%u CNRraw=%u IFAGCraw=%u (uncalibrated)\n",
-						index_, params_.freq, monitor.qam, monitor.cnr_raw, monitor.if_agc_raw);
+					dev_info(&parent_.dev_, "J83B monitor input=%u freq=%u QAMraw=%u CNRraw=%u IFAGCraw=%u read_us=%llu (uncalibrated)\n",
+						index_, params_.freq, monitor.qam, monitor.cnr_raw, monitor.if_agc_raw, read_us);
 					dev_info(&parent_.dev_, "J83B stages input=%u freq=%u ARraw=%u TSraw=%u VQraw=%u ICWvalid=%u INTERraw=%u IQREVraw=%u OffsetRaw=%d TrialSRraw=%u TLFraw=%d TSMraw=%u BERvalid=%u BERerrors=%u BERexp=%u PERvalid=%u PERerrors=%u PERexp=%u RSvalid=%u RSerrors=%u\n",
 						index_, params_.freq, monitor.ar_status_raw, monitor.ts_status_raw,
 						monitor.vq_status_raw, monitor.interleave_valid, monitor.interleave_raw,

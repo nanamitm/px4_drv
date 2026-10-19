@@ -8,6 +8,8 @@
 #include <string>
 #include <mutex>
 #include <condition_variable>
+#include <thread>
+#include <chrono>
 
 #include "device_definition_set.hpp"
 #include "device_base.hpp"
@@ -39,7 +41,7 @@ enum class PxMltDeviceModel {
 struct PxMltDeviceConfig final {
 	PxMltDeviceConfig()
 		: usb{ 816, 816, 5, false },
-		device{ 2048, 2000, true, false, false, false, 0, false, false, false }
+		device{ 2048, 2000, true, false, false, false, 0, false, false, false, false, 3000, 50, false, false }
 	{}
 	struct {
 		unsigned int xfer_packets;
@@ -68,6 +70,17 @@ struct PxMltDeviceConfig final {
 		/* J.83B の取得段階・FEC 計数の生値を C/N 取得時にログへ出す。
 		 * 共有制御バスへ1回あたり16〜19回の I/O を足すため既定 false。 */
 		bool experimental_j83b_monitor;
+		/* 同じデバイスの別受信機の Open・選局から一定時間だけ、録画中の J.83B
+		 * 受信機の RS 計数と IF AGC を短い間隔で記録する。既定 false。 */
+		bool experimental_j83b_burst_monitor;
+		unsigned int j83b_burst_window_ms;
+		unsigned int j83b_burst_interval_ms;
+		/* デバイスの初期化から終了まで、受信機やカードの利用と関係なくバックエンド
+		 * 電源を入れたままにする。同じ基板の別 USB デバイスで録画中に、このデバイスの
+		 * 電源投入が起きないようにするための設定で、既定 false。 */
+		bool hold_backend_power;
+		/* J.83B のチューナーの過大入力検出レベルに地デジの値を使う試験用設定。既定 false。 */
+		bool j83b_ter_overload_level;
 	} device;
 };
 
@@ -151,6 +164,18 @@ private:
 		int SetCapture(bool capture) override;
 		int ReadStat(px4::command::StatType type, std::int32_t &value) override;
 
+		/* バースト記録の 1 標本。選局中・停止中などの受信機は読まずに
+		 * sampled=false を返す。busy は受信機の処理中で読まなかったことを示す。 */
+		struct BurstSample {
+			bool sampled;
+			bool busy;
+			int ret;
+			std::uint32_t freq;
+			std::uint64_t read_us;
+			cxd2856er_j83b_rs_sample value;
+		};
+		void SampleJ83BBurst(BurstSample &out);
+
 	protected:
 		int PrepareTune() override;
 		int SetFrequency() override;
@@ -199,6 +224,12 @@ private:
 	void LogStreamStats(bool total);
 	static int StreamHandler(void *context, void *buf, std::uint32_t len);
 
+	/* J.83B バースト記録。要求側は期限を設定するだけで I/O を行わない。 */
+	void RequestJ83BBurst(std::uintptr_t trigger_index, const char *reason);
+	void StartJ83BBurstWorker();
+	void StopJ83BBurstWorker();
+	void J83BBurstWorker();
+
 	static const struct PxMltDeviceParam final {
 		std::uint8_t i2c_addr;
 		std::uint8_t i2c_bus;
@@ -212,6 +243,8 @@ private:
 	std::atomic_bool init_;
 	unsigned int open_count_;
 	bool card_open_;
+	/* HoldBackendPower による電源の保持。受信機・カードと並ぶ 3 つ目の利用者として数える。 */
+	bool power_hold_;
 	unsigned int lnb_power_count_;
 	unsigned int streaming_count_;
 	std::mutex tuner_lock_[2];
@@ -219,6 +252,18 @@ private:
 	std::unique_ptr<PxMltReceiver> receivers_[5];
 	it930x_bridge it930x_;
 	StreamContext stream_ctx_;
+
+	std::thread burst_thread_;
+	std::mutex burst_mtx_;
+	std::condition_variable burst_cond_;
+	bool burst_quit_;
+	bool burst_pending_;
+	bool burst_active_;
+	std::uint32_t burst_seq_;
+	std::uintptr_t burst_trigger_index_;
+	const char *burst_reason_;
+	std::chrono::steady_clock::time_point burst_begin_;
+	std::chrono::steady_clock::time_point burst_deadline_;
 };
 
 } // namespace px4

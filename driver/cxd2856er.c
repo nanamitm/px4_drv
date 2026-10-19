@@ -1845,6 +1845,49 @@ int cxd2856er_read_j83b_monitor(struct cxd2856er_demod *demod,
 	return ret;
 }
 
+/* 同じデバイスの別受信機の電源投入・選局に続く RS 訂正不能の時刻を細かく
+ * 調べるための縮小版モニター。読むのは取得・TS 同期状態、IF AGC、RS 訂正不能
+ * 計数だけで、I2C 要求は書き込み 3 回と読み出し 4 回 (読み出しは各 2 要求)。
+ * RS 計数は累積値ではなく、直近の計測期間の値である。 */
+int cxd2856er_read_j83b_rs_sample(struct cxd2856er_demod *demod,
+				  struct cxd2856er_j83b_rs_sample *value)
+{
+	int ret, cleanup;
+	u8 agc[2], rs[3];
+	struct cxd2856er_j83b_rs_sample sample = {0};
+
+	if (!value)
+		return -EINVAL;
+	memset(value, 0, sizeof(*value));
+	if (!demod || demod->state != CXD2856ER_ACTIVE_STATE || !demod->j83b_active)
+		return -EINVAL;
+
+	/* 複数バイトの計数を同じ時点で読むため、既存モニターと同様に freeze する。 */
+	ret = cxd2856er_write_slvt_reg(demod, 0x01, 0x01);
+	if (ret)
+		return ret;
+	ret = cxd2856er_write_slvt_reg(demod, 0x00, 0x40);
+	if (!ret)
+		ret = cxd2856er_read_slvt_reg(demod, 0x88, &sample.ar_status_raw);
+	if (!ret)
+		ret = cxd2856er_read_slvt_reg(demod, 0x10, &sample.ts_status_raw);
+	if (!ret)
+		ret = cxd2856er_read_slvt_regs(demod, 0x49, agc, 2);
+	if (!ret)
+		ret = cxd2856er_read_slvt_regs(demod, 0xea, rs, 3);
+	/* 途中で失敗しても freeze を解除し、最初のエラーを保持する。bank は 0x40 のまま。 */
+	cleanup = cxd2856er_write_slvt_reg(demod, 0x01, 0x00);
+	if (!ret)
+		ret = cleanup;
+	if (!ret) {
+		sample.if_agc_raw = ((agc[0] & 0x0f) << 8) | agc[1];
+		sample.rs_packet_errors = ((u16)rs[0] << 8) | rs[1];
+		sample.rs_valid = !!(rs[2] & 0x01);
+		*value = sample;
+	}
+	return ret;
+}
+
 int cxd2856er_read_cnr_raw_isdbc(struct cxd2856er_demod *demod, u16 *value)
 {
 	int ret;
