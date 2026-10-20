@@ -132,6 +132,9 @@ void PxMltDevice::LoadConfig()
 	if (configs.Exists(L"HoldBackendPower"))
 		config_.device.hold_backend_power = px4::util::wtob(configs.Get(L"HoldBackendPower"));
 
+	if (configs.Exists(L"ExperimentalKeepTunerOnClose"))
+		config_.device.keep_tuner_on_close = px4::util::wtob(configs.Get(L"ExperimentalKeepTunerOnClose"));
+
 	if (configs.Exists(L"ExperimentalJ83BBurstMonitor"))
 		config_.device.experimental_j83b_burst_monitor = px4::util::wtob(configs.Get(L"ExperimentalJ83BBurstMonitor"));
 
@@ -1186,7 +1189,17 @@ void PxMltDevice::PxMltReceiver::Close()
 
 	{
 		std::lock_guard<std::mutex> tuner_lock(*tuner_lock_);
-		cxd2858er_term(&cxd2858er_);
+		/* 地デジの受信機を閉じたとき、同じデバイスで受信中の J.83B に RS 訂正不能が
+		 * 記録されることがある。チューナー停止の書き込みが関係するかを比べるため、
+		 * 設定で有効にした場合は、別受信機の使用中に限って停止を省く。
+		 * cxd2858er_init は次の Open で電源投入から初期化し直す。 */
+		if (parent_.config_.device.keep_tuner_on_close &&
+		    cxd2858er_.system == CXD2858ER_ISDB_T_SYSTEM && parent_.open_count_ > 1) {
+			dev_info(&parent_.dev_, "px4::PxMltDevice::PxMltReceiver::Close(%u): ExperimentalKeepTunerOnClose: tuner left running (open receivers: %u)\n",
+				 index_, parent_.open_count_);
+		} else {
+			cxd2858er_term(&cxd2858er_);
+		}
 	}
 
 	cxd2856er_term(&cxd2856er_);

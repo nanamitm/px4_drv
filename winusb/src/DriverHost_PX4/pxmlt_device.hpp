@@ -41,7 +41,7 @@ enum class PxMltDeviceModel {
 struct PxMltDeviceConfig final {
 	PxMltDeviceConfig()
 		: usb{ 816, 816, 5, false },
-		device{ 2048, 2000, true, false, false, false, 0, false, false, false, false, 3000, 50, false, false }
+		device{ 2048, 2000, true, false, false, false, 0, false, false, false, false, 3000, 50, false, false, false }
 	{}
 	struct {
 		unsigned int xfer_packets;
@@ -81,6 +81,10 @@ struct PxMltDeviceConfig final {
 		bool hold_backend_power;
 		/* J.83B のチューナーの過大入力検出レベルに地デジの値を使う試験用設定。既定 false。 */
 		bool j83b_ter_overload_level;
+		/* 同じデバイスの別受信機が使用中なら、地デジの受信機を閉じるときにチューナーを
+		 * 停止しない。J.83B の受信機を閉じた場合と同じく、次の Open の初期化か
+		 * バックエンド電源の切断まで動作を続ける。比較試験用で既定 false。 */
+		bool keep_tuner_on_close;
 	} device;
 };
 
