@@ -231,6 +231,39 @@ int main(void)
 			}
 			printf("J83B burst sample decode and %u I/O failure boundaries: PASS\n", count);
 		}
+		{
+			/* チューナーの RSSI 読み取り。未選局での拒否、0x59/0x87/0x88 の書き戻し、
+			 * 換算値、全 I/O 境界での失敗とゲートの解放を確かめる。模擬バスは 0x5b の
+			 * 切り替えを再現しないため、IF AGC と RF AGC は同じ値になる。 */
+			struct cxd2858er_rssi rssi;
+			unsigned int base;
+
+			reset(&demod, &tuner);
+			CHECK(cxd2858er_read_rssi_t(&tuner, 327250, &rssi) == -EINVAL);
+			tuner.config.experimental_j83b = true;
+			CHECK(cxd2858er_set_params_c(&tuner, 327250, 6) == 0);
+			bus.regs[2][0][0x59] = 0x2a;
+			bus.regs[2][0][0x5b] = 60;
+			CHECK(bus.regs[2][0][0x87] == 0xc0 && bus.regs[2][0][0x88] == 0x00);
+			CHECK((bus.regs[2][0][0x69] & 0x0f) == 0x04);
+			base = bus.calls;
+			CHECK(cxd2858er_read_rssi_t(&tuner, 327250, &rssi) == 0);
+			count = bus.calls - base;
+			CHECK(rssi.if_agc == 60 && rssi.rf_agc == 60 && rssi.if_bpf_gc == 4);
+			/* ifgain = 870 + 2*100 + (769*(9945-8400)+1275)/2550 = 1536,
+			 * rfgain = 4110 - 154 = 3956 (320-350 MHz の最大利得) */
+			CHECK(rssi.rssi_x100 == -5492);
+			CHECK(bus.regs[2][0][0x59] == 0x2a);
+			CHECK(bus.regs[2][0][0x87] == 0xc0 && bus.regs[2][0][0x88] == 0x00);
+			CHECK(!bus.gate_open);
+			for (fail = 1; fail <= count; fail++) {
+				bus.fail_at = bus.calls + fail;
+				CHECK(cxd2858er_read_rssi_t(&tuner, 327250, &rssi) == -EIO);
+				CHECK(!bus.gate_open);
+				bus.fail_at = 0;
+			}
+			printf("Tuner RSSI decode, register restore and %u I/O failure boundaries: PASS\n", count);
+		}
 	}
 #endif
 	return 0;

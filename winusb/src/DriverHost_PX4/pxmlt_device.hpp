@@ -41,7 +41,7 @@ enum class PxMltDeviceModel {
 struct PxMltDeviceConfig final {
 	PxMltDeviceConfig()
 		: usb{ 816, 816, 5, false },
-		device{ 2048, 2000, true, false, false, false, 0, false, false, false, false, 3000, 50, false, false, false, false }
+		device{ 2048, 2000, true, false, false, false, 0, false, false, false, false, 3000, 50, false, false, false, false, false }
 	{}
 	struct {
 		unsigned int xfer_packets;
@@ -90,6 +90,9 @@ struct PxMltDeviceConfig final {
 		 * Open 後の最初の選局でチューナーが停止状態から動き出す変化を、録画中に
 		 * 起こさないための比較試験用設定で、既定 false。 */
 		bool warm_tuners;
+		/* J.83B モニターの読み取りに合わせて、チューナーの AGC 生値と入力レベルの
+		 * 推定値をログへ出す。チューナーのレジスタを一時的に切り替えるため既定 false。 */
+		bool experimental_tuner_rssi;
 	} device;
 };
 

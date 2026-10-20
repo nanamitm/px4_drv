@@ -138,6 +138,9 @@ void PxMltDevice::LoadConfig()
 	if (configs.Exists(L"ExperimentalWarmTuners"))
 		config_.device.warm_tuners = px4::util::wtob(configs.Get(L"ExperimentalWarmTuners"));
 
+	if (configs.Exists(L"ExperimentalTunerRssi"))
+		config_.device.experimental_tuner_rssi = px4::util::wtob(configs.Get(L"ExperimentalTunerRssi"));
+
 	if (configs.Exists(L"ExperimentalJ83BBurstMonitor"))
 		config_.device.experimental_j83b_burst_monitor = px4::util::wtob(configs.Get(L"ExperimentalJ83BBurstMonitor"));
 
@@ -1731,6 +1734,24 @@ int PxMltDevice::PxMltReceiver::ReadStat(px4::command::StatType type, std::int32
 						monitor.ber_valid, monitor.ber_bit_errors, monitor.ber_period_exp,
 						monitor.per_valid, monitor.per_packet_errors, monitor.per_period_exp,
 						monitor.rs_valid, monitor.rs_packet_errors);
+				}
+
+				/* 入力レベルの目安。換算式は CXD2858ER 用に校正されていないため、
+				 * 配線の変更前後の比較など、同じ受信機での相対比較に使う。 */
+				if (parent_.config_.device.experimental_tuner_rssi) {
+					cxd2858er_rssi rssi;
+					int rret;
+					{
+						std::lock_guard<std::mutex> tuner_lock(*tuner_lock_);
+						rret = cxd2858er_read_rssi_t(&cxd2858er_, params_.freq, &rssi);
+					}
+					if (rret) {
+						dev_warn(&parent_.dev_, "Tuner RSSI input=%u freq=%u read failed. (ret: %d)\n", index_, params_.freq, rret);
+					} else {
+						const double dbm = rssi.rssi_x100 / 100.0;
+						dev_info(&parent_.dev_, "Tuner RSSI input=%u freq=%u IFAGCraw=%u RFAGCraw=%u IFBPFGC=%u est=%.2f dBm (%.1f dBuV/75ohm, reference formula, uncalibrated)\n",
+							index_, params_.freq, rssi.if_agc, rssi.rf_agc, rssi.if_bpf_gc, dbm, dbm + 108.75);
+					}
 				}
 			}
 

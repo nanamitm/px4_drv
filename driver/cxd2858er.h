@@ -62,6 +62,17 @@ int cxd2858er_set_params_s(struct cxd2858er_tuner *tuner,
 			   enum cxd2858er_system system,
 			   u32 freq, u32 symbol_rate);
 int cxd2858er_stop(struct cxd2858er_tuner *tuner);
+
+/* 地上・ケーブル側の AGC 生値と、参照実装の換算式による入力レベルの推定値。
+ * 推定値は CXD2858ER 用に校正されていない。 */
+struct cxd2858er_rssi {
+	u8 if_agc;
+	u8 rf_agc;
+	u8 if_bpf_gc;
+	s32 rssi_x100;
+};
+int cxd2858er_read_rssi_t(struct cxd2858er_tuner *tuner, u32 freq,
+			  struct cxd2858er_rssi *rssi);
 #ifdef __cplusplus
 }
 #endif
