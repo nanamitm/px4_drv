@@ -135,6 +135,9 @@ void PxMltDevice::LoadConfig()
 	if (configs.Exists(L"ExperimentalKeepTunerOnClose"))
 		config_.device.keep_tuner_on_close = px4::util::wtob(configs.Get(L"ExperimentalKeepTunerOnClose"));
 
+	if (configs.Exists(L"ExperimentalWarmTuners"))
+		config_.device.warm_tuners = px4::util::wtob(configs.Get(L"ExperimentalWarmTuners"));
+
 	if (configs.Exists(L"ExperimentalJ83BBurstMonitor"))
 		config_.device.experimental_j83b_burst_monitor = px4::util::wtob(configs.Get(L"ExperimentalJ83BBurstMonitor"));
 
@@ -334,6 +337,21 @@ int PxMltDevice::Init()
 		}
 	}
 
+	/* 電源を保持している場合だけ、録画が始まる前に全チューナーを動作状態にする。
+	 * 失敗した受信機は従来どおり Open で初期化する。 */
+	if (config_.device.warm_tuners && power_hold_) {
+		int warmed = 0;
+
+		for (int i = 0; i < receiver_num_; i++) {
+			const int wret = receivers_[i]->WarmUpTuner();
+			if (!wret)
+				warmed++;
+			else
+				dev_warn(&dev_, "px4::PxMltDevice::Init: ExperimentalWarmTuners: receiver %d failed. (ret: %d)\n", i, wret);
+		}
+		dev_info(&dev_, "px4::PxMltDevice::Init: ExperimentalWarmTuners: %d/%d tuners running\n", warmed, receiver_num_);
+	}
+
 	if (config_.device.experimental_j83b && config_.device.experimental_j83b_burst_monitor)
 		StartJ83BBurstWorker();
 
@@ -403,6 +421,10 @@ void PxMltDevice::SetAvailability(bool available)
 	if (available_ && !available) {
 		card_open_ = false;
 		power_hold_ = false;
+		for (int i = 0; i < receiver_num_; i++) {
+			if (receivers_[i])
+				receivers_[i]->InvalidateWarmTuner();
+		}
 	}
 	available_ = available;
 }
@@ -505,6 +527,13 @@ int PxMltDevice::SetBackendPower(bool state)
 
 	int ret = 0;
 	std::lock_guard<std::recursive_mutex> lock(lock_);
+
+	/* 電源の投入・切断の前後でチューナーの状態は保たれないため、動作中として
+	 * 扱っている受信機の記録を消す。切断済みで I/O を行わない場合も同じ。 */
+	for (int i = 0; i < receiver_num_; i++) {
+		if (receivers_[i])
+			receivers_[i]->InvalidateWarmTuner();
+	}
 
 	if (!state && !available_)
 		return 0;
@@ -1013,7 +1042,8 @@ PxMltDevice::PxMltReceiver::PxMltReceiver(PxMltDevice &parent, std::uintptr_t in
 	lnb_power_(false),
 	current_system_(px4::SystemType::UNSPECIFIED),
 	streaming_(false),
-	lock_log_state_(LOCK_LOG_STATE_UNKNOWN)
+	lock_log_state_(LOCK_LOG_STATE_UNKNOWN),
+	tuner_warm_(false)
 {
 	auto i2c_addr = parent_.params_[static_cast<int>(parent_.model_)][index_].i2c_addr;
 	auto i2c_bus = parent_.params_[static_cast<int>(parent_.model_)][index_].i2c_bus;
@@ -1086,7 +1116,11 @@ int PxMltDevice::PxMltReceiver::Open()
 		goto fail_demod_init;
 	}
 
-	{
+	if (tuner_warm_) {
+		/* ExperimentalWarmTuners で動作中のチューナーは初期化し直さず、次の選局を
+		 * 周波数の変更だけにする。 */
+		dev_info(&parent_.dev_, "px4::PxMltDevice::PxMltReceiver::Open(%u): ExperimentalWarmTuners: tuner kept running\n", index_);
+	} else {
 		std::lock_guard<std::mutex> tuner_lock(*tuner_lock_);
 
 		ret = cxd2858er_init(&cxd2858er_);
@@ -1155,6 +1189,7 @@ fail_backend:
 	{
 		std::lock_guard<std::mutex> tuner_lock(*tuner_lock_);
 		cxd2858er_term(&cxd2858er_);
+		tuner_warm_ = false;
 	}
 
 fail_tuner_init:
@@ -1193,7 +1228,9 @@ void PxMltDevice::PxMltReceiver::Close()
 		 * 記録されることがある。チューナー停止の書き込みが関係するかを比べるため、
 		 * 設定で有効にした場合は、別受信機の使用中に限って停止を省く。
 		 * cxd2858er_init は次の Open で電源投入から初期化し直す。 */
-		if (parent_.config_.device.keep_tuner_on_close &&
+		if (tuner_warm_) {
+			dev_info(&parent_.dev_, "px4::PxMltDevice::PxMltReceiver::Close(%u): ExperimentalWarmTuners: tuner left running\n", index_);
+		} else if (parent_.config_.device.keep_tuner_on_close &&
 		    cxd2858er_.system == CXD2858ER_ISDB_T_SYSTEM && parent_.open_count_ > 1) {
 			dev_info(&parent_.dev_, "px4::PxMltDevice::PxMltReceiver::Close(%u): ExperimentalKeepTunerOnClose: tuner left running (open receivers: %u)\n",
 				 index_, parent_.open_count_);
@@ -1511,6 +1548,52 @@ int PxMltDevice::PxMltReceiver::SetCapture(bool capture)
 		}
 		streaming_ = capture;
 	}
+
+	return ret;
+}
+
+int PxMltDevice::PxMltReceiver::WarmUpTuner()
+{
+	/* 再現試験では、別受信機の Open だけ・選局し直しだけでは録画中の J.83B に影響が
+	 * なく、Open 後の最初の選局でチューナーが停止状態から動き出すときに RS 訂正
+	 * 不能が出た。録画が始まる前に一度選局して動作させておき、Open では初期化を
+	 * 省く。選局先は VHF 帯の低い周波数とし、復調器はスリープへ戻す。 */
+	static const std::uint32_t warm_freq_khz = 93000;
+
+	std::lock_guard<std::mutex> lock(lock_);
+	std::lock_guard<std::recursive_mutex> dev_lock(parent_.lock_);
+
+	if (open_)
+		return -EBUSY;
+	if (tuner_warm_)
+		return 0;
+
+	int ret = cxd2856er_init(&cxd2856er_);
+	if (ret)
+		return ret;
+
+	{
+		std::lock_guard<std::mutex> tuner_lock(*tuner_lock_);
+
+		ret = cxd2858er_init(&cxd2858er_);
+		if (!ret) {
+			if (parent_.config_.device.experimental_j83b) {
+				cxd2858er_.config.experimental_j83b = true;
+				cxd2858er_.config.isdbc_reference_profile = parent_.config_.device.isdbc_reference_profile;
+				cxd2858er_.config.j83b_ter_overload_level = parent_.config_.device.j83b_ter_overload_level;
+				ret = cxd2858er_set_params_c(&cxd2858er_, warm_freq_khz, 6);
+			} else {
+				ret = cxd2858er_set_params_t(&cxd2858er_, CXD2858ER_ISDB_T_SYSTEM, warm_freq_khz, 6);
+			}
+			if (ret)
+				cxd2858er_term(&cxd2858er_);
+		}
+	}
+
+	cxd2856er_term(&cxd2856er_);
+
+	if (!ret)
+		tuner_warm_ = true;
 
 	return ret;
 }

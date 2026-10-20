@@ -41,7 +41,7 @@ enum class PxMltDeviceModel {
 struct PxMltDeviceConfig final {
 	PxMltDeviceConfig()
 		: usb{ 816, 816, 5, false },
-		device{ 2048, 2000, true, false, false, false, 0, false, false, false, false, 3000, 50, false, false, false }
+		device{ 2048, 2000, true, false, false, false, 0, false, false, false, false, 3000, 50, false, false, false, false }
 	{}
 	struct {
 		unsigned int xfer_packets;
@@ -85,6 +85,11 @@ struct PxMltDeviceConfig final {
 		 * 停止しない。J.83B の受信機を閉じた場合と同じく、次の Open の初期化か
 		 * バックエンド電源の切断まで動作を続ける。比較試験用で既定 false。 */
 		bool keep_tuner_on_close;
+		/* HoldBackendPower で電源を保持したデバイスの初期化時に、全チューナーを一度
+		 * 選局して動作させたままにし、以後の Open では初期化を省き、Close でも停止しない。
+		 * Open 後の最初の選局でチューナーが停止状態から動き出す変化を、録画中に
+		 * 起こさないための比較試験用設定で、既定 false。 */
+		bool warm_tuners;
 	} device;
 };
 
@@ -180,6 +185,12 @@ private:
 		};
 		void SampleJ83BBurst(BurstSample &out);
 
+		/* ExperimentalWarmTuners: 開いていない受信機のチューナーを初期化・選局して
+		 * 動作させたままにする。電源の切断時は InvalidateWarmTuner で無効にする。
+		 * どちらもデバイスのロック下で呼ぶ。 */
+		int WarmUpTuner();
+		void InvalidateWarmTuner() noexcept { tuner_warm_ = false; }
+
 	protected:
 		int PrepareTune() override;
 		int SetFrequency() override;
@@ -212,6 +223,8 @@ private:
 			LOCK_LOG_STATE_UNLOCKED = 2
 		};
 		int lock_log_state_;
+		/* チューナーが電源投入後に初期化・選局済みで、動作を続けていれば true */
+		bool tuner_warm_;
 	};
 
 	void LoadConfig();
