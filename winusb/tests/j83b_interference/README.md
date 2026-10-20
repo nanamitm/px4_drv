@@ -96,6 +96,30 @@ c-open:close                         10      0      0        0      0           
 
 CC エラーは録画役が受け取った TS で数えます。復調器の RS 訂正不能とは別の量のため、原因を絞るには、同じ時刻の `DriverHost_PX4.log`（`ExperimentalJ83BBurstMonitor=true` のバースト記録や Open・選局のログ）と照合してください。
 
+## 信号レベルの記録
+
+地デジ・BS のように誤り訂正の余裕が大きい方式では、他受信機の操作で CC エラーが出ないため、影響の有無を CC エラーだけでは判断できません。環境変数 `J83B_VICTIM_SIGNAL_MS` に 20〜10000 のミリ秒を指定すると、録画役がその間隔で BonDriver の `GetSignalLevel` を呼び、`victim.csv` へ `sig` 行として残します。`suite` の録画役は子プロセスとして同じ環境変数を引き継ぎます。
+
+```powershell
+$env:J83B_VICTIM_SIGNAL_MS = '100'
+j83b_interference.exe suite BonDriver_J83B-Victim.dll BonDriver_J83B-Aggressor.dll 1 5 12 0 3 10 C:\j83btest\run2
+```
+
+`sig` 行の `a` 列は信号レベル (C/N) の 0.01 dB 単位の整数、`d` 列は読み出しにかかった時間 (ms) です。既定では記録しません。読み出しは同じ USB ブリッジの制御経路を使うため、CC エラーだけを比べる試験では、記録の有無をそろえてください。
+
+`sig` 行があると、`analyze` は CC エラーの表の後に次の表を出力します。
+
+```text
+signal level: samples=3241 median=23.75 min=23.18 max=24.39
+baseline drop (no action): windows=923 median=0.23 p95=0.51 max=0.62 dB
+action                                n  drop_avg  drop_max    n>=1dB
+t-open-tune:tune                      5      0.35      0.43         0
+```
+
+- 落ち込み (drop) は、窓の開始前 1 秒間の中央値から窓内の最小値までの差 (dB) です。
+- `baseline drop` は、どの操作の窓にも入らない時刻を起点にした同じ計算で、測定値のふらつきの目安です。操作の行の値がこれと同程度なら、その操作による落ち込みは示されません。
+- 復調器が返す C/N は一定時間の平均値のため、数十 ms の短い落ち込みは小さく表れます。落ち込みが見えないことは、短時間の影響がないことの証明にはなりません。
+
 ## 確認できていないこと
 
-このツールは模擬入力での試験を持たず、実機での実行もまだ行っていません。BonDriver の `OpenTuner` は受信機の Open と TS 出力の開始を、`SetChannel` は選局を行います。Open 単体と TS 出力開始の影響は、このツールでは分けられません。
+このツールは模擬入力での試験を持ちません。BonDriver の `OpenTuner` は受信機の Open と TS 出力の開始を、`SetChannel` は選局を行います。Open 単体と TS 出力開始の影響は、このツールでは分けられません。

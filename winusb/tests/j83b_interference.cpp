@@ -149,6 +149,22 @@ int RunVictim(const wchar_t *dll, DWORD space, DWORD channel, unsigned int secon
 	std::int64_t tick_begin = begin;
 	unsigned int empty_ticks = 0;
 
+	/* J83B_VICTIM_SIGNAL_MS (20-10000) を指定した場合だけ、GetSignalLevel の値を
+	 * その間隔で sig 行として残す。地デジ・BS のように誤りが出ない方式でも、他受信機の
+	 * 操作で C/N が下がるかを比べるため。読み出しは共有制御経路の I/O を増やすため既定は無効。 */
+	unsigned int signal_ms = 0;
+	{
+		wchar_t value[16] = {};
+		if (GetEnvironmentVariableW(L"J83B_VICTIM_SIGNAL_MS", value, 16) > 0) {
+			const unsigned long v = std::wcstoul(value, nullptr, 10);
+			if (v >= 20 && v <= 10000)
+				signal_ms = static_cast<unsigned int>(v);
+		}
+	}
+	std::int64_t signal_next = begin;
+	if (signal_ms)
+		std::fprintf(stderr, "victim: signal level every %u ms\n", signal_ms);
+
 	while (!g_stop) {
 		const std::int64_t now = NowUnixMs();
 		if (now >= end)
@@ -197,6 +213,14 @@ int RunVictim(const wchar_t *dll, DWORD space, DWORD channel, unsigned int secon
 
 		/* 100 ms ごとに受信量と誤りを残し、空受信の区間も分かるようにする。 */
 		const std::int64_t t = NowUnixMs();
+		if (signal_ms && t >= signal_next) {
+			/* 値は 0.01 dB 単位の整数で残す。読み出しにかかった時間も d 列に記録する。 */
+			const float level = bon->GetSignalLevel();
+			const std::int64_t t2 = NowUnixMs();
+			std::fprintf(csv, "sig,%lld,%s,%lld,0,0,%lld\n", static_cast<long long>(t), LocalStamp(t).c_str(),
+				static_cast<long long>(level * 100.0f + (level >= 0 ? 0.5f : -0.5f)), static_cast<long long>(t2 - t));
+			signal_next = t + signal_ms;
+		}
 		if (t - tick_begin >= 100) {
 			std::fprintf(csv, "tick,%lld,%s,%llu,%llu,%llu,%llu\n",
 				static_cast<long long>(t), LocalStamp(t).c_str(),
@@ -335,7 +359,8 @@ struct CcEvent { std::int64_t t; unsigned int pid; };
 struct Action { std::string label; std::int64_t begin; std::int64_t end; bool ok; };
 
 bool LoadVictim(const wchar_t *path, std::vector<CcEvent> &cc, std::int64_t &first, std::int64_t &last,
-		std::vector<std::pair<std::int64_t, std::uint64_t>> &ticks)
+		std::vector<std::pair<std::int64_t, std::uint64_t>> &ticks,
+		std::vector<std::pair<std::int64_t, double>> &sig)
 {
 	FILE *f = nullptr;
 	if (_wfopen_s(&f, path, L"r") || !f)
@@ -357,6 +382,8 @@ bool LoadVictim(const wchar_t *path, std::vector<CcEvent> &cc, std::int64_t &fir
 			cc.push_back({ t, static_cast<unsigned int>(a) });
 		else if (!std::strcmp(type, "tick"))
 			ticks.emplace_back(t, a);
+		else if (!std::strcmp(type, "sig"))
+			sig.emplace_back(t, static_cast<double>(static_cast<long long>(a)) / 100.0);
 	}
 	std::fclose(f);
 	return true;
@@ -387,9 +414,10 @@ int Analyze(const wchar_t *victim_csv, const wchar_t *aggressor_csv, unsigned in
 {
 	std::vector<CcEvent> cc;
 	std::vector<std::pair<std::int64_t, std::uint64_t>> ticks;
+	std::vector<std::pair<std::int64_t, double>> sig;
 	std::vector<Action> actions;
 	std::int64_t first = 0, last = 0;
-	if (!LoadVictim(victim_csv, cc, first, last, ticks) || !LoadActions(aggressor_csv, actions)) {
+	if (!LoadVictim(victim_csv, cc, first, last, ticks, sig) || !LoadActions(aggressor_csv, actions)) {
 		std::fprintf(stderr, "Cannot read input files.\n");
 		return 2;
 	}
@@ -460,6 +488,72 @@ int Analyze(const wchar_t *victim_csv, const wchar_t *aggressor_csv, unsigned in
 		}
 		std::fprintf(out, "%-32s %6u %6u %6u %8llu %6llu %14s\n", kv.first.c_str(), r.trials, r.failed, r.hit,
 			static_cast<unsigned long long>(r.cc), static_cast<unsigned long long>(r.cc_max), delay.c_str());
+	}
+
+	if (sig.empty())
+		return 0;
+
+	/* 信号レベルの落ち込み: 窓の開始前 1 秒の中央値から、窓内の最小値までの差 (dB)。
+	 * 操作の窓に入らない時刻を起点にした同じ計算を基準として並べる。 */
+	auto drop_at = [&sig, window_ms](std::int64_t wb, double &drop) {
+		std::vector<double> pre;
+		double low = 1e9;
+		for (const auto &s : sig) {
+			if (s.first >= wb - 1000 && s.first < wb)
+				pre.push_back(s.second);
+			else if (s.first >= wb && s.first < wb + window_ms)
+				low = std::min(low, s.second);
+		}
+		if (pre.empty() || low > 1e8)
+			return false;
+		std::sort(pre.begin(), pre.end());
+		drop = pre[pre.size() / 2] - low;
+		return true;
+	};
+	auto in_window = [&actions, window_ms](std::int64_t t) {
+		for (const Action &a : actions)
+			if (t >= a.begin - 1000 && t < a.begin + window_ms)
+				return true;
+		return false;
+	};
+
+	std::vector<double> all;
+	for (const auto &s : sig)
+		all.push_back(s.second);
+	std::sort(all.begin(), all.end());
+
+	std::vector<double> base;
+	for (const auto &s : sig) {
+		double d = 0;
+		if (!in_window(s.first) && !in_window(s.first + window_ms) && drop_at(s.first, d))
+			base.push_back(d);
+	}
+	std::sort(base.begin(), base.end());
+	std::fprintf(out, "\nsignal level: samples=%zu median=%.2f min=%.2f max=%.2f\n",
+		all.size(), all[all.size() / 2], all.front(), all.back());
+	if (!base.empty())
+		std::fprintf(out, "baseline drop (no action): windows=%zu median=%.2f p95=%.2f max=%.2f dB\n",
+			base.size(), base[base.size() / 2], base[std::min(base.size() - 1, base.size() * 95 / 100)], base.back());
+
+	struct SigRow { std::vector<double> drops; };
+	std::map<std::string, SigRow> srows;
+	for (const Action &a : actions) {
+		double d = 0;
+		if (drop_at(a.begin, d))
+			srows[a.label].drops.push_back(d);
+	}
+	std::fprintf(out, "%-32s %6s %9s %9s %9s\n", "action", "n", "drop_avg", "drop_max", "n>=1dB");
+	for (auto &kv : srows) {
+		auto &v = kv.second.drops;
+		double sum = 0, mx = 0;
+		unsigned int over = 0;
+		for (double d : v) {
+			sum += d;
+			mx = std::max(mx, d);
+			if (d >= 1.0)
+				over++;
+		}
+		std::fprintf(out, "%-32s %6zu %9.2f %9.2f %9u\n", kv.first.c_str(), v.size(), sum / v.size(), mx, over);
 	}
 	return 0;
 }
