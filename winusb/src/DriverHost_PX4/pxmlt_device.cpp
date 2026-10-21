@@ -33,9 +33,19 @@ PxMltDevice::PxMltDevice(const std::wstring &path, const px4::DeviceDefinition &
 	init_(false),
 	open_count_(0),
 	card_open_(false),
+	power_hold_(false),
 	lnb_power_count_(0),
 	streaming_count_(0),
-	tuner_lock_{}
+	tuner_lock_{},
+	/* true は記録スレッドが動いていない状態。開始時だけ false にする。 */
+	burst_quit_(true),
+	burst_pending_(false),
+	burst_active_(false),
+	burst_seq_(0),
+	burst_trigger_index_(0),
+	burst_reason_(""),
+	burst_begin_(),
+	burst_deadline_()
 {
 	if (usb_dev_.descriptor.idVendor != 0x0511)
 		throw DeviceError("px4::PxMltDevice::PxMltDevice: unsupported device. (unknown vendor id)");
@@ -112,6 +122,47 @@ void PxMltDevice::LoadConfig()
 
 	if (configs.Exists(L"ExperimentalJ83B"))
 		config_.device.experimental_j83b = px4::util::wtob(configs.Get(L"ExperimentalJ83B"));
+
+	if (configs.Exists(L"ExperimentalJ83BMonitor"))
+		config_.device.experimental_j83b_monitor = px4::util::wtob(configs.Get(L"ExperimentalJ83BMonitor"));
+
+	if (configs.Exists(L"ExperimentalJ83BTerOverloadLevel"))
+		config_.device.j83b_ter_overload_level = px4::util::wtob(configs.Get(L"ExperimentalJ83BTerOverloadLevel"));
+
+	if (configs.Exists(L"HoldBackendPower"))
+		config_.device.hold_backend_power = px4::util::wtob(configs.Get(L"HoldBackendPower"));
+
+	if (configs.Exists(L"ExperimentalKeepTunerOnClose"))
+		config_.device.keep_tuner_on_close = px4::util::wtob(configs.Get(L"ExperimentalKeepTunerOnClose"));
+
+	if (configs.Exists(L"ExperimentalWarmTuners"))
+		config_.device.warm_tuners = px4::util::wtob(configs.Get(L"ExperimentalWarmTuners"));
+
+	if (configs.Exists(L"ExperimentalTunerRssi"))
+		config_.device.experimental_tuner_rssi = px4::util::wtob(configs.Get(L"ExperimentalTunerRssi"));
+
+	if (configs.Exists(L"ExperimentalJ83BBurstMonitor"))
+		config_.device.experimental_j83b_burst_monitor = px4::util::wtob(configs.Get(L"ExperimentalJ83BBurstMonitor"));
+
+	/* 範囲外の値は既定値に戻す。間隔の下限は共有制御バスの占有を抑えるため、
+	 * 記録時間の上限は録画開始が続く時間帯にバスを占有し続けないためのもの。 */
+	if (configs.Exists(L"J83BBurstWindowMs")) {
+		const auto value = px4::util::wtoui(configs.Get(L"J83BBurstWindowMs"));
+		if (value >= 500 && value <= 10000)
+			config_.device.j83b_burst_window_ms = value;
+		else
+			dev_warn(&dev_, "px4::PxMltDevice::LoadConfig: J83BBurstWindowMs=%u is out of range (500-10000); using %u.\n",
+				 value, config_.device.j83b_burst_window_ms);
+	}
+
+	if (configs.Exists(L"J83BBurstIntervalMs")) {
+		const auto value = px4::util::wtoui(configs.Get(L"J83BBurstIntervalMs"));
+		if (value >= 20 && value <= 1000)
+			config_.device.j83b_burst_interval_ms = value;
+		else
+			dev_warn(&dev_, "px4::PxMltDevice::LoadConfig: J83BBurstIntervalMs=%u is out of range (20-1000); using %u.\n",
+				 value, config_.device.j83b_burst_interval_ms);
+	}
 
 	if (configs.Exists(L"ISDBCReferenceProfile"))
 		config_.device.isdbc_reference_profile = px4::util::wtob(configs.Get(L"ISDBCReferenceProfile"));
@@ -276,6 +327,37 @@ int PxMltDevice::Init()
 		receiver_manager_.Register(ri, receivers_[it->index].get());
 	}
 
+	/* 受信機が開かれる前に電源を入れ、以後は終了まで切らない。同じ基板の別 USB
+	 * デバイスで録画中に、このデバイスの電源投入が起きることを避ける。投入に失敗した
+	 * 場合は保持せず、従来どおり最初の利用者が投入する。 */
+	if (config_.device.hold_backend_power) {
+		const int pret = SetBackendPower(true);
+		if (pret) {
+			dev_warn(&dev_, "px4::PxMltDevice::Init: HoldBackendPower: SetBackendPower(true) failed. (ret: %d)\n", pret);
+		} else {
+			power_hold_ = true;
+			dev_info(&dev_, "px4::PxMltDevice::Init: HoldBackendPower: backend power on\n");
+		}
+	}
+
+	/* 電源を保持している場合だけ、録画が始まる前に全チューナーを動作状態にする。
+	 * 失敗した受信機は従来どおり Open で初期化する。 */
+	if (config_.device.warm_tuners && power_hold_) {
+		int warmed = 0;
+
+		for (int i = 0; i < receiver_num_; i++) {
+			const int wret = receivers_[i]->WarmUpTuner();
+			if (!wret)
+				warmed++;
+			else
+				dev_warn(&dev_, "px4::PxMltDevice::Init: ExperimentalWarmTuners: receiver %d failed. (ret: %d)\n", i, wret);
+		}
+		dev_info(&dev_, "px4::PxMltDevice::Init: ExperimentalWarmTuners: %d/%d tuners running\n", warmed, receiver_num_);
+	}
+
+	if (config_.device.experimental_j83b && config_.device.experimental_j83b_burst_monitor)
+		StartJ83BBurstWorker();
+
 	return 0;
 
 fail_device:
@@ -307,12 +389,25 @@ void PxMltDevice::Term()
 
 	lock.unlock();
 
+	/* 記録スレッドは受信機を参照するため、受信機の破棄より先に止める。 */
+	StopJ83BBurstWorker();
+
 	for (int i = 0; i < receiver_num_; i++) {
 		stream_ctx_.stream_buf[i] = nullptr;
 		receivers_[i].reset();
 	}
 
 	lock.lock();
+
+	/* 受信機の破棄で開いていた受信機は閉じられているため、保持を外して電源を切る。
+	 * 切断済みの場合は SetBackendPower が I/O を行わない。 */
+	if (power_hold_) {
+		power_hold_ = false;
+		if (!open_count_ && !card_open_) {
+			SetBackendPower(false);
+			dev_info(&dev_, "px4::PxMltDevice::Term: HoldBackendPower: backend power off\n");
+		}
+	}
 
 	it930x_term(&it930x_);
 	itedtv_bus_term(&it930x_.bus);
@@ -324,9 +419,16 @@ void PxMltDevice::Term()
 void PxMltDevice::SetAvailability(bool available)
 {
 	std::lock_guard<std::recursive_mutex> lock(lock_);
-	/* 切断後の古いカードセッションから USB 制御転送を発行しない */
-	if (available_ && !available)
+	/* 切断後の古いカードセッションから USB 制御転送を発行しない。電源の保持も
+	 * 切断で無効になるため外し、再接続後の初期化で改めて投入する。 */
+	if (available_ && !available) {
 		card_open_ = false;
+		power_hold_ = false;
+		for (int i = 0; i < receiver_num_; i++) {
+			if (receivers_[i])
+				receivers_[i]->InvalidateWarmTuner();
+		}
+	}
 	available_ = available;
 }
 
@@ -348,7 +450,7 @@ int PxMltDevice::OpenCard()
 		return -EBUSY;
 
 	/* チューナー未使用時だけ基板の電源を投入し、視聴中の電源状態には触れない */
-	if (!open_count_) {
+	if (!open_count_ && !power_hold_) {
 		int ret = SetBackendPower(true);
 		if (ret)
 			return ret;
@@ -356,7 +458,7 @@ int PxMltDevice::OpenCard()
 
 	int ret = it930x_bcas_init(&it930x_);
 	if (ret) {
-		if (!open_count_)
+		if (!open_count_ && !power_hold_)
 			SetBackendPower(false);
 		return ret;
 	}
@@ -373,7 +475,7 @@ void PxMltDevice::CloseCard()
 		return;
 
 	card_open_ = false;
-	if (!open_count_)
+	if (!open_count_ && !power_hold_)
 		SetBackendPower(false);
 }
 
@@ -428,6 +530,13 @@ int PxMltDevice::SetBackendPower(bool state)
 
 	int ret = 0;
 	std::lock_guard<std::recursive_mutex> lock(lock_);
+
+	/* 電源の投入・切断の前後でチューナーの状態は保たれないため、動作中として
+	 * 扱っている受信機の記録を消す。切断済みで I/O を行わない場合も同じ。 */
+	for (int i = 0; i < receiver_num_; i++) {
+		if (receivers_[i])
+			receivers_[i]->InvalidateWarmTuner();
+	}
 
 	if (!state && !available_)
 		return 0;
@@ -497,6 +606,7 @@ int PxMltDevice::StartCapture()
 		it930x_.bus.usb.streaming.no_raw_io = config_.usb.no_raw_io;
 
 		stream_ctx_.remain_len = 0;
+		stream_ctx_.stats = {};
 
 		ret = itedtv_bus_start_streaming(&it930x_.bus, StreamHandler, this);
 		if (ret) {
@@ -523,6 +633,9 @@ int PxMltDevice::StopCapture()
 	if (!streaming_count_) {
 		dev_dbg(&dev_, "px4::PxMltDevice::StopCapture: stopping...\n");
 		itedtv_bus_stop_streaming(&it930x_.bus);
+		/* 受信スレッドの停止後に、間引きで出力されなかった分を含む累計を残す */
+		if (stream_ctx_.stats.resync_events)
+			LogStreamStats(true);
 	} else {
 		dev_dbg(&dev_, "px4::PxMltDevice::StopCapture: streaming_count_: %u\n", streaming_count_);
 	}
@@ -530,7 +643,7 @@ int PxMltDevice::StopCapture()
 	return 0;
 }
 
-void PxMltDevice::StreamProcess(std::shared_ptr<px4::ReceiverBase::StreamBuffer> stream_buf[], int num, std::uint8_t **buf, std::size_t &len)
+void PxMltDevice::StreamProcess(std::shared_ptr<px4::ReceiverBase::StreamBuffer> stream_buf[], int num, std::uint8_t **buf, std::size_t &len, StreamStats &stats)
 {
 	std::uint8_t *p = *buf;
 	std::size_t remain = len;
@@ -553,6 +666,38 @@ void PxMltDevice::StreamProcess(std::shared_ptr<px4::ReceiverBase::StreamBuffer>
 			break;
 
 		if (i < PXMLT_DEVICE_TS_SYNC_COUNT) {
+			if (stats.aligned) {
+				/* 配信済みパケットの直後で同期を失ったため、ここはパケット境界と分かる。
+				 * 境界を保ったまま先読みし、bit7 以外は同期値と一致するパケットを
+				 * 誤りフラグ付きとして数える。読み飛ばし処理そのものは変えない。 */
+				const std::uint8_t *q = p;
+				std::size_t r = remain;
+				int good_run = 0;
+
+				while (r >= 188 && good_run < PXMLT_DEVICE_TS_SYNC_COUNT) {
+					if (px4_ts_has_tagged_sync(q[0])) {
+						good_run++;
+					} else if ((q[0] & 0x0f) == 0x07) {
+						u8 id = (q[0] & 0x70) >> 4;
+
+						if (id && id <= 5)
+							stats.error_flagged[id - 1]++;
+						good_run = 0;
+					} else {
+						break;
+					}
+					q += 188;
+					r -= 188;
+				}
+
+				stats.aligned = false;
+			}
+			if (!stats.in_resync) {
+				stats.in_resync = true;
+				stats.resync_events++;
+			}
+			stats.skipped_bytes++;
+
 			p++;
 			remain--;
 			continue;
@@ -570,6 +715,8 @@ void PxMltDevice::StreamProcess(std::shared_ptr<px4::ReceiverBase::StreamBuffer>
 
 			p += 188;
 			remain -= 188;
+			stats.aligned = true;
+			stats.in_resync = false;
 		}
 	}
 
@@ -596,12 +743,21 @@ int PxMltDevice::StreamHandler(void *context, void *buf, std::uint32_t len)
 			std::size_t t = PXMLT_DEVICE_TS_SYNC_SIZE - stream_ctx.remain_len;
 
 			memcpy(remain_buf + stream_ctx.remain_len, p, t);
+			std::size_t prev_len = stream_ctx.remain_len;
+			std::uint64_t prev_skipped = stream_ctx.stats.skipped_bytes;
+
 			stream_ctx.remain_len = PXMLT_DEVICE_TS_SYNC_SIZE;
 
-			StreamProcess(stream_ctx.stream_buf, receiver_num, &remain_buf, stream_ctx.remain_len);
+			StreamProcess(stream_ctx.stream_buf, receiver_num, &remain_buf, stream_ctx.remain_len, stream_ctx.stats);
 			if (!stream_ctx.remain_len) {
 				p += t;
 				remain -= t;
+			} else {
+				/* 同期できなかった場合、前回の端数は捨てられ、今回の先頭 t バイトは
+				 * 下の処理で読み直される。読み直す分を二重に数えないよう、
+				 * 捨てられる前回の端数だけを読み飛ばし数とする。 */
+				stream_ctx.stats.skipped_bytes = prev_skipped + prev_len;
+				stream_ctx.stats.aligned = false;
 			}
 
 			stream_ctx.remain_len = 0;
@@ -613,7 +769,7 @@ int PxMltDevice::StreamHandler(void *context, void *buf, std::uint32_t len)
 		}
 	}
 
-	StreamProcess(stream_ctx.stream_buf, receiver_num, &p, remain);
+	StreamProcess(stream_ctx.stream_buf, receiver_num, &p, remain, stream_ctx.stats);
 
 	if (remain) {
 		dev_dbg(&obj.dev_, "px4::PxMltDevice::StreamHandler: remain: %lu\n", remain);
@@ -621,7 +777,211 @@ int PxMltDevice::StreamHandler(void *context, void *buf, std::uint32_t len)
 		stream_ctx.remain_len = remain;
 	}
 
+	/* ログはファイルへ同期書き込みされるため、受信スレッドでの出力は
+	 * 同期の回復後に限り、1秒に1回までへ間引く。 */
+	if (stream_ctx.stats.resync_events != stream_ctx.stats.logged_resync_events &&
+		!stream_ctx.stats.in_resync &&
+		(GetTickCount64() - stream_ctx.stats.last_log_tick) >= 1000)
+		obj.LogStreamStats(false);
+
 	return 0;
+}
+
+void PxMltDevice::LogStreamStats(bool total)
+{
+	StreamStats &s = stream_ctx_.stats;
+	std::uint64_t f[5];
+
+	for (int i = 0; i < 5; i++)
+		f[i] = s.error_flagged[i] - (total ? 0 : s.logged_error_flagged[i]);
+
+	dev_info(&dev_, "px4::PxMltDevice::StreamHandler: TS sync %s: resync events: %llu, skipped bytes: %llu, error-flagged packets (receiver 1-5): %llu %llu %llu %llu %llu\n",
+		total ? "total" : "lost",
+		s.resync_events - (total ? 0 : s.logged_resync_events),
+		s.skipped_bytes - (total ? 0 : s.logged_skipped_bytes),
+		f[0], f[1], f[2], f[3], f[4]);
+
+	s.logged_resync_events = s.resync_events;
+	s.logged_skipped_bytes = s.skipped_bytes;
+	for (int i = 0; i < 5; i++)
+		s.logged_error_flagged[i] = s.error_flagged[i];
+	s.last_log_tick = GetTickCount64();
+}
+
+/* 選局・Open の経路から呼ばれるため、期限と要求元を記録して記録スレッドを
+ * 起こすだけにする。I2C や待機をここへ持ち込むと選局そのものを遅らせる。 */
+void PxMltDevice::RequestJ83BBurst(std::uintptr_t trigger_index, const char *reason)
+{
+	if (!config_.device.experimental_j83b || !config_.device.experimental_j83b_burst_monitor)
+		return;
+
+	const auto now = std::chrono::steady_clock::now();
+	{
+		std::lock_guard<std::mutex> lock(burst_mtx_);
+
+		if (burst_quit_)
+			return;
+
+		burst_deadline_ = now + std::chrono::milliseconds(config_.device.j83b_burst_window_ms);
+		burst_trigger_index_ = trigger_index;
+		burst_reason_ = reason;
+		if (!burst_active_ && !burst_pending_) {
+			burst_begin_ = now;
+			burst_pending_ = true;
+		}
+	}
+	burst_cond_.notify_all();
+}
+
+void PxMltDevice::StartJ83BBurstWorker()
+{
+	{
+		std::lock_guard<std::mutex> lock(burst_mtx_);
+
+		if (!burst_quit_)
+			return;
+
+		burst_quit_ = false;
+		burst_pending_ = false;
+		burst_active_ = false;
+	}
+	burst_thread_ = std::thread(&PxMltDevice::J83BBurstWorker, this);
+
+	dev_info(&dev_, "px4::PxMltDevice: J83B burst monitor enabled (window=%u ms, interval=%u ms)\n",
+		 config_.device.j83b_burst_window_ms, config_.device.j83b_burst_interval_ms);
+}
+
+void PxMltDevice::StopJ83BBurstWorker()
+{
+	{
+		std::lock_guard<std::mutex> lock(burst_mtx_);
+		burst_quit_ = true;
+	}
+	burst_cond_.notify_all();
+
+	if (burst_thread_.joinable())
+		burst_thread_.join();
+}
+
+void PxMltDevice::J83BBurstWorker()
+{
+	struct Stats {
+		unsigned int samples, busy, errors, rs_invalid, rs_nonzero, rs_max;
+		unsigned long long rs_sum, read_us_sum, read_us_max;
+		unsigned int agc_first, agc_min, agc_max;
+		std::uint32_t freq;
+	};
+
+	std::unique_lock<std::mutex> lock(burst_mtx_);
+
+	while (true) {
+		burst_cond_.wait(lock, [this] { return burst_quit_ || burst_pending_; });
+		if (burst_quit_)
+			break;
+
+		burst_pending_ = false;
+		burst_active_ = true;
+
+		const std::uint32_t seq = ++burst_seq_;
+		const auto begin = burst_begin_;
+		std::uintptr_t trigger = burst_trigger_index_;
+		const char *reason = burst_reason_;
+		const auto interval = std::chrono::milliseconds(config_.device.j83b_burst_interval_ms);
+		Stats stats[5] = {};
+
+		lock.unlock();
+		dev_info(&dev_, "J83B burst #%u begin: trigger receiver=%u (%s), window=%u ms, interval=%u ms\n",
+			 seq, static_cast<unsigned int>(trigger), reason,
+			 config_.device.j83b_burst_window_ms, config_.device.j83b_burst_interval_ms);
+		lock.lock();
+
+		while (!burst_quit_ && std::chrono::steady_clock::now() < burst_deadline_) {
+			const auto tick = std::chrono::steady_clock::now();
+			const long long rel_ms = static_cast<long long>(
+				std::chrono::duration_cast<std::chrono::milliseconds>(tick - begin).count());
+
+			/* 記録中に別の Open・選局が来た場合は期限が延び、要求元も更新される。 */
+			const bool trigger_changed = (burst_trigger_index_ != trigger || burst_reason_ != reason);
+			trigger = burst_trigger_index_;
+			reason = burst_reason_;
+			lock.unlock();
+
+			if (trigger_changed)
+				dev_info(&dev_, "J83B burst #%u +%lld ms: trigger receiver=%u (%s)\n",
+					 seq, rel_ms, static_cast<unsigned int>(trigger), reason);
+
+			/* 要求元の受信機は自身の Open・選局中のため読まない。録画中 (TS 出力中) の
+			 * J.83B 受信機だけを対象とし、処理中で受信機のロックを取れない場合は飛ばす。 */
+			for (int i = 0; i < receiver_num_; i++) {
+				if (static_cast<std::uintptr_t>(i) == trigger || !receivers_[i])
+					continue;
+
+				PxMltReceiver::BurstSample s;
+				receivers_[i]->SampleJ83BBurst(s);
+
+				Stats &st = stats[i];
+				if (s.busy) {
+					st.busy++;
+					continue;
+				}
+				if (!s.sampled)
+					continue;
+
+				st.freq = s.freq;
+				if (s.ret) {
+					st.errors++;
+					dev_warn(&dev_, "J83B burst #%u +%lld ms input=%d freq=%u read failed. (ret: %d, read_us=%llu)\n",
+						 seq, rel_ms, i, s.freq, s.ret, static_cast<unsigned long long>(s.read_us));
+					continue;
+				}
+
+				const unsigned int agc = s.value.if_agc_raw;
+				const unsigned int rs = s.value.rs_packet_errors;
+
+				if (!st.samples) {
+					st.agc_first = agc;
+					st.agc_min = agc;
+					st.agc_max = agc;
+				}
+				st.samples++;
+				st.agc_min = (agc < st.agc_min) ? agc : st.agc_min;
+				st.agc_max = (agc > st.agc_max) ? agc : st.agc_max;
+				st.read_us_sum += s.read_us;
+				st.read_us_max = (s.read_us > st.read_us_max) ? s.read_us : st.read_us_max;
+				if (!s.value.rs_valid) {
+					st.rs_invalid++;
+				} else if (rs) {
+					st.rs_nonzero++;
+					st.rs_sum += rs;
+					st.rs_max = (rs > st.rs_max) ? rs : st.rs_max;
+				}
+
+				dev_info(&dev_, "J83B burst #%u +%lld ms input=%d freq=%u ARraw=%u TSraw=%u IFAGCraw=%u RSvalid=%u RSerrors=%u read_us=%llu\n",
+					 seq, rel_ms, i, s.freq, s.value.ar_status_raw, s.value.ts_status_raw, agc,
+					 s.value.rs_valid ? 1 : 0, rs, static_cast<unsigned long long>(s.read_us));
+			}
+
+			lock.lock();
+			burst_cond_.wait_until(lock, tick + interval, [this] { return burst_quit_; });
+		}
+
+		burst_active_ = false;
+		lock.unlock();
+
+		for (int i = 0; i < receiver_num_; i++) {
+			const Stats &st = stats[i];
+
+			if (!st.samples && !st.busy && !st.errors)
+				continue;
+
+			dev_info(&dev_, "J83B burst #%u end: input=%d freq=%u samples=%u busy=%u errors=%u RSinvalid=%u RSnonzero=%u RSmax=%u RSsum=%llu IFAGC first=%u min=%u max=%u read_us avg=%llu max=%llu\n",
+				 seq, i, st.freq, st.samples, st.busy, st.errors, st.rs_invalid, st.rs_nonzero, st.rs_max, st.rs_sum,
+				 st.agc_first, st.agc_min, st.agc_max,
+				 st.samples ? (st.read_us_sum / st.samples) : 0ULL, st.read_us_max);
+		}
+
+		lock.lock();
+	}
 }
 
 const PxMltDevice::PxMltReceiver::PxMltReceiverCnTableIsdbS PxMltDevice::PxMltReceiver::isdbs_cn_table_[] = {
@@ -684,7 +1044,9 @@ PxMltDevice::PxMltReceiver::PxMltReceiver(PxMltDevice &parent, std::uintptr_t in
 	close_cond_(),
 	lnb_power_(false),
 	current_system_(px4::SystemType::UNSPECIFIED),
-	streaming_(false)
+	streaming_(false),
+	lock_log_state_(LOCK_LOG_STATE_UNKNOWN),
+	tuner_warm_(false)
 {
 	auto i2c_addr = parent_.params_[static_cast<int>(parent_.model_)][index_].i2c_addr;
 	auto i2c_bus = parent_.params_[static_cast<int>(parent_.model_)][index_].i2c_bus;
@@ -735,12 +1097,20 @@ int PxMltDevice::PxMltReceiver::Open()
 	if (open_)
 		return -EALREADY;
 
-	if (!parent_.open_count_ && !parent_.card_open_) {
+	/* 同じデバイスの他受信機の IF AGC 変化や RS 訂正不能が、受信機の初期化
+	 * (電源投入) と選局のどちらに続いて起きるかを時刻で区別できるよう、
+	 * 各段階を受信機番号付きで残す。処理の順序とロックは変えない。 */
+	dev_info(&parent_.dev_, "px4::PxMltDevice::PxMltReceiver::Open(%u): begin (open receivers: %u, card open: %s)\n",
+		 index_, parent_.open_count_, (parent_.card_open_) ? "true" : "false");
+	parent_.RequestJ83BBurst(index_, "open");
+
+	if (!parent_.open_count_ && !parent_.card_open_ && !parent_.power_hold_) {
 		ret = parent_.SetBackendPower(true);
 		if (ret) {
 			dev_err(&parent_.dev_, "px4::PxMltDevice::PxMltReceiver::Open(%u): SetBackendPower(true) failed. (ret: %d)\n", index_, ret);
 			goto fail_power;
 		}
+		dev_info(&parent_.dev_, "px4::PxMltDevice::PxMltReceiver::Open(%u): backend power on\n", index_);
 	}
 
 	ret = cxd2856er_init(&cxd2856er_);
@@ -749,7 +1119,11 @@ int PxMltDevice::PxMltReceiver::Open()
 		goto fail_demod_init;
 	}
 
-	{
+	if (tuner_warm_) {
+		/* ExperimentalWarmTuners で動作中のチューナーは初期化し直さず、次の選局を
+		 * 周波数の変更だけにする。 */
+		dev_info(&parent_.dev_, "px4::PxMltDevice::PxMltReceiver::Open(%u): ExperimentalWarmTuners: tuner kept running\n", index_);
+	} else {
 		std::lock_guard<std::mutex> tuner_lock(*tuner_lock_);
 
 		ret = cxd2858er_init(&cxd2858er_);
@@ -758,6 +1132,7 @@ int PxMltDevice::PxMltReceiver::Open()
 			goto fail_tuner_init;
 		}
 	}
+	dev_info(&parent_.dev_, "px4::PxMltDevice::PxMltReceiver::Open(%u): demodulator and tuner initialized\n", index_);
 
 	ret = cxd2856er_write_slvt_reg(&cxd2856er_, 0x00, 0x00);
 	if (ret)
@@ -808,20 +1183,24 @@ int PxMltDevice::PxMltReceiver::Open()
 	parent_.open_count_++;
 	open_ = true;
 
+	dev_info(&parent_.dev_, "px4::PxMltDevice::PxMltReceiver::Open(%u): end (open receivers: %u)\n",
+		 index_, parent_.open_count_);
+
 	return 0;
 
 fail_backend:
 	{
 		std::lock_guard<std::mutex> tuner_lock(*tuner_lock_);
 		cxd2858er_term(&cxd2858er_);
+		tuner_warm_ = false;
 	}
 
 fail_tuner_init:
 	cxd2856er_term(&cxd2856er_);
 
 fail_demod_init:
-	/* カードもチューナーも未使用なら、初期化前に入れた電源を切る */
-	if (!parent_.open_count_ && !parent_.card_open_)
+	/* カードもチューナーも未使用で保持もないなら、初期化前に入れた電源を切る */
+	if (!parent_.open_count_ && !parent_.card_open_ && !parent_.power_hold_)
 		parent_.SetBackendPower(false);
 
 fail_power:
@@ -843,18 +1222,38 @@ void PxMltDevice::PxMltReceiver::Close()
 
 	assert(parent_.open_count_ > 0);
 
+	dev_info(&parent_.dev_, "px4::PxMltDevice::PxMltReceiver::Close(%u): begin (open receivers: %u)\n",
+		 index_, parent_.open_count_);
+
 	{
 		std::lock_guard<std::mutex> tuner_lock(*tuner_lock_);
-		cxd2858er_term(&cxd2858er_);
+		/* 地デジの受信機を閉じたとき、同じデバイスで受信中の J.83B に RS 訂正不能が
+		 * 記録されることがある。チューナー停止の書き込みが関係するかを比べるため、
+		 * 設定で有効にした場合は、別受信機の使用中に限って停止を省く。
+		 * cxd2858er_init は次の Open で電源投入から初期化し直す。 */
+		if (tuner_warm_) {
+			dev_info(&parent_.dev_, "px4::PxMltDevice::PxMltReceiver::Close(%u): ExperimentalWarmTuners: tuner left running\n", index_);
+		} else if (parent_.config_.device.keep_tuner_on_close &&
+		    cxd2858er_.system == CXD2858ER_ISDB_T_SYSTEM && parent_.open_count_ > 1) {
+			dev_info(&parent_.dev_, "px4::PxMltDevice::PxMltReceiver::Close(%u): ExperimentalKeepTunerOnClose: tuner left running (open receivers: %u)\n",
+				 index_, parent_.open_count_);
+		} else {
+			cxd2858er_term(&cxd2858er_);
+		}
 	}
 
 	cxd2856er_term(&cxd2856er_);
+	dev_info(&parent_.dev_, "px4::PxMltDevice::PxMltReceiver::Close(%u): demodulator and tuner terminated\n", index_);
 
 	parent_.open_count_--;
-	if (!parent_.open_count_ && !parent_.card_open_)
+	if (!parent_.open_count_ && !parent_.card_open_ && !parent_.power_hold_) {
 		parent_.SetBackendPower(false);
+		dev_info(&parent_.dev_, "px4::PxMltDevice::PxMltReceiver::Close(%u): backend power off\n", index_);
+	}
 
 	open_ = false;
+	dev_info(&parent_.dev_, "px4::PxMltDevice::PxMltReceiver::Close(%u): end (open receivers: %u)\n",
+		 index_, parent_.open_count_);
 
 	lock.unlock();
 	close_cond_.notify_all();
@@ -886,6 +1285,7 @@ int PxMltDevice::PxMltReceiver::SetFrequency()
 		return -EINVAL;
 
 	dev_dbg(&parent_.dev_, "px4::PxMltDevice::PxMltReceiver::SetFrequency(%u): freq: %u\n", index_, params_.freq);
+	parent_.RequestJ83BBurst(index_, "tune");
 
 	int ret = 0;
 	cxd2856er_system_params demod_params = { 0 };
@@ -899,10 +1299,15 @@ int PxMltDevice::PxMltReceiver::SetFrequency()
 		parent_.config_.device.discard_tsmf_header_packets);
 
 	current_system_ = px4::SystemType::UNSPECIFIED;
+	lock_log_state_ = LOCK_LOG_STATE_UNKNOWN;
 
 	switch (params_.system) {
 	case px4::SystemType::ISDB_T:
 		demod_params.bandwidth = (params_.bandwidth) ? params_.bandwidth : 6;
+		/* 同じ USB デバイスの他受信機への影響を時刻で照合できるよう、
+		 * ISDB-C と同様に受信機番号と周波数を残す。 */
+		dev_info(&parent_.dev_, "px4::PxMltDevice::PxMltReceiver::SetFrequency(%u): ISDB-T freq=%u kHz, bandwidth=%u MHz\n",
+			 index_, params_.freq, demod_params.bandwidth);
 
 		ret = cxd2856er_wakeup(&cxd2856er_, CXD2856ER_ISDB_T_SYSTEM, &demod_params);
 		if (ret)
@@ -911,6 +1316,8 @@ int PxMltDevice::PxMltReceiver::SetFrequency()
 		break;
 
 	case px4::SystemType::ISDB_S:
+		dev_info(&parent_.dev_, "px4::PxMltDevice::PxMltReceiver::SetFrequency(%u): ISDB-S freq=%u kHz\n",
+			 index_, params_.freq);
 		ret = cxd2856er_wakeup(&cxd2856er_, CXD2856ER_ISDB_S_SYSTEM, &demod_params);
 		if (ret)
 			dev_err(&parent_.dev_, "px4::PxMltDevice::PxMltReceiver::SetFrequency(%u): cxd2856er_wakeup(CXD2856ER_ISDB_S_SYSTEM) failed. (ret: %d)\n", index_, ret);
@@ -956,20 +1363,21 @@ int PxMltDevice::PxMltReceiver::SetFrequency()
 		case px4::SystemType::ISDB_T:
 			ret = cxd2858er_set_params_t(&cxd2858er_, CXD2858ER_ISDB_T_SYSTEM, params_.freq, 6);
 			if (ret)
-				dev_err(&parent_.dev_, "px4::PxMltDevice::PxMltReceiver::SetFrequency(%u): cxd2858er_set_params_t(%u, 6) failed. (ret: %d)\n");
+				dev_err(&parent_.dev_, "px4::PxMltDevice::PxMltReceiver::SetFrequency(%u): cxd2858er_set_params_t(%u, 6) failed. (ret: %d)\n", index_, params_.freq, ret);
 
 			break;
 
 		case px4::SystemType::ISDB_S:
 			ret = cxd2858er_set_params_s(&cxd2858er_, CXD2858ER_ISDB_S_SYSTEM, params_.freq, 28860);
 			if (ret)
-				dev_err(&parent_.dev_, "px4::PxMltDevice::PxMltReceiver::SetFrequency(%u): cxd2858er_set_params_s(%u, 28860) failed. (ret: %d)\n");
+				dev_err(&parent_.dev_, "px4::PxMltDevice::PxMltReceiver::SetFrequency(%u): cxd2858er_set_params_s(%u, 28860) failed. (ret: %d)\n", index_, params_.freq, ret);
 
 			break;
 
 		case px4::SystemType::ISDB_C:
 			cxd2858er_.config.experimental_j83b = parent_.config_.device.experimental_j83b;
 			cxd2858er_.config.isdbc_reference_profile = parent_.config_.device.isdbc_reference_profile;
+			cxd2858er_.config.j83b_ter_overload_level = parent_.config_.device.j83b_ter_overload_level;
 			ret = cxd2858er_set_params_c(&cxd2858er_, params_.freq, params_.bandwidth);
 			if (ret)
 				dev_err(&parent_.dev_, "px4::PxMltDevice::PxMltReceiver::SetFrequency(%u): cxd2858er_set_params_c(%u) failed. (ret: %d)\n", index_, params_.bandwidth, ret);
@@ -986,7 +1394,7 @@ int PxMltDevice::PxMltReceiver::SetFrequency()
 
 	ret = cxd2856er_post_tune(&cxd2856er_);
 	if (ret) {
-		dev_err(&parent_.dev_, "px4::PxMltDevice::PxMltReceiver::SetFrequency(%u): cxd2856er_post_tune() failed. (ret: %d)\n");
+		dev_err(&parent_.dev_, "px4::PxMltDevice::PxMltReceiver::SetFrequency(%u): cxd2856er_post_tune() failed. (ret: %d)\n", index_, ret);
 		return ret;
 	}
 
@@ -1028,6 +1436,25 @@ int PxMltDevice::PxMltReceiver::CheckLock(bool &locked)
 		break;
 	}
 
+	/* 復調器のロックログには受信機番号がないため、同じ選局内で状態が
+	 * 変わったときだけ受信機番号付きで残す。ロック待ちは約 20 ms ごとに
+	 * 呼ばれるため、毎回は出力しない。判定結果は変えない。 */
+	if (!ret || ret == -ECANCELED) {
+		const int state = (ret == -ECANCELED) ? LOCK_LOG_STATE_UNLOCKED :
+			(locked ? LOCK_LOG_STATE_LOCKED : LOCK_LOG_STATE_WAITING);
+
+		if (state != lock_log_state_) {
+			static const char *const state_names[] = { "waiting", "locked", "unlocked" };
+			const char *system_name =
+				(current_system_ == px4::SystemType::ISDB_T) ? "ISDB-T" :
+				(current_system_ == px4::SystemType::ISDB_S) ? "ISDB-S" : "ISDB-C";
+
+			dev_info(&parent_.dev_, "px4::PxMltDevice::PxMltReceiver::CheckLock(%u): %s freq=%u kHz, lock=%s\n",
+				 index_, system_name, params_.freq, state_names[state]);
+			lock_log_state_ = state;
+		}
+	}
+
 	return ret;
 }
 
@@ -1041,6 +1468,9 @@ int PxMltDevice::PxMltReceiver::SetStreamId()
 
 	int ret = 0;
 	std::lock_guard<std::mutex> lock(lock_);
+
+	dev_info(&parent_.dev_, "px4::PxMltDevice::PxMltReceiver::SetStreamId(%u): ISDB-S freq=%u kHz, %s=%u\n",
+		 index_, params_.freq, (params_.stream_id < 12) ? "slot" : "tsid", params_.stream_id);
 
 	if (params_.stream_id < 12) {
 		ret = cxd2856er_set_slot_isdbs(&cxd2856er_, params_.stream_id);
@@ -1105,11 +1535,96 @@ int PxMltDevice::PxMltReceiver::SetCapture(bool capture)
 			stream_buf_->Start();
 		} else {
 			stream_buf_->Stop();
+			/* 書き込み拒否の計数は常に更新し、出力だけを実験的な ISDB-C/J.83B
+			 * 設定の有効時に限る。値は今回の受信開始からの合計で、選局・
+			 * パージ・停止の区間も含む。表示する周波数は最後の選局値。 */
+			if ((parent_.config_.device.experimental_isdbc || parent_.config_.device.experimental_j83b) &&
+				params_.system == px4::SystemType::ISDB_C) {
+				const auto diagnostics = stream_buf_->GetWriteDiagnostics();
+				dev_info(&parent_.dev_, "TS output diagnostics input=%u freq=%u receiver_max_packets=%u rejected_bytes=%llu rejected_writes=%llu purge_write_discarded_bytes=%llu purge_requests=%llu (capture interval, rejection may include inactive output)\n",
+					index_, params_.freq, parent_.config_.device.receiver_max_packets,
+					static_cast<unsigned long long>(diagnostics.rejected_bytes),
+					static_cast<unsigned long long>(diagnostics.rejected_writes),
+					static_cast<unsigned long long>(diagnostics.purge_write_discarded_bytes),
+					static_cast<unsigned long long>(diagnostics.purge_requests));
+			}
 		}
 		streaming_ = capture;
 	}
 
 	return ret;
+}
+
+int PxMltDevice::PxMltReceiver::WarmUpTuner()
+{
+	/* 再現試験では、別受信機の Open だけ・選局し直しだけでは録画中の J.83B に影響が
+	 * なく、Open 後の最初の選局でチューナーが停止状態から動き出すときに RS 訂正
+	 * 不能が出た。録画が始まる前に一度選局して動作させておき、Open では初期化を
+	 * 省く。選局先は VHF 帯の低い周波数とし、復調器はスリープへ戻す。 */
+	static const std::uint32_t warm_freq_khz = 93000;
+
+	std::lock_guard<std::mutex> lock(lock_);
+	std::lock_guard<std::recursive_mutex> dev_lock(parent_.lock_);
+
+	if (open_)
+		return -EBUSY;
+	if (tuner_warm_)
+		return 0;
+
+	int ret = cxd2856er_init(&cxd2856er_);
+	if (ret)
+		return ret;
+
+	{
+		std::lock_guard<std::mutex> tuner_lock(*tuner_lock_);
+
+		ret = cxd2858er_init(&cxd2858er_);
+		if (!ret) {
+			if (parent_.config_.device.experimental_j83b) {
+				cxd2858er_.config.experimental_j83b = true;
+				cxd2858er_.config.isdbc_reference_profile = parent_.config_.device.isdbc_reference_profile;
+				cxd2858er_.config.j83b_ter_overload_level = parent_.config_.device.j83b_ter_overload_level;
+				ret = cxd2858er_set_params_c(&cxd2858er_, warm_freq_khz, 6);
+			} else {
+				ret = cxd2858er_set_params_t(&cxd2858er_, CXD2858ER_ISDB_T_SYSTEM, warm_freq_khz, 6);
+			}
+			if (ret)
+				cxd2858er_term(&cxd2858er_);
+		}
+	}
+
+	cxd2856er_term(&cxd2856er_);
+
+	if (!ret)
+		tuner_warm_ = true;
+
+	return ret;
+}
+
+void PxMltDevice::PxMltReceiver::SampleJ83BBurst(BurstSample &out)
+{
+	out = BurstSample();
+
+	if (!open_ || !parent_.available_)
+		return;
+
+	/* 選局・C/N 取得・Close の最中に待つと、記録のために受信機の処理を遅らせる。
+	 * ロックを取れないときは標本を飛ばし、busy として数える。 */
+	std::unique_lock<std::mutex> lock(lock_, std::try_to_lock);
+	if (!lock.owns_lock()) {
+		out.busy = true;
+		return;
+	}
+
+	if (!open_ || !streaming_ || current_system_ != px4::SystemType::ISDB_C || !cxd2856er_.j83b_active)
+		return;
+
+	const auto t0 = std::chrono::steady_clock::now();
+	out.ret = cxd2856er_read_j83b_rs_sample(&cxd2856er_, &out.value);
+	out.read_us = static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
+		std::chrono::steady_clock::now() - t0).count());
+	out.freq = params_.freq;
+	out.sampled = true;
 }
 
 int PxMltDevice::PxMltReceiver::ReadStat(px4::command::StatType type, std::int32_t &value)
@@ -1196,6 +1711,50 @@ int PxMltDevice::PxMltReceiver::ReadStat(px4::command::StatType type, std::int32
 			 * BonDriver の GetSignalLevel が受信中も 0 のままになり、TVTest の
 			 * チャンネルスキャンが「信号レベルが低い」としてチャンネルを飛ばし得た。
 			 * J.83B の実信号に対する値の妥当性は、受信報告での確認待ち。 */
+			if (parent_.config_.device.experimental_j83b &&
+				parent_.config_.device.experimental_j83b_monitor) {
+				/* 診断専用。読み取りの失敗は C/N の返却を妨げない。
+				 * 共有制御バスの占有時間を見積もるため、読み取り時間も残す。 */
+				cxd2856er_j83b_monitor monitor;
+				const auto t0 = std::chrono::steady_clock::now();
+				const int mret = cxd2856er_read_j83b_monitor(&cxd2856er_, &monitor);
+				const auto read_us = static_cast<unsigned long long>(std::chrono::duration_cast<std::chrono::microseconds>(
+					std::chrono::steady_clock::now() - t0).count());
+
+				if (mret) {
+					dev_warn(&parent_.dev_, "J83B monitor input=%u freq=%u read failed. (ret: %d, read_us=%llu)\n", index_, params_.freq, mret, read_us);
+				} else {
+					dev_info(&parent_.dev_, "J83B monitor input=%u freq=%u QAMraw=%u CNRraw=%u IFAGCraw=%u read_us=%llu (uncalibrated)\n",
+						index_, params_.freq, monitor.qam, monitor.cnr_raw, monitor.if_agc_raw, read_us);
+					dev_info(&parent_.dev_, "J83B stages input=%u freq=%u ARraw=%u TSraw=%u VQraw=%u ICWvalid=%u INTERraw=%u IQREVraw=%u OffsetRaw=%d TrialSRraw=%u TLFraw=%d TSMraw=%u BERvalid=%u BERerrors=%u BERexp=%u PERvalid=%u PERerrors=%u PERexp=%u RSvalid=%u RSerrors=%u\n",
+						index_, params_.freq, monitor.ar_status_raw, monitor.ts_status_raw,
+						monitor.vq_status_raw, monitor.interleave_valid, monitor.interleave_raw,
+						monitor.spectrum_raw, monitor.carrier_offset_raw, monitor.trial_symbol_rate_raw,
+						monitor.timing_integral_raw, monitor.sampling_rate_mode_raw,
+						monitor.ber_valid, monitor.ber_bit_errors, monitor.ber_period_exp,
+						monitor.per_valid, monitor.per_packet_errors, monitor.per_period_exp,
+						monitor.rs_valid, monitor.rs_packet_errors);
+				}
+
+				/* 入力レベルの目安。換算式は CXD2858ER 用に校正されていないため、
+				 * 配線の変更前後の比較など、同じ受信機での相対比較に使う。 */
+				if (parent_.config_.device.experimental_tuner_rssi) {
+					cxd2858er_rssi rssi;
+					int rret;
+					{
+						std::lock_guard<std::mutex> tuner_lock(*tuner_lock_);
+						rret = cxd2858er_read_rssi_t(&cxd2858er_, params_.freq, &rssi);
+					}
+					if (rret) {
+						dev_warn(&parent_.dev_, "Tuner RSSI input=%u freq=%u read failed. (ret: %d)\n", index_, params_.freq, rret);
+					} else {
+						const double dbm = rssi.rssi_x100 / 100.0;
+						dev_info(&parent_.dev_, "Tuner RSSI input=%u freq=%u IFAGCraw=%u RFAGCraw=%u IFBPFGC=%u est=%.2f dBm (%.1f dBuV/75ohm, reference formula, uncalibrated)\n",
+							index_, params_.freq, rssi.if_agc, rssi.rf_agc, rssi.if_bpf_gc, dbm, dbm + 108.75);
+					}
+				}
+			}
+
 			ret = cxd2856er_read_cnr_raw_isdbc(&cxd2856er_, &val);
 			if (ret)
 				break;

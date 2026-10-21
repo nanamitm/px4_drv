@@ -508,8 +508,16 @@ int cxd2858er_set_params_c(struct cxd2858er_tuner *tuner,
 	data[10] = (freq >> 16) & 0x0f;
 	data[11] = 0xff;
 	data[12] = 0x01;
-	data[13] = 0xd9;
-	data[14] = 0x0f;
+	/* 0x75-0x76 は RF/IF 過大入力の検出レベルと推定される (意味は未確認)。
+	 * 同じ基板の別受信機の起動時に J.83B の C/N が瞬間的に約 6 dB 下がるため、
+	 * 地デジの値 (0x99, 0x00) で落ち込みが減るかを試す設定を用意する。 */
+	if (tuner->config.experimental_j83b && tuner->config.j83b_ter_overload_level) {
+		data[13] = 0x99;
+		data[14] = 0x00;
+	} else {
+		data[13] = 0xd9;
+		data[14] = 0x0f;
+	}
 	data[15] = 0x24;
 	data[16] = 0x87;
 	ret = cxd2858er_write_regs(tuner, 0x68, data, 17);
@@ -732,6 +740,142 @@ static int cxd2858er_stop_s(struct cxd2858er_tuner *tuner)
 
 	tuner->system = CXD2858ER_UNSPECIFIED_SYSTEM;
 	return 0;
+}
+
+/* 地上・ケーブル側の RF/IF AGC を読み、入力レベルを推定する。
+ * 手順と換算式は Sony / TBS 公開ドライバ (cxd2878.c, GPL-2.0) の ascot3_read_rssi()
+ * を参照した。CXD2858ER の地上側は同じレジスタ配置 (0x59/0x5b/0x69/0x87/0x88) を
+ * 使うが、換算表は HELENE 用に校正されていないため、推定値は目安として扱う。
+ * 参照実装は終了時に 0x88 へ 0x04 を書くが、このドライバの選局は 0x88=0x00 で
+ * 終えるため、読み取り前の 0x59/0x87/0x88 の値を保存して書き戻す。 */
+int cxd2858er_read_rssi_t(struct cxd2858er_tuner *tuner, u32 freq,
+			  struct cxd2858er_rssi *rssi)
+{
+	static const s32 if_bpf_gc_table[16] = {
+		0, 0, 0, 0, 2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 20, 20
+	};
+	int ret = 0, rret = 0;
+	u8 saved59 = 0, saved87 = 0, saved88 = 0, tmp = 0;
+	u8 data[2];
+	s32 ifgain, rfgain, rfgainmax, agc_x140, maxagc_x140;
+
+	if (!rssi)
+		return -EINVAL;
+	memset(rssi, 0, sizeof(*rssi));
+
+	if (tuner->system != CXD2858ER_ISDB_T_SYSTEM &&
+	    tuner->system != CXD2858ER_ISDB_C_SYSTEM)
+		return -EINVAL;
+
+	ret = i2c_comm_master_gate_ctrl(tuner->i2c, true);
+	if (ret)
+		return ret;
+
+	ret = cxd2858er_read_reg(tuner, 0x59, &saved59);
+	if (!ret)
+		ret = cxd2858er_read_reg(tuner, 0x87, &saved87);
+	if (!ret)
+		ret = cxd2858er_read_reg(tuner, 0x88, &saved88);
+	if (ret)
+		goto exit;
+
+	data[0] = 0xc4;
+	data[1] = 0x41;
+	ret = cxd2858er_write_regs(tuner, 0x87, data, 2);
+	if (ret)
+		goto restore;
+
+	/* IF AGC を ADC へ接続して読む */
+	data[0] = 0x05;
+	data[1] = 0x01;
+	ret = cxd2858er_write_regs(tuner, 0x59, data, 2);
+	if (!ret)
+		ret = cxd2858er_read_reg(tuner, 0x5b, &rssi->if_agc);
+	if (ret)
+		goto restore;
+
+	/* RF AGC を ADC へ接続して読む */
+	data[0] = 0x03;
+	data[1] = 0x01;
+	ret = cxd2858er_write_regs(tuner, 0x59, data, 2);
+	if (!ret)
+		ret = cxd2858er_read_reg(tuner, 0x5b, &rssi->rf_agc);
+
+restore:
+	rret = cxd2858er_write_reg(tuner, 0x59, saved59);
+	if (!rret)
+		rret = cxd2858er_write_reg(tuner, 0x88, saved88);
+	if (!rret)
+		rret = cxd2858er_write_reg(tuner, 0x87, saved87);
+	if (!ret)
+		ret = rret;
+	if (ret)
+		goto exit;
+
+	ret = cxd2858er_read_reg(tuner, 0x69, &tmp);
+	if (ret)
+		goto exit;
+	rssi->if_bpf_gc = tmp & 0x0f;
+
+	agc_x140 = rssi->if_agc * 140;
+	if (agc_x140 > 9945)
+		ifgain = 870 + if_bpf_gc_table[rssi->if_bpf_gc] * 100;
+	else
+		ifgain = 870 + if_bpf_gc_table[rssi->if_bpf_gc] * 100 +
+			 (769 * (9945 - agc_x140) + 1275) / 2550;
+
+	maxagc_x140 = ((rssi->if_agc > rssi->rf_agc) ? rssi->if_agc : rssi->rf_agc) * 140;
+
+	if (freq > 700000)
+		rfgainmax = 4150;
+	else if (freq > 600000)
+		rfgainmax = 4130;
+	else if (freq > 532000)
+		rfgainmax = 4170;
+	else if (freq > 464000)
+		rfgainmax = 4050;
+	else if (freq > 400000)
+		rfgainmax = 4280;
+	else if (freq > 350000)
+		rfgainmax = 4260;
+	else if (freq > 320000)
+		rfgainmax = 4110;
+	else if (freq > 285000)
+		rfgainmax = 4310;
+	else if (freq > 215000)
+		rfgainmax = 4250;
+	else if (freq > 184000)
+		rfgainmax = 4020;
+	else if (freq > 172000)
+		rfgainmax = 3920;
+	else if (freq > 150000)
+		rfgainmax = 4080;
+	else if (freq > 86000)
+		rfgainmax = 4180;
+	else if (freq > 65000)
+		rfgainmax = 4200;
+	else
+		rfgainmax = 4020;
+
+	if (maxagc_x140 < 4896)
+		rfgain = rfgainmax;
+	else if (maxagc_x140 < 5457)
+		rfgain = rfgainmax - (70 * (maxagc_x140 - 4896) + 127) / 255;
+	else if (maxagc_x140 < 8823)
+		rfgain = rfgainmax - 154;
+	else if (maxagc_x140 < 24786)
+		rfgain = rfgainmax - 154 - (70 * (maxagc_x140 - 8823) + 127) / 255;
+	else if (maxagc_x140 < 30090)
+		rfgain = rfgainmax - 4536 - (57 * (maxagc_x140 - 24786) + 127) / 255;
+	else
+		rfgain = rfgainmax - 4536 - 1186 - (160 * (maxagc_x140 - 30090) + 127) / 255;
+
+	/* 参照実装の「チューナー入力換算」の値 (0.01 dBm 単位)。復調器側の IF 出力補正は含めない。 */
+	rssi->rssi_x100 = -ifgain - rfgain;
+
+exit:
+	i2c_comm_master_gate_ctrl(tuner->i2c, false);
+	return ret;
 }
 
 int cxd2858er_stop(struct cxd2858er_tuner *tuner)

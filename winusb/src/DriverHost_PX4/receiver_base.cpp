@@ -276,6 +276,10 @@ ReceiverBase::StreamBuffer::StreamBuffer()
 	: stop_(false),
 	read_stop_(false),
 	input_packet_count_(0),
+	rejected_bytes_(0),
+	rejected_writes_(0),
+	purge_write_discarded_bytes_(0),
+	purge_requests_(0),
 	write_size_(0),
 	threshold_size_(0),
 	discard_null_packets_on_output_(false),
@@ -332,6 +336,10 @@ void ReceiverBase::StreamBuffer::Start() noexcept
 	}
 	write_size_ = 0;
 	input_packet_count_ = 0;
+	rejected_bytes_ = 0;
+	rejected_writes_ = 0;
+	purge_write_discarded_bytes_ = 0;
+	purge_requests_ = 0;
 	{
 		std::lock_guard<std::mutex> lock(tsmf_mtx_);
 		tsmf_slot_ = -1;
@@ -426,6 +434,33 @@ void ReceiverBase::StreamBuffer::ResetInputPacketCount() noexcept
 std::uint64_t ReceiverBase::StreamBuffer::GetInputPacketCount() const noexcept
 {
 	return input_packet_count_.load(std::memory_order_relaxed);
+}
+
+ReceiverBase::StreamBuffer::WriteDiagnostics ReceiverBase::StreamBuffer::GetWriteDiagnostics() const noexcept
+{
+	/* 各値は個別に読むため、全項目を同一時点で揃えた値ではない。 */
+	return { rejected_bytes_.load(std::memory_order_relaxed),
+		rejected_writes_.load(std::memory_order_relaxed),
+		purge_write_discarded_bytes_.load(std::memory_order_relaxed),
+		purge_requests_.load(std::memory_order_relaxed) };
+}
+
+bool ReceiverBase::StreamBuffer::WriteRingBuffer(const void *buf, std::size_t &size) noexcept
+{
+	const auto requested = size;
+	const bool ret = ringbuf_.Write(buf, size);
+
+	/* RingBuffer は満杯・非稼働で false、パージ待機中は true のまま長さを
+	 * 縮めて返すため、両者を分けて残す。書き込みの成否と長さは変えない。 */
+	if (size < requested) {
+		if (!ret) {
+			rejected_bytes_.fetch_add(requested - size, std::memory_order_relaxed);
+			rejected_writes_.fetch_add(1, std::memory_order_relaxed);
+		} else {
+			purge_write_discarded_bytes_.fetch_add(requested - size, std::memory_order_relaxed);
+		}
+	}
+	return ret;
 }
 
 bool ReceiverBase::StreamBuffer::Write(const void *buf, std::size_t &size) noexcept
@@ -529,7 +564,7 @@ bool ReceiverBase::StreamBuffer::Write(const void *buf, std::size_t &size) noexc
 					return true;
 				}
 
-				const bool ret = ringbuf_.Write(tsmf_tlv_output_buf_.data(), output_size);
+				const bool ret = WriteRingBuffer(tsmf_tlv_output_buf_.data(), output_size);
 				write_size_ += output_size;
 				tsmf_tlv_output_count_++;
 				tsmf_tlv_output_bytes_ += output_size;
@@ -561,7 +596,7 @@ bool ReceiverBase::StreamBuffer::Write(const void *buf, std::size_t &size) noexc
 
 	bool ret;
 
-	ret = ringbuf_.Write(buf, size);
+	ret = WriteRingBuffer(buf, size);
 	write_size_ += size;
 
 	return ret;
@@ -716,6 +751,7 @@ void ReceiverBase::StreamBuffer::HandleRead(std::size_t buf_size, std::function<
 
 bool ReceiverBase::StreamBuffer::Purge() noexcept
 {
+	purge_requests_.fetch_add(1, std::memory_order_relaxed);
 	{
 		std::lock_guard<std::mutex> lock(tsmf_mtx_);
 		tsmf_slot_ = -1;
