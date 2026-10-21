@@ -249,7 +249,7 @@ static int pxmlt_chrdev_open(struct ptx_chrdev *chrdev)
 
 	mutex_lock(&pxmlt->lock);
 
-	if (!pxmlt->open_count) {
+	if (!pxmlt->open_count && !pxmlt->card_powered) {
 		ret = pxmlt_backend_set_power(pxmlt, true);
 		if (ret) {
 			dev_err(pxmlt->dev,
@@ -344,7 +344,7 @@ fail_tuner_init:
 	cxd2856er_term(&chrdevm->cxd2856er);
 
 fail_demod_init:
-	if (!pxmlt->open_count)
+	if (!pxmlt->open_count && !pxmlt->card_powered)
 		pxmlt_backend_set_power(pxmlt, false);
 
 fail_backend_power:
@@ -380,7 +380,7 @@ static int pxmlt_chrdev_release(struct ptx_chrdev *chrdev)
 	cxd2856er_term(&chrdevm->cxd2856er);
 
 	pxmlt->open_count--;
-	if (!pxmlt->open_count)
+	if (!pxmlt->open_count && !pxmlt->card_powered)
 		pxmlt_backend_set_power(pxmlt, false);
 
 	if (kref_put(&pxmlt->kref, pxmlt_device_release))
@@ -985,6 +985,22 @@ static int pxmlt_device_load_config(struct pxmlt_device *pxmlt,
 	return 0;
 }
 
+static int pxmlt_card_set_power(void *context, bool on)
+{
+	struct pxmlt_device *pxmlt = context;
+	int ret = 0;
+
+	/* 受信中のチューナーがあれば、基板の電源はチューナー側の参照で入ったままになっている */
+	if (!pxmlt->open_count)
+		ret = pxmlt_backend_set_power(pxmlt, on);
+
+	/* 停止は成否にかかわらず停止済みとして記録し、投入は成功したときだけ記録する */
+	if (!on || !ret)
+		pxmlt->card_powered = on;
+
+	return ret;
+}
+
 int pxmlt_device_init(struct pxmlt_device *pxmlt, struct device *dev,
 		      enum pxmlt_model model,
 		      struct ptx_chrdev_context *chrdev_ctx,
@@ -1010,6 +1026,8 @@ int pxmlt_device_init(struct pxmlt_device *pxmlt, struct device *dev,
 	pxmlt->dev = dev;
 	pxmlt->quit_completion = quit_completion;
 	pxmlt->open_count = 0;
+	pxmlt->card_powered = false;
+	pxmlt->card = NULL;
 	pxmlt->lnb_power_count = 0;
 	pxmlt->streaming_count = 0;
 	mutex_init(&pxmlt->tuner_lock[0]);
@@ -1149,6 +1167,22 @@ int pxmlt_device_init(struct pxmlt_device *pxmlt, struct device *dev,
 	}
 
 	atomic_set(&pxmlt->available, 1);
+
+	/* PX-MLT8PE は5チューナー側と3チューナー側の2つの USB デバイスで構成され、カードスロットは5チューナー側だけにある */
+	if (model != PXMLT8PE3_MODEL) {
+		struct px4_card_backend card_backend = {
+			.it930x = it930x,
+			.lock = &pxmlt->lock,
+			.available = &pxmlt->available,
+			.set_power = pxmlt_card_set_power,
+			.context = pxmlt,
+		};
+
+		/* カードリーダーを登録できなくても、チューナーは使えるようにする */
+		ret = px4_card_register(dev, &card_backend, &pxmlt->card);
+		if (ret)
+			dev_warn(dev, "Card reader registration failed: %d\n", ret);
+	}
 	return 0;
 
 fail_chrdev:
@@ -1196,7 +1230,11 @@ void pxmlt_device_term(struct pxmlt_device *pxmlt)
 {
 	dev_dbg(pxmlt->dev, "pxmlt_device_term\n");
 
+	mutex_lock(&pxmlt->lock);
 	atomic_xchg(&pxmlt->available, 0);
+	mutex_unlock(&pxmlt->lock);
+	px4_card_unregister(pxmlt->card);
+	pxmlt->card = NULL;
 	ptx_chrdev_group_destroy(pxmlt->chrdev_group);
 
 	kref_put(&pxmlt->kref, pxmlt_device_release);

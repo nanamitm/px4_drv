@@ -15,17 +15,33 @@
 #include <linux/slab.h>
 #include <linux/module.h>
 #include <linux/device.h>
+#include <linux/err.h>
 #include <linux/usb.h>
 #include <linux/version.h>
 
 #include "px4_usb_params.h"
 #include "px4_device_params.h"
 #include "ptx_chrdev.h"
+#include "px4_card.h"
 #include "px4_device.h"
 #include "pxmlt_device.h"
 #include "isdb2056_device.h"
-#include "s1ur_device.h"
-#include "m1ur_device.h"
+#include "isdbt2071_device.h"
+
+/*
+ * fallthrough は Linux 5.4 で追加されたため、それより古いカーネルでは 5.4 と同じ定義を置く
+ * 5.3 は case の落ち込みの警告が有効なので、コンパイラーが対応していれば属性を使う
+ */
+#ifndef fallthrough
+#if defined(__has_attribute)
+#if __has_attribute(__fallthrough__)
+#define fallthrough __attribute__((__fallthrough__))
+#endif
+#endif
+#ifndef fallthrough
+#define fallthrough do {} while (0)
+#endif
+#endif
 
 #ifndef PX4_USB_MAX_DEVICE
 #define PX4_USB_MAX_DEVICE	16
@@ -55,12 +71,12 @@
 #ifndef PXM1UR_USB_MAX_DEVICE
 #define PXM1UR_USB_MAX_DEVICE	64
 #endif
-#define PXM1UR_USB_MAX_CHRDEV	(PXM1UR_USB_MAX_DEVICE * M1UR_CHRDEV_NUM)
+#define PXM1UR_USB_MAX_CHRDEV	(PXM1UR_USB_MAX_DEVICE * ISDB2056_CHRDEV_NUM)
 
 #ifndef PXS1UR_USB_MAX_DEVICE
 #define PXS1UR_USB_MAX_DEVICE	64
 #endif
-#define PXS1UR_USB_MAX_CHRDEV	(PXS1UR_USB_MAX_DEVICE * S1UR_CHRDEV_NUM)
+#define PXS1UR_USB_MAX_CHRDEV	(PXS1UR_USB_MAX_DEVICE * ISDB2056_CHRDEV_NUM)
 
 #ifndef ISDBT2071_USB_MAX_DEVICE
 #define ISDBT2071_USB_MAX_DEVICE	64
@@ -71,16 +87,27 @@
 struct px4_usb_context {
 	enum px4_usb_device_type type;
 	struct completion quit_completion;
+	/* interface 属性を作成した場合だけ保持する */
+	char *reader_id;
 	union {
 		struct px4_device px4;
 		struct pxmlt_device pxmlt;
 		struct isdb2056_device isdb2056;
-		struct m1ur_device m1ur;
-		struct s1ur_device s1ur;
+		struct isdbt2071_device isdbt2071;
 	} ctx;
 };
 
 static struct ptx_chrdev_context *px4_usb_chrdev_ctx[MAX_USB_DEVICE_TYPE];
+
+static ssize_t interface_show(struct device *dev,
+			      struct device_attribute *attr, char *buf)
+{
+	struct px4_usb_context *ctx = usb_get_intfdata(to_usb_interface(dev));
+
+	return scnprintf(buf, PAGE_SIZE, "ID: %s\n", ctx->reader_id);
+}
+
+static DEVICE_ATTR_RO(interface);
 
 static int px4_usb_init_bridge(struct device *dev, struct usb_device *usb_dev,
 			       struct it930x_bridge *it930x)
@@ -123,10 +150,36 @@ static int px4_usb_probe(struct usb_interface *intf,
 	}
 
 	init_completion(&ctx->quit_completion);
+	usb_set_intfdata(intf, ctx);
+
+	/*
+	 * pcscd は USB インターフェースの interface 属性を角括弧で囲んでリーダー名に加える
+	 * USB デバイス追加の通知で ID を読めるよう、ファームウェアの読み込みなど時間のかかる初期化より先に公開する
+	 * カードリーダーの有無は機種別の初期化処理で判定するため、ここではインターフェース名のない全機器に属性を作る
+	 */
+	if (!intf->cur_altsetting->string) {
+		char *reader_id = px4_card_reader_id(usb_dev);
+
+		if (IS_ERR(reader_id)) {
+			if (PTR_ERR(reader_id) != -EINVAL)
+				dev_warn(dev, "Card reader ID allocation failed: %ld\n",
+					 PTR_ERR(reader_id));
+		} else {
+			ctx->reader_id = reader_id;
+			ret = device_create_file(dev, &dev_attr_interface);
+			if (ret) {
+				/* 属性の作成に失敗しても、チューナーの初期化は続ける */
+				dev_warn(dev, "USB interface attribute creation failed: %d\n", ret);
+				kfree(ctx->reader_id);
+				ctx->reader_id = NULL;
+			}
+		}
+	}
 
 	switch (id->idVendor) {
 	case 0x0511:
 	{
+		bool px4_multi_device = false;
 		bool px4_use_mldev = false;
 		enum pxmlt_model pxmlt5_model = PXMLT5PE_MODEL;
 		enum pxmlt_model pxmlt8_model = PXMLT8PE5_MODEL;
@@ -135,6 +188,7 @@ static int px4_usb_probe(struct usb_interface *intf,
 		case USB_PID_PX_Q3U4:
 		case USB_PID_PX_Q3PE4:
 		case USB_PID_PX_Q3PE5:
+			px4_multi_device = true;
 			if (!px4_device_params.disable_multi_device_power_control)
 				px4_use_mldev = true;
 
@@ -151,7 +205,8 @@ static int px4_usb_probe(struct usb_interface *intf,
 
 			ctx->type = PX4_USB_DEVICE;
 			ret = px4_device_init(&ctx->ctx.px4, dev,
-					      usb_dev->serial, px4_use_mldev,
+					      usb_dev->serial, px4_multi_device,
+					      px4_use_mldev,
 					      px4_usb_chrdev_ctx[PX4_USB_DEVICE],
 					      &ctx->quit_completion);
 			break;
@@ -226,38 +281,37 @@ static int px4_usb_probe(struct usb_interface *intf,
 
 		case USB_PID_PX_M1UR:
 			ret = px4_usb_init_bridge(dev, usb_dev,
-						  &ctx->ctx.m1ur.it930x);
+						  &ctx->ctx.isdb2056.it930x);
 			if (ret)
 				break;
 
+			/* ISDB2056 と同じ処理で動かし、デバイスファイル名 (pxm1urvideo) だけを分ける */
 			ctx->type = PXM1UR_USB_DEVICE;
-			ret = m1ur_device_init(&ctx->ctx.m1ur, dev,
+			ret = isdb2056_device_init(&ctx->ctx.isdb2056, dev, PXM1UR_MODEL,
 						   px4_usb_chrdev_ctx[PXM1UR_USB_DEVICE],
 						   &ctx->quit_completion);
 			break;
 
 		case USB_PID_PX_S1UR:
 			ret = px4_usb_init_bridge(dev, usb_dev,
-						  &ctx->ctx.s1ur.it930x);
+						  &ctx->ctx.isdb2056.it930x);
 			if (ret)
 				break;
 
 			ctx->type = PXS1UR_USB_DEVICE;
-			ret = s1ur_device_init(&ctx->ctx.s1ur, dev,
-						   PXS1UR_MODEL,
+			ret = isdb2056_device_init(&ctx->ctx.isdb2056, dev, PXS1UR_MODEL,
 						   px4_usb_chrdev_ctx[PXS1UR_USB_DEVICE],
 						   &ctx->quit_completion);
 			break;
 
 		case USB_PID_DIGIBEST_ISDBT2071:
 			ret = px4_usb_init_bridge(dev, usb_dev,
-						&ctx->ctx.s1ur.it930x);
+						&ctx->ctx.isdbt2071.it930x);
 			if (ret)
 				break;
 
 			ctx->type = ISDBT2071_USB_DEVICE;
-			ret = s1ur_device_init(&ctx->ctx.s1ur, dev,
-						ISDBT2071_MODEL,
+			ret = isdbt2071_device_init(&ctx->ctx.isdbt2071, dev,
 						px4_usb_chrdev_ctx[ISDBT2071_USB_DEVICE],
 						&ctx->quit_completion);
 			break;
@@ -279,13 +333,15 @@ static int px4_usb_probe(struct usb_interface *intf,
 		goto fail;
 
 	get_device(dev);
-	usb_set_intfdata(intf, ctx);
 
 	return 0;
 
 fail:
-	if (ctx)
-		kfree(ctx);
+	if (ctx->reader_id)
+		device_remove_file(dev, &dev_attr_interface);
+	usb_set_intfdata(intf, NULL);
+	kfree(ctx->reader_id);
+	kfree(ctx);
 
 	return ret;
 }
@@ -300,6 +356,9 @@ static void px4_usb_disconnect(struct usb_interface *intf)
 		return;
 	}
 
+	/* unbind でもモジュールの関数への参照が残るため、属性を削除して interface_show() の完了を待ってから ctx を解放する */
+	if (ctx->reader_id)
+		device_remove_file(&intf->dev, &dev_attr_interface);
 	usb_set_intfdata(intf, NULL);
 
 	switch (ctx->type) {
@@ -316,18 +375,14 @@ static void px4_usb_disconnect(struct usb_interface *intf)
 		break;
 
 	case ISDB2056_USB_DEVICE:
+	case PXM1UR_USB_DEVICE:
+	case PXS1UR_USB_DEVICE:
 		isdb2056_device_term(&ctx->ctx.isdb2056);
 		wait_for_completion(&ctx->quit_completion);
 		break;
 
-	case PXM1UR_USB_DEVICE:
-		m1ur_device_term(&ctx->ctx.m1ur);
-		wait_for_completion(&ctx->quit_completion);
-		break;
-
-	case PXS1UR_USB_DEVICE:
 	case ISDBT2071_USB_DEVICE:
-		s1ur_device_term(&ctx->ctx.s1ur);
+		isdbt2071_device_term(&ctx->ctx.isdbt2071);
 		wait_for_completion(&ctx->quit_completion);
 		break;
 
@@ -339,6 +394,7 @@ static void px4_usb_disconnect(struct usb_interface *intf)
 	dev_dbg(&intf->dev, "px4_usb_disconnect: release\n");
 
 	put_device(&intf->dev);
+	kfree(ctx->reader_id);
 	kfree(ctx);
 
 	return;
