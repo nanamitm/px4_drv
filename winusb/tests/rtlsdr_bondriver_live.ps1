@@ -3,6 +3,8 @@ param(
     [Parameter(Mandatory=$true)][string]$OutputDirectory,
     [ValidateRange(1,120)][int]$Seconds=15,
     [ValidateRange(1,5)][int]$Cycles=2,
+    [ValidateRange(0,39)][int]$AlternateChannel=0,
+    [string]$FrontendPath,
     [switch]$IsolatedHost
 )
 $ErrorActionPreference='Stop'
@@ -21,6 +23,7 @@ Copy-Item -LiteralPath (Join-Path $hostNative 'BonDriver_PX4.dll') -Destination 
 foreach($file in @('rtlsdr_frontend.exe','rtlsdr.dll','pthreadVC2.dll','msvcr100.dll')){
     Copy-Item -LiteralPath (Join-Path $native "rtlsdr\$file") -Destination (Join-Path $run 'rtlsdr')
 }
+if($FrontendPath){Copy-Item -LiteralPath $FrontendPath -Destination (Join-Path $run 'rtlsdr\rtlsdr_frontend.exe') -Force}
 foreach($file in @('BonDriver_RTLSDR.ini','BonDriver_RTLSDR.ChSet.txt')){
     Copy-Item -LiteralPath (Join-Path $root "pkg\BonDriver_PX4\$file") -Destination $run
 }
@@ -36,7 +39,9 @@ try{
     $null=$hostProcess.Handle
     Start-Sleep -Milliseconds 1000
     $prefix=Join-Path $output "bon-$Architecture"
-    $client=Start-Process -FilePath (Join-Path $native 'rtlsdr_bondriver_live.exe') -ArgumentList @(('"'+(Join-Path $run 'BonDriver_RTLSDR.dll')+'"'),('"'+$prefix+'"'),$Seconds,$Cycles) -WindowStyle Hidden -PassThru -RedirectStandardOutput "$prefix.log" -RedirectStandardError "$prefix.stderr.log"
+    $clientArgs=@(('"'+(Join-Path $run 'BonDriver_RTLSDR.dll')+'"'),('"'+$prefix+'"'),$Seconds,$Cycles)
+    if($AlternateChannel){if($Cycles -lt 2){throw 'Channel switch test needs at least two cycles.'};$clientArgs+=@($AlternateChannel)}
+    $client=Start-Process -FilePath (Join-Path $native 'rtlsdr_bondriver_live.exe') -ArgumentList $clientArgs -WindowStyle Hidden -PassThru -RedirectStandardOutput "$prefix.log" -RedirectStandardError "$prefix.stderr.log"
     $null=$client.Handle
     $limit=$Cycles*($Seconds+55)+30
     if(-not $client.WaitForExit($limit*1000)){$client.Kill();$client.WaitForExit();throw 'BonDriver test timed out.'}

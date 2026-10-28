@@ -42,6 +42,7 @@ public:
     {
         if(helper_.size()<2 || helper_[1]!=L':') helper_=px4::util::path::GetDir()+L"\\"+helper_;
         if(config.Exists(L"GainTenthsDb")) gain_=px4::util::wtoi(config.Get(L"GainTenthsDb"));
+        async_tune_=px4::util::wtob(config.Get(L"AsyncTune",L"false"));
         if(gain_<-600 || gain_>600) throw DeviceError("RTL-SDR: invalid gain");
     }
     ~Receiver() override
@@ -103,6 +104,19 @@ public:
         return 0;
     }
 protected:
+    int CheckTuneComplete(bool &complete) override
+    {
+        if(!async_tune_)return CheckLock(complete);
+        std::lock_guard<std::mutex> lock(mutex_);
+        complete=false;
+        if(!available_ || worker_error_)return -ECANCELED;
+        if(!open_)return -EINVAL;
+        if(!process_ || WaitForSingleObject(process_.Get(),0)!=WAIT_TIMEOUT)return -ECANCELED;
+        // 子プロセスへ選局要求を渡した時点で返し、TVTestが旧再生をリセットできるようにする。
+        // USBの初期化・復調は非同期。CheckLock/信号品質は実際のTS出力まで未ロックのまま。
+        complete=true;
+        return 0;
+    }
     int SetFrequency() override
     {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -220,6 +234,7 @@ private:
         if(!stop_ && !drain_only_ && available_){worker_error_=true;quality_=0;stream_buf_->StopRequest();TerminateJobObject(job_.Get(),ERROR_INVALID_DATA);msg_err("RTL-SDR: frontend stopped unexpectedly\n");}
     }
     std::wstring serial_,helper_;
+    bool async_tune_=false;
     int gain_=297;
     std::uint32_t frequency_=0;
     std::mutex mutex_;std::condition_variable closed_;
