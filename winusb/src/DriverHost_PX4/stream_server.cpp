@@ -3,6 +3,7 @@
 #define msg_prefix	"px4_winusb"
 
 #include "stream_server.hpp"
+#include "ipc_names.hpp"
 
 #include <thread>
 
@@ -15,7 +16,7 @@
 namespace px4 {
 
 StreamServer::StreamServer(px4::ReceiverManager &receiver_manager) noexcept
-	: ServerBase(L"px4_data_pipe", receiver_manager)
+	: ServerBase(px4::ipc::Data, receiver_manager)
 {
 	pipe_config_.in_buffer_size = 512;
 	pipe_config_.out_buffer_size = 188 * 4096;

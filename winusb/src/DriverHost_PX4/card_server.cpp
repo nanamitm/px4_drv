@@ -1,4 +1,5 @@
 #include "card_server.hpp"
+#include "ipc_names.hpp"
 
 #include <algorithm>
 #include <cstring>
@@ -11,7 +12,7 @@ namespace px4 {
 
 CardServer::CardServer(DeviceManager &device_manager,
 			       ReceiverManager &receiver_manager) noexcept
-	: ServerBase(L"px4_card_pipe", receiver_manager),
+	: ServerBase(px4::ipc::Card, receiver_manager),
 	device_manager_(device_manager),
 	cards_mutex_()
 {

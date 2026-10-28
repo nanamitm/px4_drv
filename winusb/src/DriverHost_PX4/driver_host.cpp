@@ -1,6 +1,7 @@
 // driver_host.cpp
 
 #include "driver_host.hpp"
+#include "ipc_names.hpp"
 
 #include <aclapi.h>
 
@@ -41,7 +42,7 @@ void DriverHost::Run()
 {
 	{
 		SecurityAttributes sa(MUTEX_ALL_ACCESS);
-		mutex_ = CreateMutexW(sa.Get(), TRUE, L"Global\\DriverHost_PX4_Mutex");
+		mutex_ = CreateMutexW(sa.Get(), TRUE, px4::ipc::Mutex);
 	}
 
 	if (!mutex_)
@@ -55,7 +56,7 @@ void DriverHost::Run()
 
 	{
 		SecurityAttributes sa(EVENT_ALL_ACCESS);
-		startup_event_ = CreateEventW(sa.Get(), TRUE, FALSE, L"Global\\DriverHost_PX4_StartupEvent");
+		startup_event_ = CreateEventW(sa.Get(), TRUE, FALSE, px4::ipc::Startup);
 	}
 
 	if (!startup_event_) {

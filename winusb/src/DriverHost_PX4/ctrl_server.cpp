@@ -1,11 +1,12 @@
 // ctrl_server.cpp
 
 #include "ctrl_server.hpp"
+#include "ipc_names.hpp"
 
 namespace px4 {
 
 CtrlServer::CtrlServer(px4::ReceiverManager &receiver_manager)
-	: ServerBase(L"px4_ctrl_pipe", receiver_manager)
+	: ServerBase(px4::ipc::Control, receiver_manager)
 {
 	pipe_config_.in_buffer_size = 512;
 	pipe_config_.out_buffer_size = 512;

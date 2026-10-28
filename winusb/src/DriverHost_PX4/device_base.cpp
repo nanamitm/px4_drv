@@ -28,6 +28,11 @@ std::uint64_t HashDevicePath(const std::wstring &path) noexcept
 } // namespace
 
 DeviceBase::DeviceBase(const std::wstring &path, const px4::DeviceDefinition &device_def, std::uintptr_t index, px4::ReceiverManager &receiver_manager)
+	: DeviceBase(path, device_def, index, receiver_manager, false)
+{
+}
+
+DeviceBase::DeviceBase(const std::wstring &path, const px4::DeviceDefinition &device_def, std::uintptr_t index, px4::ReceiverManager &receiver_manager, bool short_serial_request)
 	: device_def_(device_def),
 	receiver_manager_(receiver_manager)
 {
@@ -74,7 +79,8 @@ DeviceBase::DeviceBase(const std::wstring &path, const px4::DeviceDefinition &de
 	}
 
 	if (usb_dev_.descriptor.iSerialNumber) {
-		const ULONG buffer_size = offsetof(USB_STRING_DESCRIPTOR, bString) +
+		// RTL2838 実機は512バイト要求に成功・長さ0を返すため、該当機種だけ最大255バイトに制限する。
+		const ULONG buffer_size = short_serial_request ? 255 : offsetof(USB_STRING_DESCRIPTOR, bString) +
 			(sizeof(wchar_t) * MAXIMUM_USB_STRING_LENGTH);
 		std::vector<std::uint8_t> descriptor_buffer(buffer_size);
 
@@ -100,6 +106,8 @@ DeviceBase::DeviceBase(const std::wstring &path, const px4::DeviceDefinition &de
 			(serial_descriptor->bLength < header_size) ||
 			(serial_descriptor->bLength > size) ||
 			(((serial_descriptor->bLength - header_size) % sizeof(wchar_t)) != 0)) {
+			msg_err("USB serial descriptor: returned=%lu declared=%u type=%u header=%lu\n", size,
+				static_cast<unsigned>(serial_descriptor->bLength), static_cast<unsigned>(serial_descriptor->bDescriptorType), header_size);
 			WinUsb_Free(usb_dev_.winusb);
 			CloseHandle(usb_dev_.dev);
 			throw DeviceError("px4::DeviceBase::DeviceBase: Invalid USB serial string descriptor.");

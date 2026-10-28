@@ -35,6 +35,7 @@ enum class DeviceType : std::uint32_t {
 	ISDBT2071,
 	CECHZD1J,
 	PXBCUD,
+	RTLSDR,
 };
 
 class DeviceManager final {
