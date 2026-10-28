@@ -10,6 +10,7 @@ public:
     NativeFrontendClient(MailboxI2c& bus,HANDLE cancel):bus_(bus),cancel_(cancel),frontend_(*this){}
     bool Command(std::uint8_t kind,const std::vector<std::uint8_t>& body,std::vector<std::uint8_t>& response,
         std::chrono::steady_clock::time_point deadline);
+    void SetStop(HANDLE stop) noexcept {stop_=stop;}
     const std::string& Error() const noexcept{return error_;}
 private:
     std::tuple<dibnative::Slice<std::uint8_t>,dibnative::Error> WriteRead(std::uint8_t address,
@@ -23,6 +24,7 @@ private:
     dibnative::Error CheckState() const;
     MailboxI2c& bus_;
     HANDLE cancel_;
+    HANDLE stop_=nullptr;
     NativeFrontend frontend_;
     std::chrono::steady_clock::time_point deadline_{};
     std::string error_;

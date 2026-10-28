@@ -40,5 +40,6 @@ private:
 	std::string id_;
 	bool registered_ = false;
 	bool output_error_packets_ = false;
+    bool auto_recovery_=false,initial_lock_retry_=false;
 };
 } // namespace px4::torne

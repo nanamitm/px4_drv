@@ -23,7 +23,8 @@ std::tuple<std::int64_t,std::int64_t,bool,dibnative::Error> NativeFrontendClient
     return {best,diff,true,nullptr};
 }
 dibnative::Error NativeFrontendClient::CheckState() const {
-    const auto state=WaitForSingleObject(cancel_,0);
+    const HANDLE events[]{cancel_,stop_};
+    const auto state=WaitForMultipleObjects(stop_?2:1,events,FALSE,0);
     if(state!=WAIT_TIMEOUT)return dibnative::MakeError("native frontend cancelled/wait error",state==WAIT_FAILED?GetLastError():ERROR_OPERATION_ABORTED);
     if(std::chrono::steady_clock::now()>=deadline_)return dibnative::MakeError("native frontend deadline expired");
     return nullptr;
@@ -44,7 +45,7 @@ std::tuple<dibnative::Slice<std::uint8_t>,dibnative::Error> NativeFrontendClient
 dibnative::Error NativeFrontendClient::Wait(std::int64_t duration){
     // 直前の書込みは同期I2C完了時に届いている。待機だけを切り詰め、
     // 操作全体の期限を延長せず、抜去時には同じイベントで中断する。
-    const auto result=WaitFrontendDelay(cancel_,deadline_,duration);
+    const auto result=WaitFrontendDelay(cancel_,deadline_,duration,stop_);
     return result?dibnative::MakeError("native frontend wait failed",result):nullptr;
 }
 bool NativeFrontendClient::Command(std::uint8_t kind,const std::vector<std::uint8_t>& body,

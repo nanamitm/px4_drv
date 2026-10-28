@@ -12,6 +12,7 @@
 #include "stream_framer.hpp"
 #include "ts_quality.hpp"
 #include "tune_result.hpp"
+#include "reception_policy.hpp"
 #include "mb86h47_card.hpp"
 #include "../../WinSCard_PX4/bcas_atr.hpp"
 #include "msg.h"
@@ -63,12 +64,15 @@ struct ExperimentalSession {
 		memory(control), bootstrap(memory, control), bus(memory, control),
 		registers(bus), frontend(bus, cancel), engine(memory, bootstrap) {}
 	bool Command(std::uint8_t command, const std::vector<std::uint8_t> &body,
-		std::vector<std::uint8_t> &response, Clock::time_point deadline)
+		std::vector<std::uint8_t> &response, Clock::time_point deadline,HANDLE stop=nullptr)
 	{
 		std::lock_guard<std::mutex> lock(control_mutex);
 		if (!healthy || !frontend_started) return false;
-		control.Begin(deadline);
-		const bool ok = frontend.Command(command, body, response, deadline);
+		control.Begin(deadline,stop);
+#ifndef PX4_TORNE_EXPERIMENTAL
+        frontend.SetStop(stop);
+#endif
+        const bool ok = frontend.Command(command, body, response, deadline);
 		if (!ok) { healthy = false; bus.Invalidate(); }
 		return ok;
 	}
@@ -77,6 +81,11 @@ struct ExperimentalSession {
 		std::lock_guard<std::mutex> lock(control_mutex);
 		healthy = false;
 		bus.Invalidate();
+	}
+	std::string FrontendError()
+	{
+		std::lock_guard<std::mutex> lock(control_mutex);
+		return frontend.Error();
 	}
 	bool InitializeBridge()
 	{
@@ -99,6 +108,9 @@ struct ExperimentalSession {
 		if (!frontend_started && !frontend.Start(helper)) return false;
 #endif
 		frontend_started = true;
+#ifndef PX4_TORNE_EXPERIMENTAL
+		frontend.SetStop(nullptr);
+#endif
 		std::vector<std::uint8_t> response;
 		bool ok = frontend.Command(0x10, {}, response, deadline) && response.empty();
 		if (ok && output_error_packets) {
@@ -275,7 +287,7 @@ public:
 			session_ = parent_.AcquireSession();
 			if (!session_) return -EIO;
 			if (!session_->InitializeFrontend(parent_.output_error_packets_)) {
-				msg_err("torne: initialize failed (%s).\n", session_->frontend.Error().c_str());
+				msg_err("torne: initialize failed (%s).\n", session_->FrontendError().c_str());
 				SleepFrontend();
 				session_.reset();
 				return -EIO;
@@ -358,27 +370,12 @@ protected:
 			(params_.bandwidth && params_.bandwidth != 6 && params_.bandwidth != 6000 && params_.bandwidth != 6000000)) return -EINVAL;
 		tuned_ = false;
 		if (StopReader()) { failed_ = true; return -EIO; }
-		if (!stream_buf_->Purge()) return -EIO;
+		if (!stream_buf_->AdvanceEpoch()) return -EIO;
 		stream_buf_->ResetInputPacketCount();
 		failed_ = false;
-		// 実験版は復調器/lock/先頭TSを共通の5秒予算へ含める。旧機種のTuneは変更しない。
-		const auto deadline = Clock::now() + std::chrono::seconds(5);
-		const auto hz = params_.freq * 1000u;
-		std::vector<std::uint8_t> frequency(4), response;
-		for (unsigned i = 0; i < 4; ++i) frequency[i] = static_cast<std::uint8_t>(hz >> (8 * i));
-		if (!session_->Command(0x11, frequency, response, deadline)) { failed_ = true; return -EIO; }
-		if (IsConfirmedSearchFailure(response.data(), response.size())) {
-			failed_ = true;
-			msg_info("torne: confirmed search failure id=%s freq_khz=%u\n", parent_.id_.c_str(), params_.freq);
-			return -ECANCELED;
-		}
-		bool locked = false;
-		while (Clock::now() < deadline) {
-			if (!session_->Command(0x13, {}, response, deadline) || response.size() != 24) { failed_ = true; return -EIO; }
-			if (response[0] == 1) { locked = true; break; }
-			if (WaitForSingleObject(parent_.cancel_, 20) != WAIT_TIMEOUT) return -ECANCELED;
-		}
-		if (!locked) { failed_ = true; return -ETIMEDOUT; }
+        const auto deadline=Clock::now()+std::chrono::seconds(5);
+        const int tuned=TuneFrequency(params_.freq,deadline,nullptr,parent_.initial_lock_retry_);
+        if(tuned){failed_=true;return tuned;}
 		tuned_ = true;
 		const int result = capture_ ? StartReader(deadline) : 0;
 		if (result) failed_ = true;
@@ -386,6 +383,38 @@ protected:
 		return result;
 	}
 private:
+    bool WaitStop(unsigned milliseconds) const {
+        const HANDLE events[]{stop_.value,parent_.cancel_};
+        return WaitForMultipleObjects(2,events,FALSE,milliseconds)==WAIT_TIMEOUT && parent_.available_;
+    }
+    int TuneFrequency(std::uint32_t frequency,Clock::time_point deadline,HANDLE stop,bool retry_initial) {
+        const auto hz=frequency*1000u;
+        std::vector<std::uint8_t> request(4),response;
+        for(unsigned i=0;i<4;++i)request[i]=static_cast<std::uint8_t>(hz>>(8*i));
+        auto command=[&](std::uint8_t kind,const std::vector<std::uint8_t>& body){
+            if(stop && !WaitStop(0))return false;
+            return session_->Command(kind,body,response,deadline,stop);
+        };
+        if(!command(0x11,request)) {
+            msg_err("torne: tune command failed id=%s freq_khz=%u detail=%s\n",parent_.id_.c_str(),frequency,session_->FrontendError().c_str());
+            return -EIO;
+        }
+        if(IsConfirmedSearchFailure(response.data(),response.size()) && !retry_initial) {
+            msg_info("torne: confirmed search failure id=%s freq_khz=%u\n",parent_.id_.c_str(),frequency);
+            return -ENODATA;
+        }
+        // Tune は一度だけ発行し、Status 内の上流の再試行時刻を保持する。
+        // USB/カードとの待機を含む操作全体の期限は各ポーリングで更新しない。
+        const auto result=WaitInitialLock(deadline,[]{return Clock::now();},[&] {
+            if(!command(0x13,{}) || response.size()!=24)return RecoveryResult::fatal;
+            return response[0]==1?RecoveryResult::ready:RecoveryResult::no_lock;
+        },[&](unsigned ms) {
+            const HANDLE events[]{parent_.cancel_,stop};
+            return WaitForMultipleObjects(stop?2:1,events,FALSE,ms)==WAIT_TIMEOUT;
+        });
+        return result==RecoveryResult::ready?0:result==RecoveryResult::stopped?-ECANCELED:
+            result==RecoveryResult::fatal?-EIO:-ETIMEDOUT;
+    }
 	void SleepFrontend()
 	{
 		if (!session_ || !parent_.available_) return;
@@ -396,11 +425,11 @@ private:
 	{
 		if (worker_.joinable()) { std::lock_guard<std::mutex> state(state_mutex_); return finished_ ? -EIO : 0; }
 		std::vector<std::uint8_t> response;
-		if (!session_->Command(0x12, {1}, response, deadline) || !ResetEvent(stop_.value)) return -EIO;
+		if(!ResetEvent(stop_.value))return -EIO;
 		{ std::lock_guard<std::mutex> state(state_mutex_); first_ = finished_ = false; }
 		worker_error_ = 0;
 		worker_stop_ok_ = false;
-		try { worker_ = std::thread([this, deadline] { ReadLoop(deadline); }); }
+		try { worker_ = std::thread([this, deadline, frequency=params_.freq] { ReadLoop(deadline,frequency); }); }
 		catch (...) { failed_ = true; return -ENOMEM; }
 		std::unique_lock<std::mutex> state(state_mutex_);
 		const auto first_deadline = (std::min)(deadline, Clock::now() + std::chrono::seconds(2));
@@ -410,76 +439,135 @@ private:
 		if (!good) { StopReader(); failed_ = true; return -ETIMEDOUT; }
 		return 0;
 	}
-	void ReadLoop(Clock::time_point start_deadline) noexcept
-	{
-		Event complete;
-		StreamFramer framer(parent_.output_error_packets_);
-		TsQuality quality;
-		std::array<std::uint8_t, 6144> raw{};
-		std::vector<std::uint8_t> output;
-		bool prepared = false, running = false;
-		try {
-			{
-				std::lock_guard<std::mutex> lock(session_->control_mutex);
-				session_->control.Begin(start_deadline);
-				prepared = session_->engine.Prepare() == StreamResult::ok;
-			}
-			if (!prepared || !complete.value || !WinUsb_ResetPipe(parent_.usb_dev_.winusb, 0x81)) worker_error_ = ERROR_GEN_FAILURE;
-			while (!worker_error_) {
-				if (WaitForSingleObject(stop_.value, 0) == WAIT_OBJECT_0 || !parent_.available_) break;
-				if (!ResetEvent(complete.value)) { worker_error_ = GetLastError(); break; }
-				PendingRead read(parent_.usb_dev_.dev, parent_.usb_dev_.winusb, complete.value);
-				const BOOL submitted = WinUsb_ReadPipe(parent_.usb_dev_.winusb, 0x81, raw.data(), static_cast<ULONG>(raw.size()), nullptr, &read.operation);
-				const DWORD submit_error = submitted ? 0 : GetLastError();
-				if (!submitted && submit_error != ERROR_IO_PENDING) { worker_error_ = submit_error; break; }
-				read.active = true;
-				if (!running) {
-					std::lock_guard<std::mutex> lock(session_->control_mutex);
-					session_->control.Begin(start_deadline);
-					running = session_->engine.Start() == StreamResult::ok;
-					if (!running) worker_error_ = ERROR_GEN_FAILURE;
-				}
-				DWORD waited = WAIT_OBJECT_0 + 2;
-				if (!submitted && !worker_error_) {
-					const HANDLE events[]{stop_.value, parent_.cancel_, complete.value};
-					waited = WaitForMultipleObjects(3, events, FALSE, 2000);
-					if (waited != WAIT_OBJECT_0 + 2) worker_error_ = waited == WAIT_TIMEOUT ? ERROR_TIMEOUT : waited == WAIT_FAILED ? GetLastError() : ERROR_OPERATION_ABORTED;
-				}
-				if (worker_error_) CancelIoEx(parent_.usb_dev_.dev, &read.operation);
-				ULONG transferred = 0;
-				const BOOL collected = WinUsb_GetOverlappedResult(parent_.usb_dev_.winusb, &read.operation, &transferred, TRUE);
-				read.active = false;
-				if (!collected && !worker_error_) worker_error_ = GetLastError();
-				if (worker_error_) break;
-				if (transferred > raw.size()) { worker_error_ = ERROR_INVALID_DATA; break; }
-				output.clear();
-				framer.Feed(raw.data(), transferred, output);
-				for (std::size_t offset = 0; offset < output.size(); offset += 188) {
-					quality.Feed(output.data() + offset);
-					std::size_t count = 188;
-					if (!stream_buf_->Write(output.data() + offset, count) || count != 188) { worker_error_ = ERROR_BUFFER_OVERFLOW; break; }
-				}
-				stream_buf_->NotifyWrite();
-				if (!output.empty() && !worker_error_) {
-					{ std::lock_guard<std::mutex> state(state_mutex_); first_ = true; }
-					changed_.notify_all();
-				}
-			}
-		} catch (...) { worker_error_ = ERROR_NOT_ENOUGH_MEMORY; }
-		// readのOVERLAPPEDを回収した後だけbridgeを停止し、次の選局とbuffer再利用を許可する。
-		{
-			std::lock_guard<std::mutex> lock(session_->control_mutex);
-			session_->control.Begin(Clock::now() + std::chrono::seconds(2));
-			worker_stop_ok_ = session_->engine.Stop() == StreamResult::ok;
-			if (!worker_stop_ok_ && !worker_error_) worker_error_ = ERROR_GEN_FAILURE;
-		}
-		{ std::lock_guard<std::mutex> state(state_mutex_); finished_ = true; }
-		changed_.notify_all();
-		msg_info("torne: reader end id=%s error=%lu stop_ok=%d packets=%llu tei=%llu discarded=%llu raw_cc=%llu raw_malformed=%llu scrambled=%llu\n",
-			parent_.id_.c_str(), worker_error_, worker_stop_ok_, static_cast<unsigned long long>(framer.Packets()),
-			static_cast<unsigned long long>(framer.TeiPackets()), static_cast<unsigned long long>(framer.DiscardedBytes()),
-			static_cast<unsigned long long>(quality.cc_anomalies), static_cast<unsigned long long>(quality.malformed), static_cast<unsigned long long>(quality.scrambled));
-	}
+    void ReadLoop(Clock::time_point start_deadline,std::uint32_t frequency) noexcept
+    {
+        Event complete;
+        bool seen_stream=false;
+        std::uint64_t attempt=0;
+        bool exceptional=false;
+        try {
+            for(;;) {
+                StreamFramer framer(parent_.output_error_packets_);
+                TsQuality quality;
+                ReceptionWatch watch(Clock::now());
+                auto next_status=Clock::now()+std::chrono::seconds(1);
+                std::array<std::uint8_t,6144> raw{};
+                std::vector<std::uint8_t> output;
+                bool prepared=false,running=false;
+                worker_error_=0;worker_stop_ok_=false;
+                std::vector<std::uint8_t> response;
+                if(!session_->Command(0x12,{1},response,start_deadline,stop_.value))worker_error_=ERROR_GEN_FAILURE;
+                {
+                    std::lock_guard<std::mutex> lock(session_->control_mutex);
+                    session_->control.Begin(start_deadline,stop_.value);
+                    prepared=!worker_error_ && session_->engine.Prepare()==StreamResult::ok;
+                }
+                if(!prepared || !complete.value || !WinUsb_ResetPipe(parent_.usb_dev_.winusb,0x81))worker_error_=ERROR_GEN_FAILURE;
+                ReceptionFault fault=ReceptionFault::none;
+                auto monitor=[&] {
+                    if(!parent_.auto_recovery_ || !seen_stream)return;
+                    const auto now=Clock::now();
+                    if(now>=next_status) {
+                        std::vector<std::uint8_t> response;
+                        if(!session_->Command(0x13,{},response,now+std::chrono::seconds(1),stop_.value) || response.size()!=24){worker_error_=ERROR_GEN_FAILURE;return;}
+                        watch.Lock(response[0]==1,Clock::now());
+                        next_status=Clock::now()+std::chrono::seconds(1);
+                    }
+                    fault=watch.Fault(Clock::now());
+                    if(fault!=ReceptionFault::none)worker_error_=ERROR_TIMEOUT;
+                };
+                while(!worker_error_) {
+                    if(!WaitStop(0))break;
+                    monitor();if(worker_error_)break;
+                    if(!ResetEvent(complete.value)){worker_error_=GetLastError();break;}
+                    PendingRead read(parent_.usb_dev_.dev,parent_.usb_dev_.winusb,complete.value);
+                    const BOOL submitted=WinUsb_ReadPipe(parent_.usb_dev_.winusb,0x81,raw.data(),static_cast<ULONG>(raw.size()),nullptr,&read.operation);
+                    const DWORD error=submitted?0:GetLastError();
+                    if(!submitted && error!=ERROR_IO_PENDING){worker_error_=error;break;}
+                    read.active=true;
+                    if(!running) {
+                        std::lock_guard<std::mutex> lock(session_->control_mutex);
+                        session_->control.Begin(start_deadline,stop_.value);
+                        running=session_->engine.Start()==StreamResult::ok;
+                        if(!running)worker_error_=ERROR_GEN_FAILURE;
+                    }
+                    const auto read_deadline=Clock::now()+std::chrono::seconds(2);
+                    while(!submitted && !worker_error_) {
+                        const HANDLE events[]{stop_.value,parent_.cancel_,complete.value};
+                        const auto waited=WaitForMultipleObjects(3,events,FALSE,parent_.auto_recovery_?200:2000);
+                        if(waited==WAIT_OBJECT_0+2)break;
+                        if(waited==WAIT_TIMEOUT) {
+                            monitor();
+                            if(!parent_.auto_recovery_ && Clock::now()>=read_deadline)worker_error_=ERROR_TIMEOUT;
+                            // 初回 TS 待ちは StartReader の絶対期限と停止イベントで回収される。
+                            continue;
+                        }
+                        worker_error_=waited==WAIT_FAILED?GetLastError():ERROR_OPERATION_ABORTED;
+                    }
+                    if(worker_error_)CancelIoEx(parent_.usb_dev_.dev,&read.operation);
+                    ULONG transferred=0;
+                    const BOOL collected=WinUsb_GetOverlappedResult(parent_.usb_dev_.winusb,&read.operation,&transferred,TRUE);
+                    read.active=false;
+                    if(!collected && !worker_error_)worker_error_=GetLastError();
+                    if(worker_error_)break;
+                    if(transferred>raw.size()){worker_error_=ERROR_INVALID_DATA;break;}
+                    output.clear();framer.Feed(raw.data(),transferred,output);
+                    for(std::size_t offset=0;offset<output.size();offset+=188) {
+                        quality.Feed(output.data()+offset);std::size_t count=188;
+                        if(!stream_buf_->Write(output.data()+offset,count)||count!=188){worker_error_=ERROR_BUFFER_OVERFLOW;break;}
+                    }
+                    stream_buf_->NotifyWrite();
+                    if(!output.empty() && !worker_error_) {
+                        watch.Received(Clock::now());seen_stream=true;
+                        bool resumed=false;
+                        {std::lock_guard<std::mutex> state(state_mutex_);resumed=!first_;first_=true;}
+                        changed_.notify_all();
+                        if(resumed && attempt)msg_info("torne: recovery succeeded id=%s freq_khz=%u attempt=%llu\n",parent_.id_.c_str(),frequency,static_cast<unsigned long long>(attempt));
+                    }
+                }
+                // OVERLAPPED 回収後に停止する。カードの共有セッション・USB 電源・
+                // ReceiverManager の所有権は保持したまま、受信経路だけを再構築する。
+                {
+                    std::lock_guard<std::mutex> lock(session_->control_mutex);
+                    session_->control.Begin(Clock::now()+std::chrono::seconds(2));
+                    worker_stop_ok_=session_->engine.Stop()==StreamResult::ok;
+                }
+                msg_info("torne: reader end id=%s freq_khz=%u error=%lu stop_ok=%d fault=%u packets=%llu tei=%llu discarded=%llu raw_cc=%llu raw_malformed=%llu\n",
+                    parent_.id_.c_str(),frequency,worker_error_,worker_stop_ok_,static_cast<unsigned>(fault),
+                    static_cast<unsigned long long>(framer.Packets()),static_cast<unsigned long long>(framer.TeiPackets()),
+                    static_cast<unsigned long long>(framer.DiscardedBytes()),static_cast<unsigned long long>(quality.cc_anomalies),static_cast<unsigned long long>(quality.malformed));
+                if(!parent_.auto_recovery_ || !seen_stream || !worker_stop_ok_ || !WaitStop(0) ||
+                    (worker_error_!=ERROR_TIMEOUT && worker_error_!=ERROR_SEM_TIMEOUT))break;
+                {std::lock_guard<std::mutex> state(state_mutex_);first_=false;}
+                if(!stream_buf_->AdvanceEpoch()){worker_error_=ERROR_BUFFER_OVERFLOW;break;}
+                const auto recovered=RetryReception([&] {
+                    ++attempt;
+                    msg_warn("torne: recovery attempt id=%s freq_khz=%u attempt=%llu cause=%u error=%lu\n",parent_.id_.c_str(),frequency,static_cast<unsigned long long>(attempt),static_cast<unsigned>(fault),worker_error_);
+                    std::vector<std::uint8_t> response;
+                    const auto deadline=Clock::now()+std::chrono::seconds(5);
+                    if(!session_->Command(0x12,{0},response,deadline,stop_.value))return RecoveryResult::fatal;
+                    const int result=TuneFrequency(frequency,deadline,stop_.value,parent_.initial_lock_retry_);
+                    if(!WaitStop(0))return RecoveryResult::stopped;
+                    if(!result){start_deadline=Clock::now()+std::chrono::seconds(2);return RecoveryResult::ready;}
+                    msg_warn("torne: recovery tune failed id=%s freq_khz=%u attempt=%llu result=%d detail=%s\n",parent_.id_.c_str(),frequency,static_cast<unsigned long long>(attempt),result,session_->FrontendError().c_str());
+                    return result==-ETIMEDOUT || result==-ENODATA?RecoveryResult::no_lock:RecoveryResult::fatal;
+                },[&](unsigned ms){return WaitStop(ms);});
+                if(recovered!=RecoveryResult::ready){
+                    worker_error_=recovered==RecoveryResult::stopped?ERROR_OPERATION_ABORTED:ERROR_GEN_FAILURE;
+                    break;
+                }
+            }
+        }catch(...){worker_error_=ERROR_NOT_ENOUGH_MEMORY;worker_stop_ok_=false;exceptional=true;}
+        if(exceptional) {
+            try {
+                std::lock_guard<std::mutex> lock(session_->control_mutex);
+                session_->control.Begin(Clock::now()+std::chrono::seconds(2));
+                worker_stop_ok_=session_->engine.Stop()==StreamResult::ok;
+            }catch(...){worker_stop_ok_=false;}
+        }
+        {std::lock_guard<std::mutex> state(state_mutex_);finished_=true;}
+        changed_.notify_all();
+    }
 	int StopReader()
 	{
 		if (!worker_.joinable()) return 0;
@@ -516,6 +604,8 @@ ExperimentalDevice::~ExperimentalDevice() { Term(); if (cancel_) CloseHandle(can
 int ExperimentalDevice::Init()
 {
 	output_error_packets_=px4::util::wtob(device_def_.configs.Get(L"OutputErrorPackets",L"false"));
+    auto_recovery_=px4::util::wtob(device_def_.configs.Get(L"AutoRecovery",L"false"));
+    initial_lock_retry_=px4::util::wtob(device_def_.configs.Get(L"InitialLockRetry",L"false"));
 	// autoでは個体ごとに登録し、ReceiverManagerがOpen可能な受信機を選ぶ。
 	// 固定が必要な環境だけ、同じUSBポートのpath表示IDで絞り込む。
 	auto configured = device_def_.configs.Get(L"DeviceId", L"auto");

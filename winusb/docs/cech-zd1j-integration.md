@@ -24,7 +24,7 @@ USB機種名、GUID、ChSet名、ホスト名に変更はありません。
 診断時は`DebugLog=true`で同名`.log`を有効にできます。
 設定を省略した既存PX系の診断ログ動作は従来どおりです。
 現在のtorne配布設定は1024パケット単位、最大64・最小4バッファです。
-torne専用の`OutputErrorPackets=true`を配布INIへ設定し、未訂正TSも出力します。
+統合版の配布INIは`OutputErrorPackets=false`です。未訂正TSを出力する診断時は`true`へ変更できます。
 この組み合わせでの実機再試験は未実施です。過去の128パケット設定の試験結果とは区別してください。
 弱い局での実測とtorne専用の`OutputErrorPackets`設定は
 [ログと低ビットレート受信](torne-weak-signal.md)を参照してください。

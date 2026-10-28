@@ -7,10 +7,11 @@ namespace px4::torne {
 // Go版のWindows runtimeと同じ高精度waitable timerを使う。通常の
 // WaitForSingleObject(timeout)へ短い待機を渡すとtick単位の遅れが積み重なり、
 // 校正・探索が余計に遅くなる。レジスター側の待機時間自体は変更しない。
-inline DWORD WaitFrontendDelay(HANDLE cancel,std::chrono::steady_clock::time_point deadline,std::int64_t ns){
+inline DWORD WaitFrontendDelay(HANDLE cancel,std::chrono::steady_clock::time_point deadline,std::int64_t ns,HANDLE stop=nullptr){
     using Clock=std::chrono::steady_clock;
     auto check=[&]()->DWORD{
-        const auto state=WaitForSingleObject(cancel,0);
+        const HANDLE events[]{cancel,stop};
+        const auto state=WaitForMultipleObjects(stop?2:1,events,FALSE,0);
         if(state!=WAIT_TIMEOUT)return state==WAIT_FAILED?GetLastError():ERROR_OPERATION_ABORTED;
         return Clock::now()>=deadline?ERROR_TIMEOUT:ERROR_SUCCESS;
     };
@@ -29,9 +30,9 @@ inline DWORD WaitFrontendDelay(HANDLE cancel,std::chrono::steady_clock::time_poi
     const auto timeout_ns=std::chrono::duration_cast<std::chrono::nanoseconds>(deadline-Clock::now()).count();
     DWORD timeout=0;
     if(timeout_ns>0){const auto ms=timeout_ns/1000000+(timeout_ns%1000000!=0);timeout=ms>=MAXDWORD?MAXDWORD-1:static_cast<DWORD>(ms);}
-    const HANDLE handles[]{cancel,timer};
-    const auto result=WaitForMultipleObjects(2,handles,FALSE,timeout);
-    const DWORD error=result==WAIT_OBJECT_0+1?ERROR_SUCCESS:result==WAIT_OBJECT_0?ERROR_OPERATION_ABORTED:result==WAIT_TIMEOUT?ERROR_TIMEOUT:result==WAIT_FAILED?GetLastError():ERROR_INVALID_DATA;
+    const HANDLE handles[]{cancel,timer,stop};
+    const auto result=WaitForMultipleObjects(stop?3:2,handles,FALSE,timeout);
+    const DWORD error=result==WAIT_OBJECT_0+1?ERROR_SUCCESS:(result==WAIT_OBJECT_0 || (stop && result==WAIT_OBJECT_0+2))?ERROR_OPERATION_ABORTED:result==WAIT_TIMEOUT?ERROR_TIMEOUT:result==WAIT_FAILED?GetLastError():ERROR_INVALID_DATA;
     CancelWaitableTimer(timer);CloseHandle(timer);
     return error?error:check();
 }

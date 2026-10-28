@@ -6,6 +6,8 @@
 #include "../src/DriverHost_PX4/torne/ts_quality.hpp"
 #include "../src/DriverHost_PX4/torne/mb86h47_card.hpp"
 #include "../src/DriverHost_PX4/torne/tune_result.hpp"
+#include "../src/DriverHost_PX4/torne/reception_policy.hpp"
+#include "../src/DriverHost_PX4/torne/frontend_wait.hpp"
 
 #include <algorithm>
 #include <cstdlib>
@@ -162,6 +164,58 @@ static void ControlTests()
 	SetEvent(cancel);
 	Require(expired.Pause(50) == ERROR_OPERATION_ABORTED, "stop interrupts settling wait");
 	CloseHandle(cancel);
+}
+
+static void ReceptionTests()
+{
+	using namespace std::chrono;
+	using Clock=ReceptionWatch::Clock;
+	Clock::time_point now{};
+	ReceptionWatch watch(now);
+	Require(watch.Fault(now+milliseconds(4999))==ReceptionFault::none,"short TS pause retained");
+	Require(watch.Fault(now+seconds(5))==ReceptionFault::stalled,"five second stall");
+	watch.Received(now+seconds(4));watch.Lock(false,now);
+	Require(watch.Fault(now+seconds(5))==ReceptionFault::lock_lost,"sustained lock loss despite TS");
+	watch.Lock(true,now+seconds(5));
+	Require(watch.Fault(now+seconds(5))==ReceptionFault::none,"lock recovery clears loss timer");
+	watch.Lock(false,now+seconds(5));watch.Received(now+seconds(9));
+	Require(watch.Fault(now+seconds(9))==ReceptionFault::none,"new loss interval is independent");
+	unsigned polls=0,waits=0;
+	auto result=WaitInitialLock(now+seconds(1),[&]{return now;},[&]{return ++polls==3?RecoveryResult::ready:RecoveryResult::no_lock;},[&](unsigned ms){++waits;now+=milliseconds(ms);return true;});
+	Require(result==RecoveryResult::ready && polls==3 && waits==2,"initial lock polls without reissuing tune");
+	const auto deadline=now+milliseconds(1);
+	result=WaitInitialLock(deadline,[&]{return now;},[&]{now+=milliseconds(2);return RecoveryResult::ready;},[](unsigned){return true;});
+	Require(result==RecoveryResult::no_lock,"late successful USB poll cannot extend deadline");
+	polls=0;
+	result=WaitInitialLock(deadline,[&]{return now;},[&]{++polls;return RecoveryResult::ready;},[](unsigned){return true;});
+	Require(result==RecoveryResult::no_lock && !polls,"expired acquisition does not touch hardware");
+	result=WaitInitialLock(now+seconds(1),[&]{return now;},[]{return RecoveryResult::no_lock;},[](unsigned){return false;});
+	Require(result==RecoveryResult::stopped,"stop interrupts initial lock wait");
+	result=WaitInitialLock(now+seconds(1),[&]{return now;},[]{return RecoveryResult::fatal;},[](unsigned){return true;});
+	Require(result==RecoveryResult::fatal,"initial transport error retained");
+	unsigned attempts=0;std::vector<unsigned> delays;
+	result=RetryReception([&]{return ++attempts==3?RecoveryResult::ready:RecoveryResult::no_lock;},[&](unsigned ms){delays.push_back(ms);return true;});
+	Require(result==RecoveryResult::ready && attempts==3 && delays==std::vector<unsigned>({0,3000,3000}),"failed retune has bounded retry spacing");
+	attempts=0;
+	result=RetryReception([&]{++attempts;return RecoveryResult::fatal;},[](unsigned){return true;});
+	Require(result==RecoveryResult::fatal && attempts==1,"USB failure is terminal");
+	result=RetryReception([&]{++attempts;return RecoveryResult::ready;},[](unsigned){return false;});
+	Require(result==RecoveryResult::stopped && attempts==1,"pre-stop cannot retune");
+	attempts=0;
+	result=RetryReception([&]{++attempts;return RecoveryResult::no_lock;},[](unsigned ms){return !ms;});
+	Require(result==RecoveryResult::stopped && attempts==1,"retry delay is cancellable");
+
+	HANDLE removed=CreateEventW(nullptr,TRUE,FALSE,nullptr),stop=CreateEventW(nullptr,TRUE,FALSE,nullptr);
+	Require(removed && stop,"recovery cancellation events");
+	MockControlIo io;io.cancel_event=stop;io.cancel_on_submit=true;
+	WinUsbControl control(reinterpret_cast<HANDLE>(2),reinterpret_cast<WINUSB_INTERFACE_HANDLE>(1),removed,io);
+	control.Begin(Clock::now()+seconds(1),stop);std::uint8_t bytes[4]{};std::size_t count=4;
+	Require(control.Transfer(MakeMemoryRequest(0x82008,true),bytes,4,count)==ERROR_OPERATION_ABORTED && io.cancels==1 && io.collects==1,"receiver stop cancels and drains in-flight control");
+	Require(WaitForSingleObject(removed,0)==WAIT_TIMEOUT,"receiver stop is independent of USB removal");
+	Require(WaitFrontendDelay(removed,Clock::now()+seconds(1),100000000,stop)==ERROR_OPERATION_ABORTED,"stop cancels frontend settling wait");
+	control.Begin(Clock::now()+seconds(1));
+	Require(control.Pause(0)==ERROR_SUCCESS,"next card operation clears receiver-only stop");
+	CloseHandle(stop);CloseHandle(removed);
 }
 
 static std::vector<std::uint8_t> Units(std::size_t count, std::vector<std::uint8_t> &expected)
@@ -338,6 +392,7 @@ int main()
 	Require(!IsConfirmedSearchFailure(nullptr, 0) && !IsConfirmedSearchFailure(unknown, 1) && !IsConfirmedSearchFailure(extended, 2), "legacy and unknown replies preserve lock waiting");
 	MemoryTests();
 	ControlTests();
+	ReceptionTests();
 	FramerTests();
 	IdentityTests();
 	QualityTests();

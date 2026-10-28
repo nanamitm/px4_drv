@@ -96,6 +96,13 @@ foreach ($build_platform in $build_platforms) {
     if ($LASTEXITCODE -ne 0) { throw "Native torne frontend test build failed. platform: $build_platform" }
     & "build/$build_platform/Release-static/torne_native_frontend_test.exe"
     if ($LASTEXITCODE -ne 0) { throw "Native torne frontend test failed. platform: $build_platform" }
+
+    foreach ($torne_test in @('torne_foundation_test', 'torne_bootstrap_test')) {
+        msbuild "tests/$torne_test.vcxproj" /p:"Configuration=Release-static;Platform=$build_platform;PlatformToolset=v143"
+        if ($LASTEXITCODE -ne 0) { throw "Torne test build failed: $torne_test ($build_platform)" }
+        & "build/$build_platform/Release-static/$torne_test.exe"
+        if ($LASTEXITCODE -ne 0) { throw "Torne test failed: $torne_test ($build_platform)" }
+    }
 }
 
 # dist/ フォルダにビルドされたファイルをコピー

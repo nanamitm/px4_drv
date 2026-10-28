@@ -1,6 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <Project DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <ItemGroup Label="ProjectConfigurations">
+    <ProjectConfiguration Include="Release-static|Win32"><Configuration>Release-static</Configuration><Platform>Win32</Platform></ProjectConfiguration>
     <ProjectConfiguration Include="Release-static|x64"><Configuration>Release-static</Configuration><Platform>x64</Platform></ProjectConfiguration>
   </ItemGroup>
   <PropertyGroup Label="Globals">
@@ -17,8 +18,10 @@
   </PropertyGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
   <PropertyGroup>
-    <OutDir>$(MSBuildThisFileDirectory)..\build\x64\$(Configuration)\</OutDir>
-    <IntDir>$(MSBuildThisFileDirectory)build\torne_foundation_test\x64\$(Configuration)\</IntDir>
+    <NativeBuildPlatform Condition="'$(Platform)'=='Win32'">x86</NativeBuildPlatform>
+    <NativeBuildPlatform Condition="'$(Platform)'=='x64'">x64</NativeBuildPlatform>
+    <OutDir>$(MSBuildThisFileDirectory)..\build\$(NativeBuildPlatform)\$(Configuration)\</OutDir>
+    <IntDir>$(MSBuildThisFileDirectory)build\torne_foundation_test\$(NativeBuildPlatform)\$(Configuration)\</IntDir>
   </PropertyGroup>
   <ItemDefinitionGroup>
     <ClCompile>

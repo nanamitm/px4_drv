@@ -36,20 +36,15 @@ WinUsbControl::WinUsbControl(HANDLE file, WINUSB_INTERFACE_HANDLE usb, HANDLE ca
 
 int WinUsbControl::Pause(unsigned milliseconds)
 {
-	if (!cancel_)
-		return ERROR_INVALID_HANDLE;
-	const DWORD cancel_state = WaitForSingleObject(cancel_, 0);
-	if (cancel_state == WAIT_OBJECT_0)
-		return ERROR_OPERATION_ABORTED;
-	if (cancel_state == WAIT_FAILED)
-		return static_cast<int>(GetLastError());
+	if(auto error=Cancellation())return static_cast<int>(error);
 	const auto now = Clock::now();
 	if (now >= deadline_)
 		return ERROR_TIMEOUT;
 	const auto end = (std::min)(deadline_, now + std::chrono::milliseconds(milliseconds));
 	const auto timeout = std::chrono::ceil<std::chrono::milliseconds>(end - now).count();
-	const DWORD result = WaitForSingleObject(cancel_, static_cast<DWORD>((std::min)(timeout, static_cast<decltype(timeout)>(MAXDWORD - 1))));
-	if (result == WAIT_OBJECT_0)
+	const HANDLE events[]{cancel_,stop_};
+	const DWORD result = WaitForMultipleObjects(stop_?2:1,events,FALSE,static_cast<DWORD>((std::min)(timeout,static_cast<decltype(timeout)>(MAXDWORD-1))));
+	if(result==WAIT_OBJECT_0 || (stop_ && result==WAIT_OBJECT_0+1))
 		return ERROR_OPERATION_ABORTED;
 	if (result == WAIT_FAILED)
 		return static_cast<int>(GetLastError());
@@ -64,11 +59,7 @@ int WinUsbControl::Transfer(const MemoryRequest &request, std::uint8_t *data,
 	transferred = 0;
 	if (!data || !length || length > 64 || file_ == INVALID_HANDLE_VALUE || !file_ || !usb_ || !cancel_)
 		return ERROR_INVALID_PARAMETER;
-	const DWORD cancel_state = WaitForSingleObject(cancel_, 0);
-	if (cancel_state == WAIT_OBJECT_0)
-		return ERROR_OPERATION_ABORTED;
-	if (cancel_state == WAIT_FAILED)
-		return static_cast<int>(GetLastError());
+	if(auto error=Cancellation())return static_cast<int>(error);
 	if (Clock::now() >= deadline_)
 		return ERROR_TIMEOUT;
 
@@ -90,9 +81,9 @@ int WinUsbControl::Transfer(const MemoryRequest &request, std::uint8_t *data,
 		// 切り捨てで期限より早く切らないよう、残時間をミリ秒へ切り上げる。
 		const auto millis = std::chrono::ceil<std::chrono::milliseconds>(remaining).count();
 		const auto timeout = static_cast<DWORD>(std::clamp<decltype(millis)>(millis, 0, MAXDWORD - 1));
-		const HANDLE events[] = { cancel_, operation.hEvent };
-		const DWORD result = WaitForMultipleObjects(2, events, FALSE, timeout);
-		if (result == WAIT_OBJECT_0)
+		const HANDLE events[] = { cancel_, operation.hEvent, stop_ };
+		const DWORD result = WaitForMultipleObjects(stop_?3:2, events, FALSE, timeout);
+		if (result == WAIT_OBJECT_0 || (stop_ && result==WAIT_OBJECT_0+2))
 			reason = ERROR_OPERATION_ABORTED;
 		else if (result == WAIT_TIMEOUT)
 			reason = ERROR_TIMEOUT;
@@ -101,13 +92,8 @@ int WinUsbControl::Transfer(const MemoryRequest &request, std::uint8_t *data,
 	}
 	if (!reason) {
 		// 完了とcancelが競合した場合も、停止後の結果を新しい選局へ渡さない。
-		const DWORD state = WaitForSingleObject(cancel_, 0);
-		if (state == WAIT_OBJECT_0)
-			reason = ERROR_OPERATION_ABORTED;
-		else if (state == WAIT_FAILED)
-			reason = GetLastError();
-		else if (Clock::now() >= deadline_)
-			reason = ERROR_TIMEOUT;
+		reason=Cancellation();
+        if(!reason && Clock::now()>=deadline_)reason=ERROR_TIMEOUT;
 	}
 	if (reason)
 		io_.Cancel(file_, operation);
@@ -127,4 +113,11 @@ int WinUsbControl::Transfer(const MemoryRequest &request, std::uint8_t *data,
 	return ERROR_SUCCESS;
 }
 
+DWORD WinUsbControl::Cancellation() const noexcept
+{
+    if(!cancel_)return ERROR_INVALID_HANDLE;
+    const HANDLE events[]{cancel_,stop_};
+    const auto result=WaitForMultipleObjects(stop_?2:1,events,FALSE,0);
+    return result==WAIT_TIMEOUT?ERROR_SUCCESS:result==WAIT_FAILED?GetLastError():ERROR_OPERATION_ABORTED;
+}
 } // namespace px4::torne

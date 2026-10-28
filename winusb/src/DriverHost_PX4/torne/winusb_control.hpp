@@ -36,7 +36,7 @@ class WinUsbControl final : public ControlTransport, public BootstrapWait {
 public:
 	using Clock = std::chrono::steady_clock;
 	WinUsbControl(HANDLE file, WINUSB_INTERFACE_HANDLE usb, HANDLE cancel, ControlIo &io) noexcept;
-	void Begin(Clock::time_point deadline) noexcept { deadline_ = deadline; }
+	void Begin(Clock::time_point deadline,HANDLE stop=nullptr) noexcept { deadline_ = deadline; stop_=stop; }
 	int Transfer(const MemoryRequest &request, std::uint8_t *data,
 		std::size_t length, std::size_t &transferred) override;
 	int Pause(unsigned milliseconds) override;
@@ -45,6 +45,8 @@ private:
 	HANDLE file_;
 	WINUSB_INTERFACE_HANDLE usb_;
 	HANDLE cancel_;
+	HANDLE stop_ = nullptr;
+	DWORD Cancellation() const noexcept;
 	ControlIo &io_;
 	Clock::time_point deadline_ = (Clock::time_point::min)();
 };
