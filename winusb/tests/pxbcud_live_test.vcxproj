@@ -61,7 +61,7 @@
 
 
     <ClCompile Include="..\src\DriverHost_PX4\pxbcud\frontend.cpp" />
-    <ClCompile Include="..\src\DriverHost_PX4\pxbcud\device.cpp" />
+    <ClCompile Include="pxbcud_live_device.cpp" />
     <ClCompile Include="..\src\DriverHost_PX4\device_base.cpp" />
     <ClCompile Include="..\src\DriverHost_PX4\receiver_base.cpp" />
     <ClCompile Include="..\src\DriverHost_PX4\receiver_manager.cpp" />

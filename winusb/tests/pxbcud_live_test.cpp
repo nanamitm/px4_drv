@@ -11,6 +11,9 @@
 #pragma comment(lib,"setupapi.lib")
 #pragma comment(lib,"winusb.lib")
 
+void InjectPxBcudCompletionFailure(DWORD error);
+DWORD ObservedPxBcudCompletionFailure();
+
 int wmain(int argc,wchar_t **argv)
 {
     msg_set_mode(MSG_MODE_CONSOLE);
@@ -54,6 +57,7 @@ int wmain(int argc,wchar_t **argv)
         FILE *output=nullptr;
         if(argc>4 && wcscmp(argv[4],L"-") && _wfopen_s(&output,argv[4],L"wb")){receiver->SetCapture(false);std::puts("Output open failed.");return 1;}
         std::atomic_bool write_error{false};
+        std::atomic_bool reader_exited{false};
         std::thread reader([&]{
             std::array<int,8192> counters;counters.fill(-1);
             std::uint32_t previous_epoch=0;
@@ -81,10 +85,43 @@ int wmain(int argc,wchar_t **argv)
                 }
                 return true;
             });
+            reader_exited=true;
         });
         std::this_thread::sleep_for(std::chrono::seconds(seconds));
         bool switch_failed=false;
-        if (argc>5) {
+        const bool recovery_test=argc>5 && !wcscmp(argv[5],L"--recover");
+        if (recovery_test) {
+            // 同じ reader とデータ接続のまま二種類の完了エラーから復帰する。
+            for (const DWORD error:{ERROR_GEN_FAILURE,ERROR_INVALID_PARAMETER}) {
+                const auto before=packets.load();
+                if (!before || reader_exited) {switch_failed=true;break;}
+                InjectPxBcudCompletionFailure(error);
+                const auto deadline=std::chrono::steady_clock::now()+std::chrono::seconds(5);
+                int status=0;bool locked=false;
+                do {
+                    status=receiver->CheckLock(locked);
+                    if (status) break;
+                    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+                } while (std::chrono::steady_clock::now()<deadline);
+                if (ObservedPxBcudCompletionFailure()!=error || status!=-EIO || reader_exited) {
+                    std::printf("Recovery precondition failed requested=%lu observed=%lu status=%d reader_exited=%d\n",
+                        error,ObservedPxBcudCompletionFailure(),status,reader_exited.load());
+                    switch_failed=true;break;
+                }
+                // 受信エラーを観測してから明示的に選局し、配信スレッドを
+                // 再生成せず同じ reader へ新しい世代が渡ることを確認する。
+                const auto failed_count=packets.load();
+                if (!receiver->SetParameters(parameters) || !receiver->Tune(5000)) {
+                    std::puts("Recovery tune failed.");switch_failed=true;break;
+                }
+                std::this_thread::sleep_for(std::chrono::seconds(seconds));
+                if (reader_exited || packets.load()<=failed_count) {
+                    std::puts("Recovery produced no data on the original reader.");switch_failed=true;break;
+                }
+                std::printf("Recovery passed error=%lu packets_after_retune=%llu original_reader_active=1\n",
+                    error,static_cast<unsigned long long>(packets.load()-failed_count));
+            }
+        } else if (argc>5) {
             const auto second_frequency=static_cast<std::uint32_t>(wcstoul(argv[5],nullptr,0));
             for (const auto next_frequency:{second_frequency,frequency}) {
                 parameters.freq=next_frequency;

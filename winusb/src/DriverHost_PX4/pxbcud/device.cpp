@@ -220,14 +220,15 @@ private:
         int ret=frontend_.Capture(true);
         Snapshot();
         if (ret) {
-            stream_buf_->Stop();
+            if (initialize_buffer) stream_buf_->Stop();
             io_.Begin(1000); frontend_.Capture(false);
             WinUsb_SetCurrentAlternateSetting(usb_,0);
             return ret;
         }
         try { worker_=std::thread([this]{Run();}); }
         catch (...) {
-            stop_=true; stream_buf_->Stop();
+            stop_=true;
+            if (initialize_buffer) stream_buf_->Stop();
             io_.Begin(1000); frontend_.Capture(false);
             WinUsb_SetCurrentAlternateSetting(usb_,0);
             return -ENOMEM;
@@ -257,7 +258,10 @@ private:
         catch (...) { worker_error_=ERROR_NOT_ENOUGH_MEMORY; }
         if (worker_error_) {
             msg_err("PX-BCUD: TS worker failed win32=%lu\n",worker_error_.load());
-            stream_buf_->StopRequest();
+            // USB 受信の異常終了は CheckLock/ReadStat で失敗として返すが、
+            // データ接続は次の明示的な選局まで待機させる。StopRequest で
+            // 配信スレッドまで終了すると、Start(false) では復帰できない。
+            // 抜去時の停止要求は Disconnected、接続終了時は StreamServer が行う。
         }
     }
     void Snapshot()

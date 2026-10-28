@@ -88,7 +88,16 @@ Visual Studio 2022 / v143 で `winusb/build.ps1` を実行すると、通常の�
 
 # 10秒ごとに BS-1 -> BS-3 -> BS-1 を同じ受信機の Open 中に切り替える
 .\winusb\build\x64\Release-static\pxbcud_live_test.exe 1049480 0 10 - 1087840
+
+# 完了エラー31・87を順に模擬注入し、同じ配信接続で再選局後の受信を確認
+.\winusb\build\x64\Release-static\pxbcud_live_test.exe 1049480 0 2 - --recover
 ```
+
+`--recover` は実機の正常なUSB転送完了を回収した後、試験ツール内でエラーを模擬します。
+各エラーの通知と再選局後のパケット増加、同じ読取スレッドの継続、同期・TEI・CCを確認します。
+配布用DriverHostには模擬注入処理を含みません。USB受信の異常終了後も配信接続は待機し、
+明示的な再選局で受信を再開します。USB抜去や接続終了時は配信も終了します。
+この試験は復旧経路を対象としており、実際のUSBエラー31・87の発生原因は別途調査が必要です。
 
 実機ツールは別の DriverHost プロセスを起動せず、対象 PX-BCUD へ直接接続します。
 稼働中の DriverHost / TVTest を停止する必要はありませんが、同じ PX-BCUD を別のアプリと
