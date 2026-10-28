@@ -1,4 +1,6 @@
-﻿
+﻿param([string]$SigningPfxPath='', [string]$SigningPasswordEnvironment='', [string]$SigningPasswordFile='', [switch]$RequireSignedApplications)
+
+
 # カレントディレクトリに移動
 if ($MyInvocation.MyCommand.Path -ne $null) {
     $CurrentPath = (Split-Path $MyInvocation.MyCommand.Path -Parent)
@@ -41,6 +43,13 @@ if ((Get-Command msbuild -ErrorAction SilentlyContinue) -eq $null) {
 # MSBuild を使用してソリューションをビルド
 $build_platforms = @('x86', 'x64')
 foreach ($build_platform in $build_platforms) {
+    # PX-BCUD の USB 分割境界・I2C 故障注入は実機接続なしで検証する。
+    foreach ($bcud_test in @('pxbcud_frontend_test', 'pxbcud_usb_probe', 'pxbcud_live_test', 'channel_switch_stress')) {
+        msbuild "tests/$bcud_test.vcxproj" /p:"Configuration=Release-static;Platform=$build_platform;PlatformToolset=v143"
+        if ($LASTEXITCODE -ne 0) { throw "PX-BCUD test build failed: $bcud_test ($build_platform)" }
+    }
+    & "build/$build_platform/Release-static/pxbcud_frontend_test.exe"
+    if ($LASTEXITCODE -ne 0) { throw "PX-BCUD frontend test failed ($build_platform)" }
     msbuild px4_winusb.sln /t:"Rebuild" /p:"Configuration=Release-static;Platform=$build_platform;PlatformToolset=v143"
 
     if ($LASTEXITCODE -ne 0) {
@@ -66,6 +75,11 @@ foreach ($build_platform in $build_platforms) {
     & "build/$build_platform/Release-static/stream_stop_test.exe"
     if ($LASTEXITCODE -ne 0) { throw "Stream stop test failed. platform: $build_platform" }
 
+    msbuild tests/stream_epoch_test.vcxproj /p:"Configuration=Release-static;Platform=$build_platform;PlatformToolset=v143"
+    if ($LASTEXITCODE -ne 0) { throw "Stream epoch test build failed. platform: $build_platform" }
+    & "build/$build_platform/Release-static/stream_epoch_test.exe"
+    if ($LASTEXITCODE -ne 0) { throw "Stream epoch test failed. platform: $build_platform" }
+
     msbuild tests/pipe_shutdown_test.vcxproj /p:"Configuration=Release-static;Platform=$build_platform;PlatformToolset=v143"
     if ($LASTEXITCODE -ne 0) { throw "Pipe shutdown test build failed. platform: $build_platform" }
     & "build/$build_platform/Release-static/pipe_shutdown_test.exe"
@@ -86,11 +100,32 @@ foreach ($build_platform in $build_platforms) {
     if ($LASTEXITCODE -ne 0) {
         throw "Ring buffer purge test failed. platform: $build_platform"
     }
+    # torneの復調器はホスト内のC++実装。Go不要の模擬試験で状態遷移と境界を検証する。
+    msbuild tests/torne_native_frontend_test.vcxproj /t:"Rebuild" /p:"Configuration=Release-static;Platform=$build_platform;PlatformToolset=v143"
+    if ($LASTEXITCODE -ne 0) { throw "Native torne frontend test build failed. platform: $build_platform" }
+    & "build/$build_platform/Release-static/torne_native_frontend_test.exe"
+    if ($LASTEXITCODE -ne 0) { throw "Native torne frontend test failed. platform: $build_platform" }
+
+    foreach ($torne_test in @('torne_foundation_test', 'torne_bootstrap_test')) {
+        msbuild "tests/$torne_test.vcxproj" /p:"Configuration=Release-static;Platform=$build_platform;PlatformToolset=v143"
+        if ($LASTEXITCODE -ne 0) { throw "Torne test build failed: $torne_test ($build_platform)" }
+        & "build/$build_platform/Release-static/$torne_test.exe"
+        if ($LASTEXITCODE -ne 0) { throw "Torne test failed: $torne_test ($build_platform)" }
+    }
 }
 
 # dist/ フォルダにビルドされたファイルをコピー
 # フォルダの作成
-Remove-Item -Recurse -Force dist/ -ErrorAction SilentlyContinue
+$distribution_path = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot 'dist'))
+if ($distribution_path -ne (Join-Path ([IO.Path]::GetFullPath($PSScriptRoot)) 'dist')) {
+    throw 'Unexpected distribution path.'
+}
+if (Test-Path -LiteralPath $distribution_path) {
+    if ((Get-Item -LiteralPath $distribution_path).Attributes -band [IO.FileAttributes]::ReparsePoint) {
+        throw 'Refusing to replace a redirected distribution directory.'
+    }
+    Remove-Item -LiteralPath $distribution_path -Recurse -Force
+}
 New-Item -ItemType Directory dist/
 New-Item -ItemType Directory dist/BonDriver_PX4_32bit
 New-Item -ItemType Directory dist/BonDriver_PX4_64bit
@@ -235,6 +270,20 @@ Copy-Item build/x64/Release-static/DriverHost_PX4.exe dist/BonDriver_PX-S1UR_64b
 Copy-Item pkg/DriverHost_PX4/DriverHost_PX4.ini dist/BonDriver_PX-S1UR_64bit/DriverHost_PX4.ini
 Copy-Item pkg/DriverHost_PX4/it930x-firmware.bin dist/BonDriver_PX-S1UR_64bit/it930x-firmware.bin
 
+# PX-BCUD も通常配布へ含める。給電非対応と世代付き TS 配信の設定を同梱する。
+foreach ($bcud_arch in @(@('x86', '32bit'), @('x64', '64bit'))) {
+    $bcud_platform = $bcud_arch[0]
+    $bcud_folder = "dist/BonDriver_PX-BCUD_$($bcud_arch[1])"
+    New-Item -ItemType Directory -Path $bcud_folder | Out-Null
+    Copy-Item "build/$bcud_platform/Release-static/BonDriver_PX4.dll" "$bcud_folder/BonDriver_PX-BCUD.dll"
+    Copy-Item "build/$bcud_platform/Release-static/DriverHost_PX4.exe" $bcud_folder
+    Copy-Item 'pkg/BonDriver_PX4/BonDriver_PX-BCUD.ini' $bcud_folder
+    Copy-Item 'pkg/BonDriver_PX4/BonDriver_PX4-S.ChSet.txt' $bcud_folder
+    Copy-Item 'pkg/DriverHost_PX4/DriverHost_PX4.ini' $bcud_folder
+    Copy-Item '../docs/px-bcud-winusb.md' "$bcud_folder/README.md"
+    Copy-Item '../LICENSE' $bcud_folder
+}
+
 # 各 BonDriver と同じビット数の WinSCard.dll を配置
 # WinUSB 版の全対応機種で内蔵カードリーダーを利用できる
 Get-ChildItem dist/ -Directory -Filter 'BonDriver_*' | ForEach-Object {
@@ -242,11 +291,36 @@ Get-ChildItem dist/ -Directory -Filter 'BonDriver_*' | ForEach-Object {
     Copy-Item "build/$win_scard_platform/Release-static/WinSCard.dll" $_.FullName
 }
 
+# CECH-ZD1J用配布物と共通ライセンス文書を配置する。
+python tools/package_torne.py
+if ($LASTEXITCODE -ne 0) {
+    throw 'Torne packaging failed.'
+}
+
 # inf ファイルをコピー
 Copy-Item -Recurse pkg/inf/ dist/Driver
 
 # コピー後の最終配布物も再度検査
 & 'pkg/signing-tools/verify.ps1' -DriverPath 'dist/Driver'
+
+python tools/check_pxbcud_package.py
+if ($LASTEXITCODE -ne 0) { throw 'PX-BCUD package check failed.' }
+python tests/pxbcud_package_test.py
+if ($LASTEXITCODE -ne 0) { throw 'PX-BCUD package validation regression failed.' }
+
+# アプリ署名は CAT と別の公開証明書へ固定する。通常の開発ビルドは従来どおり
+# 署名キー不要とし、配布用途では検証に成功した成果物だけを渡す。
+if ($SigningPfxPath) {
+    $sign_arguments = @('-NoProfile','-ExecutionPolicy','Bypass','-File',(Join-Path $PSScriptRoot 'tools/sign-applications.ps1'),'-PfxPath',$SigningPfxPath)
+    if ($SigningPasswordEnvironment) { $sign_arguments += @('-PasswordEnvironment',$SigningPasswordEnvironment) }
+    if ($SigningPasswordFile) { $sign_arguments += @('-PasswordFile',$SigningPasswordFile) }
+    & powershell.exe @sign_arguments
+    if ($LASTEXITCODE -ne 0) { throw 'Application signing failed.' }
+}
+if ($RequireSignedApplications -or $SigningPfxPath) {
+    & powershell.exe -NoProfile -ExecutionPolicy Bypass -File tools/verify-applications.ps1
+    if ($LASTEXITCODE -ne 0) { throw 'Application signature verification failed.' }
+}
 
 Write-Host '    '
 Write-Host '    '

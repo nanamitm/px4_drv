@@ -13,6 +13,7 @@ winusb/**/*.jse text eol=crlf
 winusb/**/*.vcxproj text eol=crlf
 winusb/**/*.vcxproj.filters text eol=crlf
 winusb/**/*.ps1 text eol=crlf
+winusb/**/*.cmd text eol=crlf
 winusb/*.sln text eol=crlf
 winusb/**/*.rc text eol=crlf
 

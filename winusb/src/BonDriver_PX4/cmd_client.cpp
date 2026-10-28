@@ -8,6 +8,14 @@
 
 namespace px4 {
 
+bool CtrlCmdClient::GetVersion(std::uint32_t &version) noexcept
+{
+	px4::command::CtrlVersionCmd cmd{};
+	cmd.cmd=px4::command::CtrlCmdCode::GET_VERSION;
+	if(!Call(cmd))return false;
+	version=cmd.cmd_version;return true;
+}
+
 bool CtrlCmdClient::Open(const px4::command::ReceiverInfo &in, px4::SystemType systems, px4::command::ReceiverInfo *out) noexcept
 {
 	px4::command::CtrlOpenCmd open_cmd;

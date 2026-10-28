@@ -70,8 +70,12 @@ StreamMetrics MeasureStream(IBonDriver2 *bon_driver, unsigned int milliseconds)
 				/* ペイロードを持つ通常パケットだけ連続性を追跡する */
 				if ((adaptation & 0x01) && pid != 0x1fff) {
 					if (last_counter[pid] >= 0 &&
-						counter != ((last_counter[pid] + 1) & 0x0f))
+						counter != ((last_counter[pid] + 1) & 0x0f)) {
 						metrics.continuity_errors++;
+						std::fprintf(stderr, "continuity error: pid=0x%04x previous=%d current=%u packet=%llu header=%02x %02x %02x %02x\n",
+							pid, last_counter[pid], counter, static_cast<unsigned long long>(metrics.packets),
+							packet[0], packet[1], packet[2], packet[3]);
+					}
 					last_counter[pid] = counter;
 				}
 			}

@@ -33,6 +33,8 @@ enum class DeviceType : std::uint32_t {
 	PXMLT,
 	ISDB2056,
 	ISDBT2071,
+	CECHZD1J,
+	PXBCUD,
 };
 
 class DeviceManager final {

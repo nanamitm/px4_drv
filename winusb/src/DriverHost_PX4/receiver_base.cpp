@@ -720,6 +720,11 @@ void ReceiverBase::StreamBuffer::NotifyWrite() noexcept
 
 void ReceiverBase::StreamBuffer::HandleRead(std::size_t buf_size, std::function<bool(const void *buf, std::size_t size)> handler)
 {
+	HandleReadWithEpoch(buf_size,[&](const void *buf,std::size_t size,std::uint32_t){return handler(buf,size);});
+}
+
+void ReceiverBase::StreamBuffer::HandleReadWithEpoch(std::size_t buf_size, std::function<bool(const void *,std::size_t,std::uint32_t)> handler)
+{
 	std::unique_ptr<std::uint8_t[]> buf(new std::uint8_t[buf_size]);
 	std::uint8_t *p = buf.get();
 	std::unique_lock<std::mutex> lock(mtx_);
@@ -738,10 +743,15 @@ void ReceiverBase::StreamBuffer::HandleRead(std::size_t buf_size, std::function<
 		lock.unlock();
 		std::size_t size = buf_size;
 
-		if (!ringbuf_.Read(p, size))
-			break;
+		std::uint32_t epoch;
+		{
+			// USB やパイプ待機を含めず、読み出したバイト列とその世代だけを確定する。
+			std::lock_guard<std::mutex> epoch_lock(epoch_mtx_);
+			if (!ringbuf_.Read(p, size))break;
+			epoch=epoch_;
+		}
 
-		if (size && !handler(p, size))
+		if (size && !handler(p, size, epoch))
 			break;
 		lock.lock();
 	}
@@ -758,6 +768,14 @@ bool ReceiverBase::StreamBuffer::Purge() noexcept
 		tsmf_tlv_size_ = 0;
 	}
 	return ringbuf_.Purge();
+}
+
+bool ReceiverBase::StreamBuffer::AdvanceEpoch() noexcept
+{
+	std::lock_guard<std::mutex> lock(epoch_mtx_);
+	if(!Purge())return false;
+	if(!++epoch_)++epoch_;
+	return true;
 }
 
 } // namespace px4

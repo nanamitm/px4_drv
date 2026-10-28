@@ -20,6 +20,7 @@
 #include "command.hpp"
 #include "cmd_client.hpp"
 #include "io_queue.hpp"
+#include "stream_frame.hpp"
 
 namespace px4 {
 
@@ -70,9 +71,11 @@ private:
 		bool Start() override;
 		void Stop() override;
 		bool Do(void *buf, std::size_t &size) override;
+		std::uint32_t Epoch() const noexcept override { return frames_.Epoch(); }
 
 	private:
 		BonDriver &parent_;
+		px4::StreamFrameReader frames_;
 	};
 
 	std::mutex mtx_;
@@ -83,6 +86,7 @@ private:
 	px4::ChannelSet chset_;
 	px4::ReceiverInfoSet receivers_;
 	bool lnb_power_;
+	bool framed_stream_ = false;
 	bool lnb_power_state_;
 	std::int32_t isdbc_frequency_offset_khz_;
 	/* 0: automatic, 64 or 256: force the experimental ISDB-C profile. */

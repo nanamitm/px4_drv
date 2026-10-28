@@ -29,6 +29,7 @@ public:
 	void ClearPipe() noexcept { pipe_.reset(); }
 
 	bool Open(const px4::command::ReceiverInfo &in, px4::SystemType systems, px4::command::ReceiverInfo *out) noexcept;
+	bool GetVersion(std::uint32_t &version) noexcept;
 	bool Close() noexcept;
 	bool GetInfo(px4::command::ReceiverInfo &receiver_info) noexcept;
 	bool SetCapture(bool capture) noexcept;

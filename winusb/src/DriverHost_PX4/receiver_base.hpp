@@ -69,6 +69,8 @@ public:
 		bool Write(const void *buf, std::size_t &size) noexcept;
 		void NotifyWrite() noexcept;
 		void HandleRead(std::size_t buf_size, std::function<bool(const void *buf, std::size_t size)> handler);
+		void HandleReadWithEpoch(std::size_t buf_size, std::function<bool(const void *, std::size_t, std::uint32_t)> handler);
+		bool AdvanceEpoch() noexcept;
 		bool Purge() noexcept;
 
 	private:
@@ -79,6 +81,8 @@ public:
 		bool TsmfAppendTlv(const std::uint8_t *data, std::size_t size) noexcept;
 
 		std::mutex mtx_;
+		std::mutex epoch_mtx_;
+		std::uint32_t epoch_ = 1;
 		std::mutex tsmf_mtx_;
 		px4::RingBuffer ringbuf_;
 		std::atomic_bool stop_;
