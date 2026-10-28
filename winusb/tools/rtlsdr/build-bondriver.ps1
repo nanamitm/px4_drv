@@ -54,6 +54,7 @@ foreach($arch in $Architecture){
         }
         Copy-Item -LiteralPath (Join-Path $frontend 'LICENSE') -Destination (Join-Path $runtime 'COPYING.frontend') -Force
         Copy-Item -LiteralPath (Join-Path $winusbRoot 'docs\rtlsdr-bondriver.md') -Destination (Join-Path $destination 'README.md') -Force
+        Copy-Item -LiteralPath (Join-Path $winusbRoot '..\LICENSE') -Destination (Join-Path $destination 'LICENSE') -Force
         Copy-Item -LiteralPath (Join-Path $winusbRoot 'pkg\rtlsdr\Install-Driver.ps1') -Destination $destination -Force
         $driver=Join-Path $destination 'Driver'
         New-Item -ItemType Directory -Force -Path $driver | Out-Null
