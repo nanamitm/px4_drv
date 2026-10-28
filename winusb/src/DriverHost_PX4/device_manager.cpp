@@ -13,6 +13,7 @@
 #include "isdb2056_device.hpp"
 #include "isdbt2071_device.hpp"
 #include "torne/experimental_device.hpp"
+#include "pxbcud/device.hpp"
 
 namespace px4 {
 
@@ -58,6 +59,8 @@ DeviceManager::DeviceManager(const px4::DeviceDefinitionSet &device_defs, px4::R
 			type = DeviceType::ISDBT2071;
 		else if (it->first == L"CECHZD1J")
 			type = DeviceType::CECHZD1J;
+		else if (it->first == L"PXBCUD")
+			type = DeviceType::PXBCUD;
 
 		if (type == DeviceType::UNKNOWN)
 			continue;
@@ -137,6 +140,14 @@ void DeviceManager::Add(const std::wstring &path, const std::pair<DeviceType, px
 
 	/* 機種追加時に型と DeviceType の対応をこの場で確認できるよう生成分岐を明示する */
 	switch (def.first) {
+	case px4::DeviceType::PXBCUD:
+	{
+		auto dev = std::make_shared<px4::pxbcud::Device>(path, def.second, ++index_, receiver_manager_);
+		const int ret = dev->Init();
+		if (!ret) devices_.emplace(path, std::move(dev));
+		else msg_err("PX-BCUD: device initialization failed ret=%d\n", ret);
+		break;
+	}
 	case px4::DeviceType::CECHZD1J:
 	{
 		// torneだけの初期化失敗を局所化し、既存機種の到着処理を維持する。
