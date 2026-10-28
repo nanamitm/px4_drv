@@ -43,7 +43,7 @@ private:
 	private:
 		HANDLE stream_quit_event_;
 		void Worker() noexcept override;
-		void StreamWorker(std::shared_ptr<px4::ReceiverBase::StreamBuffer> stream_buf) noexcept;
+		void StreamWorker(std::shared_ptr<px4::ReceiverBase::StreamBuffer> stream_buf, bool framed) noexcept;
 	};
 
 	px4::ServerBase::Connection* CreateConnection(std::unique_ptr<px4::PipeServer> &pipe) override;

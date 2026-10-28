@@ -72,6 +72,7 @@ bool BonDriver::Init()
 
 		if (configs_.Exists(L"BonDriver")) {
 			const px4::Config &bon_config = configs_.Get(L"BonDriver");
+			framed_stream_=px4::util::wtob(bon_config.Get(L"FramedStream",L"false"));
 			const std::wstring &mode = bon_config.Get(L"System", L"ISDB-T");
 			WCHAR path[MAX_PATH];
 
@@ -340,6 +341,13 @@ const BOOL BonDriver::OpenTuner()
 			throw BonDriverError("BonDriver::OpenTuner: control pipe: cannot connect.");
 
 		ctrl_client_.SetPipe(ctrl_pipe);
+		if(framed_stream_){
+			std::uint32_t version=0;
+			if(!ctrl_client_.GetVersion(version) || (version>>16)!=(px4::command::VERSION>>16) || version<0x00040004){
+				msg_err("OpenTuner: FramedStream requires DriverHost command protocol >= 0x00040004; actual=0x%08x\n",version);
+				throw BonDriverError("FramedStream requires an updated DriverHost_PX4.exe (protocol 0x00040004 or later).");
+			}
+		}
 
 		try {
 			for (std::size_t i = 0; ; i++) {
@@ -365,7 +373,7 @@ const BOOL BonDriver::OpenTuner()
 		px4::command::DataCmd data_cmd;
 		std::size_t ret_size;
 
-		data_cmd.cmd = px4::command::DataCmdCode::SET_DATA_ID;
+		data_cmd.cmd = framed_stream_?px4::command::DataCmdCode::SET_DATA_ID_FRAMED:px4::command::DataCmdCode::SET_DATA_ID;
 		data_cmd.data_id = ri_res.data_id;
 
 		if (!data_pipe_->Write(&data_cmd, sizeof(data_cmd), ret_size))
@@ -759,6 +767,7 @@ const DWORD BonDriver::GetCurChannel(void)
 
 bool BonDriver::ReadProvider::Start()
 {
+	frames_=px4::StreamFrameReader{};
 	SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST);
 	return true;
 }
@@ -770,6 +779,11 @@ void BonDriver::ReadProvider::Stop()
 
 bool BonDriver::ReadProvider::Do(void *buf, std::size_t &size)
 {
+	if(parent_.framed_stream_) {
+		try {return frames_.ReadChunk(buf,size,[this](void* target,std::size_t& count){
+			return parent_.data_pipe_->Read(target,count,count,parent_.quit_event_);
+		});}catch(const std::exception& error){msg_err("FramedStream: %s\n",error.what());return false;}
+	}
 	return parent_.data_pipe_->Read(buf, size, size, parent_.quit_event_);
 }
 

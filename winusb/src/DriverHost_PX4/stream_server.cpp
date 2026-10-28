@@ -10,6 +10,7 @@
 
 #include "msg.h"
 #include "command.hpp"
+#include "stream_frame.hpp"
 
 namespace px4 {
 
@@ -61,6 +62,7 @@ void StreamServer::StreamConnection::Worker() noexcept
 
 		switch (cmd->cmd) {
 		case px4::command::DataCmdCode::SET_DATA_ID:
+		case px4::command::DataCmdCode::SET_DATA_ID_FRAMED:
 			if (receiver)
 				break;
 
@@ -72,7 +74,8 @@ void StreamServer::StreamConnection::Worker() noexcept
 
 			receiver->GetStreamBuffer()->PrepareRead();
 			try {
-				stream_th.reset(new std::thread(&px4::StreamServer::StreamConnection::StreamWorker, this, receiver->GetStreamBuffer()));
+				stream_th.reset(new std::thread(&px4::StreamServer::StreamConnection::StreamWorker, this, receiver->GetStreamBuffer(),
+					cmd->cmd==px4::command::DataCmdCode::SET_DATA_ID_FRAMED));
 			} catch (...) {
 				ret = false;
 				break;
@@ -111,14 +114,20 @@ void StreamServer::StreamConnection::Worker() noexcept
 	delete this;
 }
 
-void StreamServer::StreamConnection::StreamWorker(std::shared_ptr<px4::ReceiverBase::StreamBuffer> stream_buf) noexcept
+void StreamServer::StreamConnection::StreamWorker(std::shared_ptr<px4::ReceiverBase::StreamBuffer> stream_buf, bool framed) noexcept
 {
 	msg_dbg("px4::StreamServer::StreamConnection::StreamWorker\n");
 
 	SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_TIME_CRITICAL);
 
-	stream_buf->HandleRead(config_.out_buffer_size / 4,
-		[this](const void *buf, std::size_t size) {
+	stream_buf->HandleReadWithEpoch(config_.out_buffer_size / 4,
+		[this,framed](const void *buf, std::size_t size,std::uint32_t epoch) {
+			if(framed){
+				if(size>px4::StreamFrameMax || size%188)return false;
+				const px4::StreamFrameHeader header{px4::StreamFrameMagic,epoch,static_cast<std::uint32_t>(size)};
+				std::size_t written=0;
+				if(!conn_->Write(&header,sizeof(header),written,stream_quit_event_) || written!=sizeof(header))return false;
+			}
 			return conn_->Write(buf, size, size, stream_quit_event_);
 		}
 	);

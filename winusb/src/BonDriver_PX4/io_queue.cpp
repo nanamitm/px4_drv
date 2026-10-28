@@ -169,6 +169,9 @@ bool IoQueue::Read(void *buf, std::size_t &size, std::size_t &remain_count, bool
 
 	bool ret = false;
 	std::lock_guard<std::mutex> lock(mtx_);
+	if(current_buf_ && current_buf_->epoch!=stream_epoch_.load()) {
+		PushBackFreeBuffer(std::move(current_buf_));current_ofs_=0;
+	}
 	std::uint8_t *p = static_cast<std::uint8_t*>(buf);
 	std::size_t remain = size;
 
@@ -211,7 +214,7 @@ bool IoQueue::ReadBuffer(void **buf, std::size_t &size, std::size_t &remain_coun
 
 	std::lock_guard<std::mutex> lock(mtx_);
 
-	if (current_buf_ && current_buf_->actual_length == current_ofs_) {
+	if (current_buf_ && (current_buf_->actual_length == current_ofs_ || current_buf_->epoch!=stream_epoch_.load())) {
 		PushBackFreeBuffer(std::move(current_buf_));
 		current_ofs_ = 0;
 	}
@@ -371,6 +374,15 @@ void IoQueue::ReadWorker()
 				quit = true;
 				break;
 			}
+			if(!rlen || rlen>buf_size_-rofs){quit=true;break;}
+			const auto epoch=iop_.Epoch();
+			if(epoch!=stream_epoch_.load()) {
+				ChangeEpoch(epoch);
+				// 同じキューバッファーへ新旧世代を連結しない。
+				std::memmove(buf->buf.get(),buf->buf.get()+rofs,rlen);
+				rofs=0;
+			}
+			buf->epoch=epoch;
 
 			rofs += rlen;
 		}
@@ -385,6 +397,19 @@ void IoQueue::ReadWorker()
 	}
 
 	iop_.Stop();
+}
+
+void IoQueue::ChangeEpoch(std::uint32_t epoch)
+{
+	std::unique_lock<std::mutex> free_lock(free_mtx_);
+	std::lock_guard<std::mutex> data_lock(data_mtx_);
+	while(!data_buf_.empty()) {
+		free_buf_.push_back(std::move(data_buf_.front()));data_buf_.pop_front();
+	}
+	// TVTest に返したポインターは次の API 呼び出しまで保持する。現在バッファーの
+	// 解放は Read/ReadBuffer 側で世代を確認してから行うため、受信スレッドから触れない。
+	stream_epoch_.store(epoch);
+	free_lock.unlock();free_cond_.notify_all();
 }
 
 void IoQueue::WriteWorker()

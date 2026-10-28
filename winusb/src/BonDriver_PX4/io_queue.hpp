@@ -3,6 +3,7 @@
 #pragma once
 
 #include <cstddef>
+#include <atomic>
 #include <cstdint>
 #include <memory>
 #include <chrono>
@@ -23,6 +24,7 @@ public:
 	struct IoBuffer final {
 		std::unique_ptr<std::uint8_t[]> buf;
 		std::size_t actual_length;
+		std::uint32_t epoch = 0;
 	};
 
 	class IoProvider {
@@ -33,6 +35,7 @@ public:
 		virtual bool Start() = 0;
 		virtual void Stop() = 0;
 		virtual bool Do(void *buf, std::size_t &size) = 0;
+		virtual std::uint32_t Epoch() const noexcept { return 0; }
 	};
 
 	IoQueue(IoOperation io_op, IoProvider &iop, std::size_t buf_size, std::uintptr_t max = 32, std::uintptr_t min = 2, int data_ignore_count = 1);
@@ -65,6 +68,7 @@ private:
 
 	void ReadWorker();
 	void WriteWorker();
+	void ChangeEpoch(std::uint32_t epoch);
 
 	IoOperation io_op_;
 	IoProvider &iop_;
@@ -80,6 +84,7 @@ private:
 	std::condition_variable data_cond_;
 	std::condition_variable free_cond_;
 	std::unique_ptr<IoBuffer> current_buf_;
+	std::atomic_uint32_t stream_epoch_{0};
 	std::size_t current_ofs_;
 	int data_ignore_count_;
 	int data_ignore_remain_;
