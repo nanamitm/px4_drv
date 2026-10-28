@@ -10,10 +10,13 @@ PLEX 社の [Webサイト](http://plex-net.co.jp) にて配布されている公
 
 ### 変更点 (WinUSB 版)
 
-- Sony torne CECH-ZD1J に対応（WinUSB版のみ）。復調と内蔵カードリーダーの制御を `DriverHost_PX4.exe` に統合。詳細と未確認事項は[統合手順](winusb/docs/cech-zd1j-integration.md)を参照。
+- PLEX PX-BCUD に実験的に対応（Windows WinUSB版のみ、アンテナへの外部給電が必要）。通常配布に専用BonDriverとINFを同梱します。BS/CS受信、チャンネル切り替え、TVTestでのチャンネルスキャン・視聴、USBの抜き差しを確認済み。長時間録画とスリープ復帰後の動作は未確認です。導入方法と検証範囲は[PX-BCUD対応の詳細](docs/px-bcud-winusb.md)を参照。
+- Sony torne CECH-ZD1J に実験的に対応（Windows WinUSB版のみ）。復調と内蔵カードリーダーの制御を `DriverHost_PX4.exe` に統合。現行の統合版と配布設定の組み合わせは実機未検証です。過去の別設定・旧実装での実測結果とは区別し、検証範囲と導入方法は[統合手順](winusb/docs/cech-zd1j-integration.md)を参照。
 - 最新coaxの選局改善、複数台管理、初回ロック待ちと自動復帰の設定は[統合版の保守情報](winusb/docs/torne-integration-notes.md)、DLL・EXEの署名と信頼登録は[アプリケーション署名](winusb/docs/application-signing.md)を参照。
 
 動作確認は Windows 10 / Windows 11 (x64) で行っています。
+
+PX-BCUDの長時間録画・スリープ復帰と、torneの現行統合版で残る実機検証が完了するまで、公開リリースを保留しています。
 
 - エラー発生時の MessageBox を表示しない設定を追加 
   - BonDriver の ini 内の `DisplayErrorMessage` を 1 に設定すると今まで通り MessageBox が表示される
@@ -94,6 +97,11 @@ PLEX 社の [Webサイト](http://plex-net.co.jp) にて配布されている公
 	- PX-MLT8PE
     - PX-M1UR
     - PX-S1UR
+    - PX-BCUD（Windows WinUSB版のみ、実験的。アンテナへの外部給電が必要）
+
+- Sony
+
+    - torne CECH-ZD1J（Windows WinUSB版のみ、実験的。現行の統合版と配布設定の組み合わせは実機未検証）
 
 - e-Better
 
@@ -160,10 +168,11 @@ certutil.exe -addstore TrustedPublisher ".\px4_drv_winusb.cer"
 - PX-M1UR: `BonDriver_PX-M1UR`
 - PX-S1UR: `BonDriver_PX-S1UR`
 - Sony torne CECH-ZD1J: `BonDriver_Torne`
+- PX-BCUD: `BonDriver_PX-BCUD`（アンテナ給電非対応。外部給電と `LNBPower=0` が必要）
 
 お使いの PC に合うビット数のフォルダの中のファイルを**すべて**選択し、TVTest や EDCB などのソフトウェアが指定する BonDriver の配置フォルダにコピーします。  
 BonDriver と同じフォルダに `DriverHost_PX4.exe` と `DriverHost_PX4.ini` があることを確認してください。
-torne 以外の機種では、同梱の `it930x-firmware.bin` も必要です。torne はホスト内に制御処理を組み込んでいるため、別途 `TorneFrontend.exe` を配置する必要はありません。
+IT930xを使用する機種では、同梱の `it930x-firmware.bin` も必要です。torneとPX-BCUDでは、このファームウェアは不要です。torne はホスト内に制御処理を組み込んでいるため、別途 `TorneFrontend.exe` を配置する必要はありません。
 
 ビット数は TVTest や EDCB など、利用するアプリケーションのビット数に合わせてください。
 ビルドした `dist` 全体を配布する場合は、共通のライセンス文書がある `licenses` フォルダも含めてください。
