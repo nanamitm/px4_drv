@@ -81,6 +81,14 @@ DLL・DriverHost・helper・ランタイム・設定・ドライバー導入フ�
 `DriverHost_PX4.ini` の `DeviceDefinition17.Config` にある `GainTenthsDb` は0.1 dB単位。
 実機の対応値のうち要求値に最も近い値を使用する。既定297は検証機の29.7 dB。
 `TuneTimeout=20000` は同期・初期復号を待つための専用設定で、通常のハードウェア復調機より長い。
+TVTest 側の BonDriver 要求タイムアウトもこれより長くする必要がある。
+要求タイムアウトを指定できる TVTest では、チューナー設定で `BonDriver_RTLSDR.dll` の
+要求タイムアウトを30000 msに設定する。既定の10000 msでは、実測11〜14秒の初期復調中に
+「タイムアウトのためチャンネル変更ができません」となる。
+`TVTest.ini` を直接編集する場合は TVTest を終了し、`[DriverSettings]` の
+`DriverN_FileName=BonDriver_RTLSDR.dll` に対応する `DriverN_RequestTimeout=30000` を指定する。
+未登録の場合は末尾に追加し、`DriverCount` も増やす。他の BonDriver の待機時間は変更しない。
+スキャンの待機時間 (`ChannelScanWait`) とは別の設定である。
 helper ログは DriverHost と同じフォルダーの `rtlsdr_frontend-<serial>.log` に残る。
 
 ## ソースと実機試験の再現
