@@ -52,6 +52,8 @@ Smart App Control や組織のアプリ制御ポリシーでは別の許可条�
 ソースのコミット後、Windows PowerShell 5.1 で `tools/package-winusb.ps1 -Version <識別名>` を実行すると、
 `build/release/<識別名>` へ署名済みバイナリ ZIP、対応ソース ZIP、SHA256SUMS.txt が生成されます。
 ZIP 展開後にもアプリ署名と全 INF/CAT を検証します。
+Git のアーカイブではチェックアウト時の改行変換が行われないため、ソース ZIP の INF も
+署名時の CRLF へ正規化し、展開後のソースに含まれる全 INF/CAT を再検証します。
 ソース ZIP は既存の開発用 PFX を含む署名キーを除外しており、カタログの再署名には外部の署名キーが必要です。
 
 `release_winusb.yml` は `v*` タグと手動実行に対応し、次の Actions Secrets を必要とします。

@@ -27,12 +27,32 @@ try {
     # 既存 PX4 開発用キーも含め、再配布用ソース ZIP には署名キーを含めない。
     foreach($entry in @($archive.Entries)){
         if($entry.Name -match '(?i)\.(pfx|pvk|key)$' -or $entry.Name -eq 'password.dpapi'){$entry.Delete()}
+        elseif($entry.FullName -match '^winusb/pkg/inf/[^/]+\.inf$'){
+            # git archive は .gitattributes のチェックアウト時 CRLF 変換を行わない。
+            # INF だけを署名時と同じバイト列へ戻し、ZIP 展開からのビルドでも CAT を検証可能にする。
+            $name=$entry.FullName;$input=$entry.Open();$buffer=New-Object IO.MemoryStream
+            try {$input.CopyTo($buffer);$bytes=$buffer.ToArray()}finally{$input.Dispose();$buffer.Dispose()}
+            $normalized=New-Object IO.MemoryStream
+            try {
+                for($i=0;$i -lt $bytes.Length;$i++){
+                    if($bytes[$i] -eq 13){$normalized.WriteByte(13);$normalized.WriteByte(10);if($i+1 -lt $bytes.Length -and $bytes[$i+1] -eq 10){$i++}}
+                    elseif($bytes[$i] -eq 10){$normalized.WriteByte(13);$normalized.WriteByte(10)}
+                    else{$normalized.WriteByte($bytes[$i])}
+                }
+                $content=$normalized.ToArray()
+            }finally{$normalized.Dispose()}
+            $entry.Delete();$replacement=$archive.CreateEntry($name);$output=$replacement.Open()
+            try{$output.Write($content,0,$content.Length)}finally{$output.Dispose()}
+        }
     }
 }finally{$archive.Dispose()}
 $verify=Join-Path $release ('verify-'+[guid]::NewGuid().ToString('N'))
 Expand-Archive -LiteralPath $binaryZip -DestinationPath $verify
 & (Join-Path $PSScriptRoot 'verify-applications.ps1') -DistributionPath $verify
 & (Join-Path $winusb 'pkg\signing-tools\verify.ps1') -DriverPath (Join-Path $verify 'Driver')
+$sourceVerify=Join-Path $release ('verify-source-'+[guid]::NewGuid().ToString('N'))
+Expand-Archive -LiteralPath $sourceZip -DestinationPath $sourceVerify
+& (Join-Path $winusb 'pkg\signing-tools\verify.ps1') -DriverPath (Join-Path $sourceVerify 'winusb\pkg\inf')
 Get-FileHash -LiteralPath $binaryZip,$sourceZip -Algorithm SHA256 |
     ForEach-Object {'{0}  {1}' -f $_.Hash.ToLowerInvariant(),(Split-Path $_.Path -Leaf)} |
     Set-Content -LiteralPath (Join-Path $release 'SHA256SUMS.txt') -Encoding ascii

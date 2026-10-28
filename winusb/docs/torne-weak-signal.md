@@ -1,5 +1,9 @@
 # torneのログと低ビットレート受信
 
+> n0atl 版 `a360802` から引き継いだ設計・実機測定の資料です。
+> 本統合版の追加設定と確認範囲は [統合版の保守情報](torne-integration-notes.md) を参照してください。
+
+
 対象はWindows WinUSB版のCECH-ZD1J。BonDriverの配布名は`BonDriver_Torne.dll`と
 `BonDriver_Torne.ini`、ホストは`DriverHost_PX4.exe`と`DriverHost_PX4.ini`。
 以前の`BonDriver_CECH-ZD1J.dll`を使う設定から切り替える場合、TVTest/EDCB側でもDLLを選び直す。

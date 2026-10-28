@@ -1,5 +1,9 @@
 # CECH-ZD1Jの共通WinUSBパッケージ
 
+> n0atl 版 `a360802` から引き継いだ設計・実機測定の資料です。
+> 本統合版の追加設定と確認範囲は [統合版の保守情報](torne-integration-notes.md) を参照してください。
+
+
 `pkg/inf/CECH-ZD1J.inf`を既存の`px4_drv_winusb.cat`へ追加しています。
 クラスはPLEX用INFと同じMEDIA、表示名は
 `Sony torne CECH-ZD1J ISDB-T Receiver Device (WinUSB)`です。

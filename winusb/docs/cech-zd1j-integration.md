@@ -1,5 +1,9 @@
 # CECH-ZD1Jの通常DriverHost統合
 
+> n0atl 版 `a360802` から引き継いだ設計・実機測定の資料です。
+> 本統合版の追加設定と確認範囲は [統合版の保守情報](torne-integration-notes.md) を参照してください。
+
+
 ## 配布構成
 
 通常の`build.ps1`でx86/x64のDriverHost_PX4、BonDriver_PX4、WinSCardをビルドします。

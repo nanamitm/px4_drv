@@ -1,6 +1,6 @@
 # MB86H47 FR30 プログラム生成
 
-このディレクトリーはcoaxコミット `2d9f2c263a3b080ecef3a8ede1eb86c6afa48405`
+このディレクトリーはcoaxコミット `471328e03942219544e78004e961d8f69d27f46f`
 のFR30生成器とその試験を保持する。通常のVisual Studioビルドは生成済み
 `winusb/src/DriverHost_PX4/torne/mb86h47_programs.hpp` を使うため、Goの導入は不要。
 再生成にはPython 3.10以降とGo 1.26以降が必要となる。
@@ -27,6 +27,7 @@ python compare_upstream.py --go <go.exeのパス> --coax <固定コミットのc
   元ファイル全体は `reference/addressing.go.txt` に保存。
 - `constants.go`: `reference/` 内の元runtimeファイルからconst宣言と`core0Ring`型を抽出。
   I2C status/control/dataのアドレスは元 `regs/usb.go` の配置を数値化。
+- `job_constants.go`: `reference/job.go.txt` からジョブと RAM キャッシュの定数を抽出。
 - `export_test.go`: C++配列を出力する追加のビルド用試験。
 - `go.mod`: CLI用の未使用依存を除き、標準ライブラリーだけのモジュールに限定。
 

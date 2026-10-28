@@ -1,5 +1,9 @@
 # CECH-ZD1J復調器のホスト内統合
 
+> n0atl 版 `a360802` から引き継いだ設計・実機測定の資料です。
+> 本統合版の追加設定と確認範囲は [統合版の保守情報](torne-integration-notes.md) を参照してください。
+
+
 対象はWinUSB版のSony torne CECH-ZD1J。比較元は`tools/torne_frontend/upstream.json`で固定した
 coaxのDiB8000/DiB0090実装と、ローカルの探索終了通知追加分。
 後続のログ・バッファ設定と、任意の未訂正TS出力については

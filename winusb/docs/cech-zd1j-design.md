@@ -1,5 +1,9 @@
 # Sony torne CECH-ZD1J 対応設計
 
+> n0atl 版 `a360802` から引き継いだ設計・実機測定の資料です。
+> 本統合版の追加設定と確認範囲は [統合版の保守情報](torne-integration-notes.md) を参照してください。
+
+
 ## 対象と確認範囲
 
 対象は Windows amd64 の WinUSB 版、地上 ISDB-T 13セグメント・6 MHz。

@@ -18,6 +18,8 @@ BonDriver の診断には既存の `DebugLog` / `DebugLogPath` を利用でき�
 
 ## 検証範囲
 
+実行済みの自動試験と実機で残る確認は [統合版の自動検証](torne-integration-validation.md) を参照してください。
+
 ### 初回ロック待ちと受信の自動復帰
 
 `[DeviceDefinition15.Config]` の設定は次のとおりです。

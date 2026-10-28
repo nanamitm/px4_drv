@@ -36,12 +36,12 @@ jobs:
             if(-not $env:PX4_APPLICATION_SIGNING_PFX_BASE64 -or -not $env:PX4_APPLICATION_SIGNING_PASSWORD){throw 'Configure PX4 application signing Secrets in this repository before creating signed releases.'}
             [IO.File]::WriteAllBytes($pfx,[Convert]::FromBase64String($env:PX4_APPLICATION_SIGNING_PFX_BASE64))
             ./tools/sign-applications.ps1 -PfxPath $pfx -PasswordEnvironment PX4_APPLICATION_SIGNING_PASSWORD
-            ./tests/application_signature_test.ps1
           } finally {
             if(Test-Path -LiteralPath $pfx){Remove-Item -LiteralPath $pfx -Force}
             $env:PX4_APPLICATION_SIGNING_PFX_BASE64=$null
             $env:PX4_APPLICATION_SIGNING_PASSWORD=$null
           }
+          ./tests/application_signature_test.ps1
       - name: Package matching committed source and verify extracted ZIP
         env:
           REF_TYPE: ${{ github.ref_type }}
