@@ -301,54 +301,72 @@ private:
         std::uint64_t iso_errors=0, empty_packets=0;
         std::vector<std::uint8_t> output;
         bool first=true;
+        const auto started=Clock::now();
+        std::uint64_t submitted=0, completed=0;
+        // 同じ Win32 エラーでも投入失敗と完了失敗では原因が異なるため、
+        // エラー取得直後に処理段階とキューの状態を保存して記録する。
+        auto fail=[&](const char *stage, std::size_t index, DWORD error) {
+            worker_error_=error;
+            unsigned pending=0;
+            for (const auto &read:reads) if (read.pending) ++pending;
+            msg_err("PX-BCUD: USB stream failure stage=%s read=%u win32=%lu elapsed_ms=%llu submitted=%llu completed=%llu pending=%u continue_stream=%u\n",
+                stage,static_cast<unsigned>(index),error,
+                static_cast<unsigned long long>(std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now()-started).count()),
+                static_cast<unsigned long long>(submitted),static_cast<unsigned long long>(completed),pending,first?0u:1u);
+        };
         auto submit=[&](Read &r) {
             ResetEvent(r.operation.hEvent);
             r.packets={};
             BOOL ok=WinUsb_ReadIsochPipeAsap(r.buffer,0,static_cast<ULONG>(r.data.size()),
                 first?FALSE:TRUE,static_cast<ULONG>(r.packets.size()),r.packets.data(),&r.operation);
-            if (!ok && GetLastError()!=ERROR_IO_PENDING) {worker_error_=GetLastError();return false;}
+            const DWORD error=ok?ERROR_SUCCESS:GetLastError();
+            if (!ok && error!=ERROR_IO_PENDING) {fail("submit",&r-reads.data(),error);return false;}
+            ++submitted;
             first=false;r.pending=true; return true;
         };
         for (auto &r:reads) {
             r.file=file_; r.usb=usb_;
             r.operation.hEvent=CreateEventW(nullptr,TRUE,FALSE,nullptr);
-            if (!r.operation.hEvent) {worker_error_=GetLastError();break;}
+            if (!r.operation.hEvent) {fail("create_event",&r-reads.data(),GetLastError());break;}
             if (!WinUsb_RegisterIsochBuffer(usb_,0x84,r.data.data(),static_cast<ULONG>(r.data.size()),&r.buffer)) {
-                worker_error_=GetLastError();break;
+                fail("register_buffer",&r-reads.data(),GetLastError());break;
             }
             if (stop_ || !submit(r)) break;
         }
         std::size_t next=0;
         auto last_data=Clock::now();
-        const auto started=last_data;
         while (!stop_ && !worker_error_) {
-            if (Clock::now()-last_data>std::chrono::seconds(5)) {worker_error_=ERROR_TIMEOUT;break;}
+            if (Clock::now()-last_data>std::chrono::seconds(5)) {fail("no_data",next,ERROR_TIMEOUT);break;}
             if (!gate.Ready() && Clock::now()-started>std::chrono::seconds(5)) {
-                worker_error_=ERROR_INVALID_DATA;
+                fail("pat_timeout",next,ERROR_INVALID_DATA);
                 msg_err("PX-BCUD: selected TSID PAT was not received tsid=0x%04x\n",frontend_.SelectedStream());
                 break;
             }
             Read &r=reads[next];
             HANDLE events[]={removed_,r.operation.hEvent};
             const DWORD wait=WaitForMultipleObjects(2,events,FALSE,50);
-            if (wait==WAIT_OBJECT_0) {worker_error_=ERROR_DEVICE_NOT_CONNECTED;break;}
+            if (wait==WAIT_OBJECT_0) {fail("device_removed",next,ERROR_DEVICE_NOT_CONNECTED);break;}
             if (wait==WAIT_TIMEOUT) {
-                if (Clock::now()-last_data>std::chrono::seconds(5)) worker_error_=ERROR_TIMEOUT;
+                if (Clock::now()-last_data>std::chrono::seconds(5)) fail("no_data",next,ERROR_TIMEOUT);
                 continue;
             }
-            if (wait!=WAIT_OBJECT_0+1) {worker_error_=GetLastError();break;}
+            if (wait!=WAIT_OBJECT_0+1) {fail("wait",next,GetLastError());break;}
             ULONG size=0;
             if (!WinUsb_GetOverlappedResult(usb_,&r.operation,&size,FALSE)) {
-                if (!stop_) worker_error_=GetLastError();
+                const DWORD error=GetLastError();
+                if (!stop_) fail("complete",next,error);
                 break;
             }
             r.pending=false;
+            ++completed;
             output.clear();
             for (const auto &packet:r.packets) {
                 if (packet.Status) {++iso_errors;framer.Gap();continue;}
                 if (!packet.Length) {++empty_packets;continue;}
                 if (packet.Offset>r.data.size() || packet.Length>r.data.size()-packet.Offset || packet.Length>940) {
-                    worker_error_=ERROR_INVALID_DATA;break;
+                    msg_err("PX-BCUD: invalid isoch descriptor packet=%u status=0x%08lx offset=%lu length=%lu buffer_bytes=%u\n",
+                        static_cast<unsigned>(&packet-r.packets.data()),packet.Status,packet.Offset,packet.Length,static_cast<unsigned>(r.data.size()));
+                    fail("packet_descriptor",next,ERROR_INVALID_DATA);break;
                 }
                 last_data=Clock::now();
                 framer.Feed(r.data.data()+packet.Offset,packet.Length,output);
@@ -359,7 +377,7 @@ private:
                     if(!gate.Accept(output.data()+offset)){++startup_discarded;continue;}
                     std::size_t written=188;
                     if (!stream_buf_->Write(output.data()+offset,written) || written!=188) {
-                        worker_error_=ERROR_BUFFER_OVERFLOW;break;
+                        fail("stream_buffer_write",next,ERROR_BUFFER_OVERFLOW);break;
                     }
                 }
                 stream_buf_->NotifyWrite();
