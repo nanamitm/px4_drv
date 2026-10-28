@@ -1,0 +1,17 @@
+[package]
+name = "rtlsdr_frontend"
+version = "0.6.1"
+edition = "2021"
+license = "GPL-3.0-or-later"
+build = "build.rs"
+
+[dependencies]
+isdbt-dsp = { path = "vendor/isdbt-dsp" }
+
+[package.metadata.upstream]
+repository = "https://github.com/Ryujiyasu/1seg"
+revision = "5d09660def8eb45a2d603a2eaa22973ec29cb8c3"
+
+[profile.release]
+lto = true
+codegen-units = 1
