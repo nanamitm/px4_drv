@@ -43,6 +43,13 @@ if ((Get-Command msbuild -ErrorAction SilentlyContinue) -eq $null) {
 # MSBuild を使用してソリューションをビルド
 $build_platforms = @('x86', 'x64')
 foreach ($build_platform in $build_platforms) {
+    # PX-BCUD の USB 分割境界・I2C 故障注入は実機接続なしで検証する。
+    foreach ($bcud_test in @('pxbcud_frontend_test', 'pxbcud_usb_probe', 'pxbcud_live_test', 'channel_switch_stress')) {
+        msbuild "tests/$bcud_test.vcxproj" /p:"Configuration=Release-static;Platform=$build_platform;PlatformToolset=v143"
+        if ($LASTEXITCODE -ne 0) { throw "PX-BCUD test build failed: $bcud_test ($build_platform)" }
+    }
+    & "build/$build_platform/Release-static/pxbcud_frontend_test.exe"
+    if ($LASTEXITCODE -ne 0) { throw "PX-BCUD frontend test failed ($build_platform)" }
     msbuild px4_winusb.sln /t:"Rebuild" /p:"Configuration=Release-static;Platform=$build_platform;PlatformToolset=v143"
 
     if ($LASTEXITCODE -ne 0) {
@@ -263,6 +270,20 @@ Copy-Item build/x64/Release-static/DriverHost_PX4.exe dist/BonDriver_PX-S1UR_64b
 Copy-Item pkg/DriverHost_PX4/DriverHost_PX4.ini dist/BonDriver_PX-S1UR_64bit/DriverHost_PX4.ini
 Copy-Item pkg/DriverHost_PX4/it930x-firmware.bin dist/BonDriver_PX-S1UR_64bit/it930x-firmware.bin
 
+# PX-BCUD も通常配布へ含める。給電非対応と世代付き TS 配信の設定を同梱する。
+foreach ($bcud_arch in @(@('x86', '32bit'), @('x64', '64bit'))) {
+    $bcud_platform = $bcud_arch[0]
+    $bcud_folder = "dist/BonDriver_PX-BCUD_$($bcud_arch[1])"
+    New-Item -ItemType Directory -Path $bcud_folder | Out-Null
+    Copy-Item "build/$bcud_platform/Release-static/BonDriver_PX4.dll" "$bcud_folder/BonDriver_PX-BCUD.dll"
+    Copy-Item "build/$bcud_platform/Release-static/DriverHost_PX4.exe" $bcud_folder
+    Copy-Item 'pkg/BonDriver_PX4/BonDriver_PX-BCUD.ini' $bcud_folder
+    Copy-Item 'pkg/BonDriver_PX4/BonDriver_PX4-S.ChSet.txt' $bcud_folder
+    Copy-Item 'pkg/DriverHost_PX4/DriverHost_PX4.ini' $bcud_folder
+    Copy-Item '../docs/px-bcud-winusb.md' "$bcud_folder/README.md"
+    Copy-Item '../LICENSE' $bcud_folder
+}
+
 # 各 BonDriver と同じビット数の WinSCard.dll を配置
 # WinUSB 版の全対応機種で内蔵カードリーダーを利用できる
 Get-ChildItem dist/ -Directory -Filter 'BonDriver_*' | ForEach-Object {
@@ -281,6 +302,11 @@ Copy-Item -Recurse pkg/inf/ dist/Driver
 
 # コピー後の最終配布物も再度検査
 & 'pkg/signing-tools/verify.ps1' -DriverPath 'dist/Driver'
+
+python tools/check_pxbcud_package.py
+if ($LASTEXITCODE -ne 0) { throw 'PX-BCUD package check failed.' }
+python tests/pxbcud_package_test.py
+if ($LASTEXITCODE -ne 0) { throw 'PX-BCUD package validation regression failed.' }
 
 # アプリ署名は CAT と別の公開証明書へ固定する。通常の開発ビルドは従来どおり
 # 署名キー不要とし、配布用途では検証に成功した成果物だけを渡す。

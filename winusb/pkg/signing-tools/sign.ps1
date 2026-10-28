@@ -1,8 +1,10 @@
 ﻿# ドライバ自己署名用スクリプト
 
+param([string] $DriverPath = '')
+
 # スクリプトのディレクトリを取得
 $ScriptDir = $PSScriptRoot
-$InfPath = Join-Path -Path $ScriptDir -ChildPath "..\inf"
+$InfPath = if ($DriverPath) { (Resolve-Path -LiteralPath $DriverPath).Path } else { Join-Path -Path $ScriptDir -ChildPath "..\inf" }
 
 # カタログファイルは INF の改行を含むバイト列へ署名するため、作成方法や Git の設定にかかわらず CRLF・BOM なしへ揃える
 Get-ChildItem -LiteralPath $InfPath -Filter '*.inf' -File | ForEach-Object {
@@ -37,7 +39,8 @@ Get-ChildItem -LiteralPath $InfPath -Filter '*.inf' -File | ForEach-Object {
         $normalized_stream.Dispose()
     }
 
-    if (-not [System.Linq.Enumerable]::SequenceEqual[byte]($source_bytes, $normalized_bytes)) {
+    # 明示的なジェネリックメソッド構文がない PowerShell 7.1 でもバイト列を比較する。
+    if ([Convert]::ToBase64String($source_bytes) -ne [Convert]::ToBase64String($normalized_bytes)) {
         [System.IO.File]::WriteAllBytes($_.FullName, $normalized_bytes)
         Write-Host "Driver INF line endings normalized: $($_.Name)"
     }

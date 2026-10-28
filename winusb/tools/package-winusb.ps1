@@ -12,6 +12,8 @@ $changes=@(& git -C $root status --porcelain --untracked-files=normal)
 if($LASTEXITCODE -ne 0 -or $changes.Count){throw 'Commit source changes before packaging matching source.'}
 & (Join-Path $PSScriptRoot 'verify-applications.ps1') -DistributionPath $dist
 & (Join-Path $winusb 'pkg\signing-tools\verify.ps1') -DriverPath (Join-Path $dist 'Driver')
+& python (Join-Path $PSScriptRoot 'check_pxbcud_package.py') --dist $dist
+if($LASTEXITCODE -ne 0){throw 'PX-BCUD package check failed.'}
 $release=Join-Path $winusb "build\release\$Version"
 New-Item -ItemType Directory -Path $release -Force | Out-Null
 [ordered]@{Version=$Version;SourceRevision=$revision;ApplicationPublisherSHA256='5B6288396CA6D34EFFE2B1DBFDA3B6EA8B861E08FBFDD7F83356AA1EC594A1EE'} |
@@ -50,6 +52,8 @@ $verify=Join-Path $release ('verify-'+[guid]::NewGuid().ToString('N'))
 Expand-Archive -LiteralPath $binaryZip -DestinationPath $verify
 & (Join-Path $PSScriptRoot 'verify-applications.ps1') -DistributionPath $verify
 & (Join-Path $winusb 'pkg\signing-tools\verify.ps1') -DriverPath (Join-Path $verify 'Driver')
+& python (Join-Path $PSScriptRoot 'check_pxbcud_package.py') --dist $verify
+if($LASTEXITCODE -ne 0){throw 'Extracted PX-BCUD package check failed.'}
 $sourceVerify=Join-Path $release ('verify-source-'+[guid]::NewGuid().ToString('N'))
 Expand-Archive -LiteralPath $sourceZip -DestinationPath $sourceVerify
 & (Join-Path $winusb 'pkg\signing-tools\verify.ps1') -DriverPath (Join-Path $sourceVerify 'winusb\pkg\inf')
