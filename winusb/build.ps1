@@ -1,4 +1,6 @@
-﻿
+﻿param([string]$SigningPfxPath='', [string]$SigningPasswordEnvironment='', [string]$SigningPasswordFile='', [switch]$RequireSignedApplications)
+
+
 # カレントディレクトリに移動
 if ($MyInvocation.MyCommand.Path -ne $null) {
     $CurrentPath = (Split-Path $MyInvocation.MyCommand.Path -Parent)
@@ -279,6 +281,20 @@ Copy-Item -Recurse pkg/inf/ dist/Driver
 
 # コピー後の最終配布物も再度検査
 & 'pkg/signing-tools/verify.ps1' -DriverPath 'dist/Driver'
+
+# アプリ署名は CAT と別の公開証明書へ固定する。通常の開発ビルドは従来どおり
+# 署名キー不要とし、配布用途では検証に成功した成果物だけを渡す。
+if ($SigningPfxPath) {
+    $sign_arguments = @('-NoProfile','-ExecutionPolicy','Bypass','-File',(Join-Path $PSScriptRoot 'tools/sign-applications.ps1'),'-PfxPath',$SigningPfxPath)
+    if ($SigningPasswordEnvironment) { $sign_arguments += @('-PasswordEnvironment',$SigningPasswordEnvironment) }
+    if ($SigningPasswordFile) { $sign_arguments += @('-PasswordFile',$SigningPasswordFile) }
+    & powershell.exe @sign_arguments
+    if ($LASTEXITCODE -ne 0) { throw 'Application signing failed.' }
+}
+if ($RequireSignedApplications -or $SigningPfxPath) {
+    & powershell.exe -NoProfile -ExecutionPolicy Bypass -File tools/verify-applications.ps1
+    if ($LASTEXITCODE -ne 0) { throw 'Application signature verification failed.' }
+}
 
 Write-Host '    '
 Write-Host '    '

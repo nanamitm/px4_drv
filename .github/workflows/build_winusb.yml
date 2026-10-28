@@ -257,5 +257,5 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v7
         with:
-          name: px4_drv_winusb
+          name: px4_drv_winusb_unsigned
           path: winusb/dist/

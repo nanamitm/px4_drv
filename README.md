@@ -11,6 +11,7 @@ PLEX 社の [Webサイト](http://plex-net.co.jp) にて配布されている公
 ### 変更点 (WinUSB 版)
 
 - Sony torne CECH-ZD1J に対応（WinUSB版のみ）。復調と内蔵カードリーダーの制御を `DriverHost_PX4.exe` に統合。詳細と未確認事項は[統合手順](winusb/docs/cech-zd1j-integration.md)を参照。
+- 最新coaxの選局改善、複数台管理、初回ロック待ちと自動復帰の設定は[統合版の保守情報](winusb/docs/torne-integration-notes.md)、DLL・EXEの署名と信頼登録は[アプリケーション署名](winusb/docs/application-signing.md)を参照。
 
 動作確認は Windows 10 / Windows 11 (x64) で行っています。
 

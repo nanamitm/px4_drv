@@ -1,0 +1,75 @@
+name: Build signed WinUSB release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-2022
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: powershell
+        working-directory: winusb
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: microsoft/setup-msbuild@v3
+      - name: Build both architectures and run offline tests
+        shell: pwsh
+        run: ./build.ps1
+      - name: Sign application binaries and reject modified distributions
+        env:
+          PX4_APPLICATION_SIGNING_PFX_BASE64: ${{ secrets.PX4_APPLICATION_SIGNING_PFX_BASE64 }}
+          PX4_APPLICATION_SIGNING_PASSWORD: ${{ secrets.PX4_APPLICATION_SIGNING_PASSWORD }}
+        run: |
+          $ErrorActionPreference='Stop'
+          $pfx=Join-Path $env:RUNNER_TEMP 'px4-application-signing.pfx'
+          try {
+            if(-not $env:PX4_APPLICATION_SIGNING_PFX_BASE64 -or -not $env:PX4_APPLICATION_SIGNING_PASSWORD){throw 'Configure PX4 application signing Secrets in this repository before creating signed releases.'}
+            [IO.File]::WriteAllBytes($pfx,[Convert]::FromBase64String($env:PX4_APPLICATION_SIGNING_PFX_BASE64))
+            ./tools/sign-applications.ps1 -PfxPath $pfx -PasswordEnvironment PX4_APPLICATION_SIGNING_PASSWORD
+            ./tests/application_signature_test.ps1
+          } finally {
+            if(Test-Path -LiteralPath $pfx){Remove-Item -LiteralPath $pfx -Force}
+            $env:PX4_APPLICATION_SIGNING_PFX_BASE64=$null
+            $env:PX4_APPLICATION_SIGNING_PASSWORD=$null
+          }
+      - name: Package matching committed source and verify extracted ZIP
+        env:
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          if($env:REF_TYPE -eq 'tag'){./tools/package-winusb.ps1 -Version $env:REF_NAME}
+          else{./tools/package-winusb.ps1}
+      - uses: actions/upload-artifact@v7
+        with:
+          name: px4_drv_winusb_signed
+          path: |
+            winusb/build/release/**/*.zip
+            winusb/build/release/**/SHA256SUMS.txt
+          if-no-files-found: error
+          compression-level: 0
+  publish:
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v7
+        with:
+          name: px4_drv_winusb_signed
+          path: release
+      - uses: softprops/action-gh-release@v3
+        with:
+          files: |
+            release/**/*.zip
+            release/**/SHA256SUMS.txt

@@ -20,6 +20,7 @@ for bits,expected in ((32,0x14c),(64,0x8664)):
     ini=(folder/('BonDriver_Torne'+'.ini')).read_text(encoding='utf-8-sig')
     if 'Experimental' in ini or 'DriverHost_PX4.exe' not in ini: raise SystemExit('Wrong host configuration')
     if 'ChSetPath="BonDriver_PX4-T.ChSet.txt"' not in ini:raise SystemExit('Wrong channel table configuration')
+    if 'FramedStream=true' not in ini:raise SystemExit('Stream epoch protocol is disabled')
     host=(folder/'DriverHost_PX4.exe').read_bytes()
     for encoding in ('ascii','utf-16-le'):
         if 'TorneFrontend.exe'.encode(encoding) in host:raise SystemExit('Host still references the external frontend helper')
