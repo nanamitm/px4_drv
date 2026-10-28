@@ -57,6 +57,8 @@ Git のアーカイブではチェックアウト時の改行変換が行われ�
 ソース ZIP は既存の開発用 PFX を含む署名キーを除外しており、カタログの再署名には外部の署名キーが必要です。
 
 `release_winusb.yml` は `v*` タグと手動実行に対応し、次の Actions Secrets を必要とします。
+統合用の `feature/torne-native-integration` ブランチへの push でも同じ署名試験が起動し、
+タグ以外の実行では GitHub Release の公開を伴わず、検証済み ZIP が Actions artifact に保存されます。
 
 - `PX4_APPLICATION_SIGNING_PFX_BASE64`: 固定した公開証明書に対応する PFX の Base64
 - `PX4_APPLICATION_SIGNING_PASSWORD`: PFX パスワード
