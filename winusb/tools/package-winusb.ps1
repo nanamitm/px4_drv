@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: GPL-2.0-only
+﻿# SPDX-License-Identifier: GPL-2.0-only
 # Windows PowerShell 5.1. Package already-built, signed distributions and source.
 param([string]$Version='')
 $ErrorActionPreference='Stop'
@@ -30,8 +30,8 @@ try {
         elseif($entry.FullName -match '^winusb/pkg/inf/[^/]+\.inf$'){
             # git archive は .gitattributes のチェックアウト時 CRLF 変換を行わない。
             # INF だけを署名時と同じバイト列へ戻し、ZIP 展開からのビルドでも CAT を検証可能にする。
-            $name=$entry.FullName;$input=$entry.Open();$buffer=New-Object IO.MemoryStream
-            try {$input.CopyTo($buffer);$bytes=$buffer.ToArray()}finally{$input.Dispose();$buffer.Dispose()}
+            $name=$entry.FullName;$sourceStream=$entry.Open();$buffer=New-Object IO.MemoryStream
+            try {$sourceStream.CopyTo($buffer);$bytes=$buffer.ToArray()}finally{$sourceStream.Dispose();$buffer.Dispose()}
             $normalized=New-Object IO.MemoryStream
             try {
                 for($i=0;$i -lt $bytes.Length;$i++){
@@ -41,8 +41,8 @@ try {
                 }
                 $content=$normalized.ToArray()
             }finally{$normalized.Dispose()}
-            $entry.Delete();$replacement=$archive.CreateEntry($name);$output=$replacement.Open()
-            try{$output.Write($content,0,$content.Length)}finally{$output.Dispose()}
+            $entry.Delete();$replacement=$archive.CreateEntry($name);$targetStream=$replacement.Open()
+            try{$targetStream.Write($content,0,$content.Length)}finally{$targetStream.Dispose()}
         }
     }
 }finally{$archive.Dispose()}

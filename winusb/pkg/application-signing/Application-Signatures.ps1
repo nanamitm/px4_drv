@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: GPL-2.0-only
+﻿# SPDX-License-Identifier: GPL-2.0-only
 # Windows PowerShell 5.1. Cryptographic verification without changing trust stores.
 # Adapted from BonDriver_CECHZD1J 52dd600; signature integrity is independent of
 # certificate-store trust. The publisher is separate from the existing PX4 CAT CA.
