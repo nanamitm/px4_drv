@@ -53,8 +53,26 @@ fn track_symbol(buf: &[Complex32], cur: usize, lk: &mut Locked) -> usize {
     cur
 }
 
+// 逆拡散系列は64ブロック周期で全候補に共通。候補ごとの再生成を避ける。
+fn dispersion_masks() -> Vec<[u8; TSP]> {
+    let mut prbs = EnergyPrbs::with_init(PRBS_INIT);
+    (0..RESET_PERIOD).map(|_| {
+        let mut mask = [0u8; TSP];
+        for byte in &mut mask[1..] { *byte = prbs.clock(8) as u8; }
+        prbs.clock(8);
+        mask
+    }).collect()
+}
+
+fn dispersion_index(block: usize, reset_off: usize) -> usize {
+    // 最初のresetより前も、従来どおり初期状態から系列を進める。
+    if block < reset_off { block } else { (block-reset_off) % RESET_PERIOD }
+}
+
 /// 初期バッファをバッチ処理して整列パラメータを確定。
 fn lock_params(specs: &[Vec<Complex32>], phase0: usize) -> Option<(usize, usize, usize)> {
+    let profile = std::env::var_os("RTLSDR_PROFILE").is_some();
+    let started = std::time::Instant::now();
     let pilots = SegmentPilots::center_1seg();
     let mut tdi = TimeDeinterleaver::new(4);
     let mut bdi = BitDeinterleaverQpsk::new();
@@ -79,10 +97,14 @@ fn lock_params(specs: &[Vec<Complex32>], phase0: usize) -> Option<(usize, usize,
         }
     }
     let restored = depuncture(&coded, &PUNCTURE_2_3);
+    let prepared = started.elapsed();
     let bits = Viterbi::new().decode(&restored[..restored.len() & !1]);
     let bytes = pack_bits_msb(&bits, 0);
+    let decoded = started.elapsed();
     let checker = rs::Checker::new();
+    let masks = dispersion_masks();
     let mut best = (0.0f32, 0usize, 0usize, 0usize);
+    let mut candidates = Vec::new();
     // 初期同期が窓末尾を選ぶと、warmup 後の Viterbi 出力が空になる。
     // この窓は未ロックとして次の入力を待ち、bytes[c..] の範囲外参照を防ぐ。
     for c in 0..BI_I.min(bytes.len()) {
@@ -99,33 +121,66 @@ fn lock_params(specs: &[Vec<Complex32>], phase0: usize) -> Option<(usize, usize,
         if sc < 0.9 {
             continue;
         }
-        let blocks: Vec<&[u8]> = (0..)
+        let blocks: Vec<[u8; TSP]> = (0..)
             .map(|i| phase + i * TSP)
             .take_while(|&i| i + TSP <= stream.len())
-            .map(|i| &stream[i..i + TSP])
+            .take(128)
+            .map(|i| stream[i..i + TSP].try_into().unwrap())
             .collect();
+        if blocks.is_empty() { continue; }
+        let mut ranked = Vec::new();
         for reset_off in 0..RESET_PERIOD {
-            let mut prbs = EnergyPrbs::with_init(PRBS_INIT);
+            // 訂正不要の符号語を数点だけ調べ、有望な候補から本評価する。
+            // この予備点数で候補を除外せず、全候補の厳密な上限判定を残す。
+            let mut clean = 0;
+            for idx in [blocks.len()/2, blocks.len()*3/4, blocks.len()-1] {
+                let mask = &masks[dispersion_index(idx, reset_off)];
+                let mut packet = [0u8; TSP];
+                for j in 0..TSP { packet[j] = blocks[idx][j] ^ mask[j]; }
+                clean += usize::from(checker.is_codeword(&packet));
+            }
+            ranked.push((clean, reset_off));
+        }
+        candidates.push((c, phase, blocks, ranked));
+    }
+    let mut order = Vec::new();
+    for (group, (c, _, _, ranked)) in candidates.iter().enumerate() {
+        for &(clean, reset) in ranked { order.push((std::cmp::Reverse(clean), *c, reset, group)); }
+    }
+    order.sort_unstable();
+    let mut prefix_cache = vec![[None; RESET_PERIOD]; candidates.len()];
+    for (_, c, reset_off, group) in order {
+            let (_, phase, blocks, _) = &candidates[group];
             let (mut ok, mut tot) = (0usize, 0usize);
+            let count = blocks.len().min(128);
             for (idx, blk) in blocks.iter().take(128).enumerate() {
-                if idx % RESET_PERIOD == reset_off {
-                    prbs.reset_to(PRBS_INIT);
-                }
-                let mut o = vec![blk[0]];
-                for &b in &blk[1..TSP] {
-                    o.push(b ^ (prbs.clock(8) as u8));
-                }
-                prbs.clock(8);
-                if checker.is_codeword(&o) || rs::decode(&o).is_some() {
+                let mask_index = dispersion_index(idx, reset_off);
+                let mask = &masks[mask_index];
+                let mut o = [0u8; TSP];
+                for j in 0..TSP { o[j] = blk[j] ^ mask[j]; }
+                let check = || checker.is_codeword(&o) || rs::decode(&o).is_some();
+                // 初回resetより前の同一ブロックは、別候補でも同じ系列になる。
+                // 判定済みの完全に同じ符号語だけを再利用する。
+                let valid = if idx < RESET_PERIOD && mask_index == idx {
+                    *prefix_cache[group][idx].get_or_insert_with(check)
+                } else { check() };
+                if valid {
                     ok += 1;
                 }
                 tot += 1;
+                // 残りが全て成功しても既存最良値を超えない候補だけを打ち切る。
+                // 評価順を変えても同点時は従来の(c, reset)順を優先する。
+                let upper = (ok + count - tot) as f32 / count.max(1) as f32;
+                if upper < best.0 || (upper == best.0 && (c,reset_off) >= (best.1,best.2)) { break; }
             }
+            if tot != count { continue; }
             let f = ok as f32 / tot.max(1) as f32;
-            if f > best.0 {
-                best = (f, c, reset_off, phase);
+            if f > best.0 || (f == best.0 && (c,reset_off) < (best.1,best.2)) {
+                best = (f, c, reset_off, *phase);
             }
-        }
+    }
+    if profile {
+        eprintln!("Lock profile: symbols={} prepare_ms={} viterbi_ms={} alignment_ms={} accepted={:.4} commutator={} reset={} phase={}", specs.len(), prepared.as_millis(), (decoded-prepared).as_millis(), (started.elapsed()-decoded).as_millis(), best.0, best.1, best.2, best.3);
     }
     (best.0 >= 0.5).then_some((best.1, best.2, best.3))
 }
@@ -332,6 +387,8 @@ impl StreamingDecoder {
         if self.buf.len() < self.need_init {
             return;
         }
+        let started = std::time::Instant::now();
+        let profile = std::env::var_os("RTLSDR_PROFILE").is_some();
         if !self.dc_done {
             let dc = self.buf.iter().sum::<Complex32>() / self.buf.len() as f32;
             for v in self.buf.iter_mut() {
@@ -363,6 +420,7 @@ impl StreamingDecoder {
         let specs: Vec<Vec<Complex32>> = (0..navail)
             .map(|k| self.demod.demod_one(&self.buf, k * sym, est.guard, est.cfo_subcarriers))
             .collect();
+        if profile { eprintln!("Lock profile: samples={} synchronization_fft_ms={}", self.buf.len(), started.elapsed().as_millis()); }
         let Some((commutator, reset_off, block_phase)) = lock_params(&specs, phase0) else {
             return; // ロック失敗（品質）。増データで再試行
         };
@@ -458,6 +516,20 @@ impl StreamingDecoder {
 #[cfg(test)]
 mod startup_regression {
     use super::*;
+    #[test]
+    fn cached_dispersion_matches_all_reset_positions() {
+        let masks = dispersion_masks();
+        for reset in 0..RESET_PERIOD {
+            let mut reference = EnergyPrbs::with_init(PRBS_INIT);
+            for block in 0..192 {
+                if block % RESET_PERIOD == reset { reference.reset_to(PRBS_INIT); }
+                let mask = &masks[dispersion_index(block, reset)];
+                assert_eq!(mask[0], 0);
+                for byte in &mask[1..] { assert_eq!(*byte, reference.clock(8) as u8); }
+                reference.clock(8);
+            }
+        }
+    }
     #[test]
     fn short_lock_window_waits_for_more_iq() {
         let spectra = vec![vec![Complex32::new(0.0, 0.0); FFT_LEN]; 200];

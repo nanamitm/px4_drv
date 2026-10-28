@@ -178,10 +178,8 @@ pub fn decode(block: &[u8]) -> Option<Vec<u8>> {
     for idx in 0..N {
         // 評価点 X^{-1} = alpha^{-(N-1-idx)}
         let xinv = gf.pow((255 - ((N - 1 - idx) % 255)) % 255);
-        let mut v = 0u8;
-        for (p, &c) in sigma.iter().enumerate() {
-            v ^= gf.mul(c, gf.pow((gf.log(xinv) as usize) * p));
-        }
+        // 同じ誤り位置多項式をHorner法で評価し、各項の累乗計算を省く。
+        let v = sigma.iter().rev().fold(0u8, |value, &c| gf.mul(value, xinv) ^ c);
         if v == 0 {
             err_pos.push(idx);
         }
@@ -344,5 +342,22 @@ mod tests {
         rx[42] ^= 0x9d;
         let dec = decode(&rx).expect("1誤り訂正できない");
         assert_eq!(&dec[..], &cw[..], "1誤り訂正後が符号語と不一致");
+    }
+    #[test]
+    fn corrects_each_error_count_at_varied_positions() {
+        let mut state = 123u32;
+        for count in 1..=8 {
+            for round in 0..8 {
+                let msg: Vec<u8> = (0..K).map(|_| lcg(&mut state)).collect();
+                let cw = encode(&msg);
+                let mut damaged = cw.clone();
+                for error in 0..count {
+                    // 204と互いに素な間隔で重複しない位置へ誤りを入れる。
+                    let pos = (round*19 + error*23) % N;
+                    damaged[pos] ^= lcg(&mut state).max(1);
+                }
+                assert_eq!(decode(&damaged).as_deref(), Some(cw.as_slice()));
+            }
+        }
     }
 }
