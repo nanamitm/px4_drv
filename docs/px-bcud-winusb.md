@@ -73,6 +73,20 @@ TS 出力についても ptx の probe 値 `1c=15,1f=04` を残すと isochronou
 
 ## 試験
 
+### USB受信エラーの自動復旧
+
+DriverHostはUSB転送のエラー31・87と受信タイムアウト時に、同じ配信接続を保って受信の再開を試みます。
+未完了I/Oの取消・完了回収・バッファ登録解除の後、capture停止、alt0、alt1、capture開始の順に戻します。
+新しい受信ではTSの端数とPATの組み立て状態を捨て、選択したTSIDのPATを再確認します。
+同じチャンネルの自動復旧では配信世代とTSのCCを変更しないため、欠落した連番は配信先でも観測できます。
+欠落をすべてTVTestのDで検出できる保証はなく、DriverHostの復旧ログにも停止時間を残します。
+復旧履歴をファイルに保存する場合は `DriverHost_PX4.ini` の `DebugLog=true` を指定してください。
+
+故障時の無限再試行を避ける運用上の上限は60秒間に3回です。復旧操作自体の失敗、USB抜去、
+停止・選局要求、対象外のエラーでは自動復旧を終了します。停止・選局と復旧が競合する場合は、
+受信機のロックを待つ間も停止要求を監視し、終了処理のjoinを妨げない構成です。
+調査用の `pxbcud_usb_diagnostic.exe` は自動復旧を無効にし、最初の異常時の状態を保存するために使います。
+
 Visual Studio 2022 / v143 で `winusb/build.ps1` を実行すると、通常の試験に加えて
 `pxbcud_frontend_test` を x86 / x64 で実行します。実機用ツールはビルドのみで、自動実行の対象外です。
 
@@ -91,13 +105,27 @@ Visual Studio 2022 / v143 で `winusb/build.ps1` を実行すると、通常の�
 
 # 完了エラー31・87を順に模擬注入し、同じ配信接続で再選局後の受信を確認
 .\winusb\build\x64\Release-static\pxbcud_live_test.exe 1049480 0 2 - --recover
+
+# 同じチャンネルで再選局せず自動復旧することと、連続故障時の打切りを確認
+.\winusb\build\x64\Release-static\pxbcud_live_test.exe 1049480 0 2 - --auto-recover
+.\winusb\build\x64\Release-static\pxbcud_live_test.exe 1049480 0 2 - --auto-limit
+.\winusb\build\x64\Release-static\pxbcud_live_test.exe 1049480 0 2 - --auto-stop
+
+# 自動復旧を止め、最大1時間の最初の異常を時刻付きログへ保存する
+.\winusb\build\x64\Release-static\pxbcud_usb_diagnostic.exe 1049480 0 3600
 ```
 
 `--recover` は実機の正常なUSB転送完了を回収した後、試験ツール内でエラーを模擬します。
 各エラーの通知と再選局後のパケット増加、同じ読取スレッドの継続、同期・TEI・CCを確認します。
-配布用DriverHostには模擬注入処理を含みません。USB受信の異常終了後も配信接続は待機し、
-明示的な再選局で受信を再開します。USB抜去や接続終了時は配信も終了します。
+配布用DriverHostには模擬注入処理を含みません。`--auto-recover` は再選局なしの復旧と
+その間のCC欠落を記録し、`--auto-limit` は連続4故障に対して3回で復旧を打ち切ることを確認します。
+通常受信と手動再選局の試験は従来どおりCCエラー0を成功条件とします。
+自動復旧打切り後も配信接続は手動再選局を待ち、USB抜去や接続終了時は配信も終了します。
 この試験は復旧経路を対象としており、実際のUSBエラー31・87の発生原因は別途調査が必要です。
+
+調査ツールは現在の作業ディレクトリに `PX-BCUD-USB-yyyyMMdd-HHmmss.log` を作成し、
+異常時に完了状態、最大8個の異常パケットStatus、直近32要求の投入・完了回収時刻を出力します。
+`iso_errors=0` は完了結果を正常に取得できた転送の集計であり、失敗した転送の正常性を保証しません。
 
 実機ツールは別の DriverHost プロセスを起動せず、対象 PX-BCUD へ直接接続します。
 稼働中の DriverHost / TVTest を停止する必要はありませんが、同じ PX-BCUD を別のアプリと

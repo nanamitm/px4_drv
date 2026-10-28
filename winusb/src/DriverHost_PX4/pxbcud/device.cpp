@@ -3,6 +3,7 @@
 #include "frontend.hpp"
 #include "plain_framer.hpp"
 #include "pat_gate.hpp"
+#include "recovery_budget.hpp"
 #include "msg.h"
 #include <chrono>
 #include <cmath>
@@ -77,9 +78,9 @@ private:
 
 class Receiver final : public ReceiverBase {
 public:
-    Receiver(HANDLE file,WINUSB_INTERFACE_HANDLE usb,HANDLE removed)
+    Receiver(HANDLE file,WINUSB_INTERFACE_HANDLE usb,HANDLE removed,bool auto_recovery)
         : ReceiverBase(RECEIVER_SAT_SET_STREAM_ID_AFTER_TUNE),
-          file_(file),usb_(usb),removed_(removed),io_(file,usb,removed),frontend_(io_) {}
+          file_(file),usb_(usb),removed_(removed),io_(file,usb,removed),frontend_(io_),auto_recovery_(auto_recovery) {}
     ~Receiver() override
     {
         // ReceiverManager は生ポインターを貸し出すため、既存機種と同様 Close を待つ。
@@ -88,6 +89,7 @@ public:
         if (worker_.joinable()) Stop();
     }
     void Disconnected() {stream_buf_->StopRequest();}
+    DWORD LastStreamError() const noexcept {return terminal_error_.load();}
     int Open() override
     {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -102,7 +104,8 @@ public:
         }
         open_=true;
         msg_info("PX-BCUD: tuner ID=0x%02x\n",frontend_.TunerId());
-        worker_error_=0;
+        worker_error_=0;terminal_error_=0;
+        recovery_count_=0;
         return 0;
     }
     void Close() override
@@ -120,7 +123,7 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         locked=false;
         if (!open_) return -EINVAL;
-        if (worker_error_.load()) return -EIO;
+        if (worker_error_.load() || recovering_.load()) return -EIO;
         io_.Begin(1000);
         return frontend_.Locked(locked);
     }
@@ -146,7 +149,7 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         value=0;
         if (!open_) return -EINVAL;
-        if (worker_error_.load()) return -EIO;
+        if (worker_error_.load() || recovering_.load()) return -EIO;
         if (type!=command::StatType::CNR) return -ENOSYS;
         std::uint16_t cn=0;
         io_.Begin(1000);
@@ -215,7 +218,7 @@ private:
         }
         // 選局による一時停止では配信中のリングを再確保せず、読取接続を保持する。
         if (!WinUsb_SetCurrentAlternateSetting(usb_,1)) return -EIO;
-        stop_=false; worker_error_=0;
+        stop_=false; worker_error_=0; terminal_error_=0; recovering_=false;
         io_.Begin(1000);
         int ret=frontend_.Capture(true);
         Snapshot();
@@ -249,13 +252,61 @@ private:
         io_.Begin(1000);
         if (open_) Snapshot();
         const int ret=frontend_.Capture(false);
-        if (!WinUsb_SetCurrentAlternateSetting(usb_,0) && !ret) return -EIO;
+        if (ret) msg_err("PX-BCUD: capture stop failed ret=%d\n",ret);
+        if (!WinUsb_SetCurrentAlternateSetting(usb_,0)) {
+            const DWORD error=GetLastError();
+            msg_err("PX-BCUD: stop alternate setting failed win32=%lu capture_ret=%d\n",error,ret);
+            if (!ret) return -EIO;
+        }
         return ret;
     }
     void Run() noexcept
     {
-        try { RunStream(); }
-        catch (...) { worker_error_=ERROR_NOT_ENOUGH_MEMORY; }
+        RecoveryBudget budget;
+        Clock::time_point outage{};
+        bool have_outage=false;
+        while (!stop_) {
+            try { RunStream(have_outage?&outage:nullptr); }
+            catch (...) { failure_time_=Clock::now();worker_error_=ERROR_NOT_ENOUGH_MEMORY; }
+            const DWORD error=worker_error_.load();
+            if (!error || stop_ || WaitForSingleObject(removed_,0)==WAIT_OBJECT_0) break;
+            if (!have_outage || !recovering_) {outage=failure_time_;have_outage=true;}
+            const bool retryable=error==ERROR_GEN_FAILURE || error==ERROR_INVALID_PARAMETER ||
+                error==ERROR_TIMEOUT || error==ERROR_SEM_TIMEOUT;
+            if (!auto_recovery_ || !retryable) break;
+            if (!budget.Take(Clock::now())) {
+                msg_err("PX-BCUD: auto recovery exhausted limit=3 window_seconds=60 last_win32=%lu recovery_count=%llu\n",
+                    error,static_cast<unsigned long long>(recovery_count_));
+                break;
+            }
+            recovering_=true;
+            // Stop は mutex_ を持って join する。ここで無条件に lock すると
+            // 相互待機になるため、競合中も stop_ を監視して終了要求を優先する。
+            std::unique_lock<std::mutex> lock(mutex_,std::defer_lock);
+            while (!lock.try_lock() && !stop_ && WaitForSingleObject(removed_,10)==WAIT_TIMEOUT) {}
+            if (!lock.owns_lock() || stop_ || WaitForSingleObject(removed_,0)==WAIT_OBJECT_0) break;
+            ++recovery_count_;
+            msg_warn("PX-BCUD: auto recovery begin count=%llu win32=%lu possible_ts_loss=1\n",
+                static_cast<unsigned long long>(recovery_count_),error);
+            // RunStream の終了時点で全 isoch I/O と登録バッファを回収済み。
+            // 選局は変えず、配信リングと epoch/CC を維持して欠落を隠さない。
+            io_.Begin(1000);
+            int ret=frontend_.Capture(false);
+            if (!WinUsb_SetCurrentAlternateSetting(usb_,0) && !ret) ret=-EIO;
+            if (!ret && !stop_ && WaitForSingleObject(removed_,0)==WAIT_TIMEOUT) {
+                if (!WinUsb_SetCurrentAlternateSetting(usb_,1)) ret=-EIO;
+                else {io_.Begin(1000);ret=frontend_.Capture(true);}
+            } else if (!ret) ret=-ECANCELED;
+            if (ret) {
+                msg_err("PX-BCUD: auto recovery restart failed ret=%d original_win32=%lu count=%llu\n",
+                    ret,error,static_cast<unsigned long long>(recovery_count_));
+                io_.Begin(1000);frontend_.Capture(false);
+                WinUsb_SetCurrentAlternateSetting(usb_,0);
+                break;
+            }
+            worker_error_=0;
+        }
+        recovering_=false;
         if (worker_error_) {
             msg_err("PX-BCUD: TS worker failed win32=%lu\n",worker_error_.load());
             // USB 受信の異常終了は CheckLock/ReadStat で失敗として返すが、
@@ -263,6 +314,8 @@ private:
             // 配信スレッドまで終了すると、Start(false) では復帰できない。
             // 抜去時の停止要求は Disconnected、接続終了時は StreamServer が行う。
         }
+        // 調査ツールは診断出力とI/O回収が終わった後にだけ停止処理へ進む。
+        terminal_error_=worker_error_.load();
     }
     void Snapshot()
     {
@@ -275,7 +328,7 @@ private:
         msg_info("PX-BCUD: state ret=%d bridge[0c,0f,5f,80]=%02x,%02x,%02x,%02x demod[c3,e6,e7,1c,1f]=%02x,%02x,%02x,%02x,%02x\n",
             ret,values[0],values[1],values[2],values[3],values[4],values[5],values[6],values[7],values[8]);
     }
-    void RunStream()
+    void RunStream(const Clock::time_point *outage)
     {
         // Linux em28xx と同じ 5 URB x 64 microframe。WinUSB はフレーム境界の
         // 倍数を要求するため、interval1 の 8 microframe ごとに区切る。
@@ -287,6 +340,7 @@ private:
             std::array<USBD_ISO_PACKET_DESCRIPTOR,64> packets{};
             WINUSB_ISOCH_BUFFER_HANDLE buffer=nullptr;
             bool pending=false;
+            std::size_t trace_slot=0;
             ~Read() {
                 // Feed のメモリー確保が例外になっても未完了 USB I/O を回収する。
                 if (pending) {
@@ -305,11 +359,22 @@ private:
         std::uint64_t iso_errors=0, empty_packets=0;
         std::vector<std::uint8_t> output;
         bool first=true;
+        bool reported_recovery=false;
         const auto started=Clock::now();
         std::uint64_t submitted=0, completed=0;
+        struct Trace {
+            std::uint64_t sequence=0, submitted_us=0, completed_us=0;
+            unsigned index=0;
+            DWORD error=0;
+        };
+        // 正常受信時は直近32要求の時刻だけを保持し、ディスクへは出力しない。
+        std::array<Trace,32> trace{};
+        auto elapsed_us=[&] {return static_cast<std::uint64_t>(
+            std::chrono::duration_cast<std::chrono::microseconds>(Clock::now()-started).count());};
         // 同じ Win32 エラーでも投入失敗と完了失敗では原因が異なるため、
         // エラー取得直後に処理段階とキューの状態を保存して記録する。
         auto fail=[&](const char *stage, std::size_t index, DWORD error) {
+            failure_time_=Clock::now();
             worker_error_=error;
             unsigned pending=0;
             for (const auto &read:reads) if (read.pending) ++pending;
@@ -317,6 +382,36 @@ private:
                 stage,static_cast<unsigned>(index),error,
                 static_cast<unsigned long long>(std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now()-started).count()),
                 static_cast<unsigned long long>(submitted),static_cast<unsigned long long>(completed),pending,first?0u:1u);
+            for (std::size_t i=0;i<reads.size();++i) {
+                const auto &read=reads[i];
+                msg_err("PX-BCUD: USB request read=%u pending=%u internal=0x%llx internal_high=%llu offset=%lu offset_high=%lu event_set=%u\n",
+                    static_cast<unsigned>(i),read.pending?1u:0u,
+                    static_cast<unsigned long long>(read.operation.Internal),static_cast<unsigned long long>(read.operation.InternalHigh),
+                    read.operation.Offset,read.operation.OffsetHigh,
+                    read.operation.hEvent && WaitForSingleObject(read.operation.hEvent,0)==WAIT_OBJECT_0?1u:0u);
+            }
+            const auto count=(std::min)(submitted,static_cast<std::uint64_t>(trace.size()));
+            for (std::uint64_t sequence=submitted-count;sequence<submitted;++sequence) {
+                const auto &entry=trace[sequence%trace.size()];
+                msg_err("PX-BCUD: USB history sequence=%llu read=%u submitted_us=%llu completed_us=%llu win32=%lu\n",
+                    static_cast<unsigned long long>(entry.sequence),entry.index,
+                    static_cast<unsigned long long>(entry.submitted_us),static_cast<unsigned long long>(entry.completed_us),entry.error);
+            }
+            // 未完了要求のパケット配列はUSB側が更新中のため参照しない。
+            const auto &failed=reads[index];
+            if (failed.operation.hEvent && HasOverlappedIoCompleted(&failed.operation)) {
+                unsigned errors=0,nonempty=0;
+                for (std::size_t i=0;i<failed.packets.size();++i) {
+                    const auto &packet=failed.packets[i];
+                    if (packet.Length) ++nonempty;
+                    if (packet.Status) {
+                        ++errors;
+                        if (errors<=8) msg_err("PX-BCUD: failed transfer packet=%u usbd_status=0x%08lx offset=%lu length=%lu\n",
+                            static_cast<unsigned>(i),packet.Status,packet.Offset,packet.Length);
+                    }
+                }
+                msg_err("PX-BCUD: failed transfer descriptor_errors=%u nonempty_packets=%u\n",errors,nonempty);
+            }
         };
         auto submit=[&](Read &r) {
             ResetEvent(r.operation.hEvent);
@@ -325,6 +420,8 @@ private:
                 first?FALSE:TRUE,static_cast<ULONG>(r.packets.size()),r.packets.data(),&r.operation);
             const DWORD error=ok?ERROR_SUCCESS:GetLastError();
             if (!ok && error!=ERROR_IO_PENDING) {fail("submit",&r-reads.data(),error);return false;}
+            r.trace_slot=static_cast<std::size_t>(submitted%trace.size());
+            trace[r.trace_slot]={submitted+1,elapsed_us(),0,static_cast<unsigned>(&r-reads.data()),ERROR_SUCCESS};
             ++submitted;
             first=false;r.pending=true; return true;
         };
@@ -358,10 +455,13 @@ private:
             ULONG size=0;
             if (!WinUsb_GetOverlappedResult(usb_,&r.operation,&size,FALSE)) {
                 const DWORD error=GetLastError();
+                trace[r.trace_slot].completed_us=elapsed_us();
+                trace[r.trace_slot].error=error;
                 if (!stop_) fail("complete",next,error);
                 break;
             }
             r.pending=false;
+            trace[r.trace_slot].completed_us=elapsed_us();
             ++completed;
             output.clear();
             for (const auto &packet:r.packets) {
@@ -382,6 +482,12 @@ private:
                     std::size_t written=188;
                     if (!stream_buf_->Write(output.data()+offset,written) || written!=188) {
                         fail("stream_buffer_write",next,ERROR_BUFFER_OVERFLOW);break;
+                    }
+                    if (outage && !reported_recovery) {
+                        reported_recovery=true;recovering_=false;
+                        msg_warn("PX-BCUD: auto recovery resumed count=%llu outage_ms=%llu possible_ts_loss=1\n",
+                            static_cast<unsigned long long>(recovery_count_),
+                            static_cast<unsigned long long>(std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now()-*outage).count()));
                     }
                 }
                 stream_buf_->NotifyWrite();
@@ -405,15 +511,20 @@ private:
     }
     HANDLE file_; WINUSB_INTERFACE_HANDLE usb_; HANDLE removed_;
     UsbIo io_; Frontend frontend_;
+    const bool auto_recovery_;
+    std::uint64_t recovery_count_=0;
+    Clock::time_point failure_time_{};
+    std::atomic_bool recovering_{false};
     std::mutex mutex_; std::condition_variable closed_;
     bool open_=false, resume_capture_=false,capture_requested_=false;
     std::atomic_bool stop_{true};
     std::atomic<DWORD> worker_error_{0};
+    std::atomic<DWORD> terminal_error_{0};
     std::thread worker_;
 };
 
-Device::Device(const std::wstring &path,const DeviceDefinition &definition,std::uintptr_t index,ReceiverManager &manager)
-    : DeviceBase(path,definition,index,manager)
+Device::Device(const std::wstring &path,const DeviceDefinition &definition,std::uintptr_t index,ReceiverManager &manager,bool auto_recovery)
+    : DeviceBase(path,definition,index,manager),auto_recovery_(auto_recovery)
 {
     removed_=CreateEventW(nullptr,TRUE,FALSE,nullptr);
     if (!removed_) throw DeviceError("PX-BCUD: CreateEventW failed");
@@ -425,7 +536,7 @@ int Device::Init()
     if (receiver_) return -EALREADY;
     if (usb_dev_.descriptor.idVendor!=0x3275 || usb_dev_.descriptor.idProduct!=0x0085) return -ENODEV;
     if (device_def_.receivers.size()!=1 || device_def_.receivers[0].systems!=SystemType::ISDB_S) return -EINVAL;
-    receiver_=std::make_unique<Receiver>(usb_dev_.dev,usb_dev_.winusb,removed_);
+    receiver_=std::make_unique<Receiver>(usb_dev_.dev,usb_dev_.winusb,removed_,auto_recovery_);
     const auto &definition=device_def_.receivers[0];
     command::ReceiverInfo info{};
     wcscpy_s(info.device_name,device_def_.name.c_str()); info.device_guid=device_def_.guid;
@@ -449,5 +560,9 @@ ReceiverBase *Device::GetReceiver(int id) const
 {
     if (id!=0) throw std::out_of_range("PX-BCUD receiver index");
     return receiver_.get();
+}
+DWORD Device::LastStreamError() const noexcept
+{
+    return receiver_?receiver_->LastStreamError():ERROR_INVALID_HANDLE;
 }
 }

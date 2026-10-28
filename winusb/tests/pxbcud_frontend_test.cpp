@@ -2,6 +2,7 @@
 #include "../src/DriverHost_PX4/pxbcud/frontend.hpp"
 #include "../src/DriverHost_PX4/pxbcud/plain_framer.hpp"
 #include "../src/DriverHost_PX4/pxbcud/pat_gate.hpp"
+#include "../src/DriverHost_PX4/pxbcud/recovery_budget.hpp"
 #include <cstdio>
 #include <cstdlib>
 #include <cerrno>
@@ -149,4 +150,18 @@ void TestPatGate()
     bad[0]=correct[0];bad[0][4]=184;CHECK(!invalid.Accept(bad[0].data()));
     std::puts("PAT gate: stale TSID, CRC failure, split sections, lost packets and invalid pointers passed");
 }
-int main() {TestFrontend();TestFramer();TestPatGate();return 0;}
+void TestRecoveryBudget()
+{
+    px4::pxbcud::RecoveryBudget budget;
+    const auto start=px4::pxbcud::RecoveryBudget::Clock::time_point{};
+    CHECK(budget.Take(start));
+    CHECK(budget.Take(start+std::chrono::seconds(1)));
+    CHECK(budget.Take(start+std::chrono::seconds(2)));
+    CHECK(!budget.Take(start+std::chrono::seconds(59)));
+    CHECK(budget.Take(start+std::chrono::seconds(60)));
+    CHECK(!budget.Take(start+std::chrono::seconds(60)));
+    CHECK(budget.Take(start+std::chrono::seconds(61)));
+    CHECK(budget.Take(start+std::chrono::seconds(122)));
+    std::puts("Recovery budget: rolling-window limit and expiration passed");
+}
+int main() {TestFrontend();TestFramer();TestPatGate();TestRecoveryBudget();return 0;}
