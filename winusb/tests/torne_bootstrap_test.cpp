@@ -62,6 +62,16 @@ public:
 				Put(address, Get(address) & ~1u);
 			if (address == 0x1700000)
 				running = Get(address) == 0xfffcffff;
+			if(address==0x17a3a00 && answer_job){
+				const auto kind=Get(0x17a3a04);
+				job_kinds.push_back(kind);
+				if(kind==1 && !spin_running)spin_running=true;
+				else {
+					spin_running=false;
+					Put(0x17a3a40,Get(address));Put(0x17a3a44,job_error);
+					Put(0x17a3a48,41);Put(0x17a3a4c,7);Put(0x17a3a50,0x12345678);
+				}
+			}
 			if (address == 0x17a3f00 && answer_mailbox) {
 				const auto command = Get(address);
 				mailbox_sequences.push_back(static_cast<std::uint8_t>(command >> 24));
@@ -83,6 +93,8 @@ public:
 		pauses.push_back(milliseconds);
 		if (pause_error)
 			return pause_error;
+		now+=std::chrono::milliseconds(milliseconds);
+		if(spin_running)Put(0x17a3a60,Get(0x17a3a60)+milliseconds*1000);
 		if (running && !stuck)
 			Put(0x17a3f7c, Get(0x17a3f7c) + 1);
 		return 0;
@@ -103,7 +115,40 @@ public:
 	unsigned vendor_reads = 0;
 	std::uint16_t vendor_id = 0x01b3, device_id = 0x8090;
 	bool hold_endpoint_reset = false;
+	bool answer_job=false,spin_running=false;
+	std::uint32_t job_error=0;
+	std::vector<std::uint32_t> job_kinds;
 };
+
+static void JobTests()
+{
+	Chip chip;MemoryAccess memory(chip);Bootstrap boot(memory,chip);
+	Check(boot.Initialize(1)==BootstrapResult::ok,"job bootstrap");
+	Check(chip.Get(0x17a2c00)==0x7ab1e002,"table format initialized");
+	chip.Put(0x17a2800,473143);
+	Check(boot.Initialize(2)==BootstrapResult::ok && chip.Get(0x17a2800)==473143,"warm start retains table");
+	chip.Put(0x17a2c00,0xdeadbeef);
+	Check(boot.Initialize(3)==BootstrapResult::ok && !chip.Get(0x17a2800),"foreign table invalidated");
+	MailboxI2c bus(memory,chip);Check(bus.BeginAfterBootstrap(boot),"job bus ready");
+	chip.answer_job=true;
+	std::array<std::uint32_t,3> result{};
+	auto deadline=chip.Now()+std::chrono::seconds(5);
+	Check(bus.RunJob(3,{473143},0,result,deadline)==I2cResult::ok && result[2]==0x12345678,"job result words decoded");
+	Check(chip.Get(0x17a3a08)==473143,"job parameters before sequence");
+	int best=0,diff=0;
+	Check(bus.Captrim(0xc0,0x1234,473143,64,32,400,3000000,4000000,best,diff,deadline)==I2cResult::ok && best==41 && diff==7,"calibrated captrim result");
+	Check(chip.Get(0x17a3a18)==400 && chip.Get(0x17a3a28)==473143,"captrim target and frequency key");
+	Check(chip.Get(0x17a3a1c)>0 && chip.Get(0x17a3a24)>chip.Get(0x17a3a1c),"settling waits use measured rate");
+	const auto jobs=chip.job_kinds.size();
+	Check(bus.Captrim(0xc0,0x1234,473143,64,32,400,3000000,4000000,best,diff,deadline)==I2cResult::ok && chip.job_kinds.size()==jobs+1,"spin calibration reused");
+	chip.job_error=2;
+	Check(bus.RunJob(4,{0x12,473143},0,result,deadline)==I2cResult::address_nack,"job NACK preserved");
+	chip.answer_job=false;
+	const auto before=chip.Now();
+	Check(bus.RunJob(3,{473143},0,result,before+std::chrono::milliseconds(4))==I2cResult::timeout && chip.Now()-before<=std::chrono::milliseconds(4),"absolute deadline bounds lost answer");
+	const auto calls=chip.calls;
+	Check(bus.RunJob(3,{473143},0,result,deadline)==I2cResult::not_ready && chip.calls==calls,"uncertain completion blocks bus reuse");
+}
 
 static void StreamTests()
 {
@@ -202,6 +247,7 @@ static void I2cTests()
 
 int main()
 {
+	JobTests();
 	I2cTests();
 	StreamTests();
 	Chip chip;

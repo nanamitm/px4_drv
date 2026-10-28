@@ -18,7 +18,7 @@ func TestExport(t *testing.T) {
 	defer func() { if err := out.Close(); err != nil { t.Error(err) } }()
 	fmt.Fprintln(out, `// Copyright 2026 Till0196
 // SPDX-License-Identifier: GPL-2.0-only
-// Generated from coax 2d9f2c263a3b080ecef3a8ede1eb86c6afa48405.
+// Generated from coax 471328e03942219544e78004e961d8f69d27f46f.
 // GPLv2 branch selected. Regenerate with winusb/tools/torne_codegen/generate.py.
 #pragma once
 #include <array>

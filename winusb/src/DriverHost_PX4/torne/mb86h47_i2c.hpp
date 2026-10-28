@@ -5,6 +5,7 @@
 #pragma once
 
 #include "mb86h47_bootstrap.hpp"
+#include <vector>
 
 namespace px4::torne {
 
@@ -25,6 +26,13 @@ public:
 		std::uint8_t *read, std::size_t read_size, Clock::time_point deadline);
 	MemoryResult LastMemoryResult() const noexcept { return memory_result_; }
 	int LastSystemError() const noexcept { return memory_.LastTransportError(); }
+	// 制御 mutex の所有者だけが呼ぶ。同期 mailbox と job の同時実行は不要で、
+	// timeout 後は不明な完了を次の要求へ混ぜないようバス全体を無効にする。
+	I2cResult RunJob(std::uint32_t kind,const std::vector<std::uint32_t> &parameters,
+		unsigned expected_ms,std::array<std::uint32_t,3> &results,Clock::time_point deadline);
+	I2cResult Captrim(std::uint8_t address,std::uint16_t lo4,std::uint32_t key,
+		int start,int step,int target,std::int64_t settle_write,std::int64_t settle_read,
+		int &best,int &diff,Clock::time_point deadline);
 
 private:
 	MemoryAccess &memory_;
@@ -34,6 +42,10 @@ private:
 	MemoryResult memory_result_ = MemoryResult::ok;
 	const Bootstrap *bootstrap_ = nullptr;
 	std::uint64_t generation_ = 0;
+	std::uint32_t job_sequence_ = 0;
+	double spin_rate_ = 0;
+	I2cResult SpinRate(Clock::time_point deadline);
+	I2cResult StartJob(std::uint32_t kind,const std::vector<std::uint32_t> &parameters,Clock::time_point deadline);
 };
 
 } // namespace px4::torne

@@ -13,7 +13,7 @@ args = parser.parse_args()
 root = Path(__file__).resolve().parent
 upstream = Path(args.coax).resolve()
 revision = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=upstream, text=True).strip()
-if revision != '2d9f2c263a3b080ecef3a8ede1eb86c6afa48405':
+if revision != '471328e03942219544e78004e961d8f69d27f46f':
     raise SystemExit('Unexpected coax revision')
 build = root.parents[1] / 'build/torne_codegen'
 build.mkdir(parents=True, exist_ok=True)

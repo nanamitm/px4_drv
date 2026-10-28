@@ -20,6 +20,7 @@ struct T_layerParameters;
 struct T_linearSegment;
 struct T_pllEntry;
 struct T_slope;
+struct T_tmccRegisters;
 struct T_tuner;
 struct T_tunerIdentity;
 struct T_tuningEntry;
@@ -171,6 +172,7 @@ constexpr std::int64_t v_polyMax = 8;
 constexpr std::int64_t v_polyMin = 0;
 constexpr std::int64_t v_powerAll = 0;
 constexpr std::int64_t v_powerInterfaceOnly = 1;
+constexpr std::int64_t v_retuneDelay = 1000000000;
 constexpr std::int64_t v_soc = 2;
 constexpr std::int64_t v_soc7090P1G11R1 = 130;
 constexpr std::int64_t v_soc7090P1G21R1 = 138;
@@ -244,6 +246,8 @@ T_channel v_channel{};
 T_dib8000* v_demod{};
 T_tuner* v_tuner{};
 bool v_asleep{};
+bool v_searching{};
+Time v_tunedAt{};
 };
 struct T_tunerIdentity {
 std::uint8_t v_version{};
@@ -377,6 +381,7 @@ std::uint8_t v_symbolDuration{};
 Time v_timeout{};
 std::uint8_t v_longestIntlvLayer{};
 std::int64_t v_outputMode{};
+bool v_searched{};
 std::function<Error()> v_tunerSetParams{};
 std::function<std::uint32_t()> v_tunerFrequency{};
 std::function<void(std::uint8_t)> v_agcControl{};
@@ -409,10 +414,26 @@ std::uint8_t v_isdbtLayerEnabled{};
 std::array<T_layerParameters, 3> v_layer{};
 };
 struct T_Anon18 {
+std::uint16_t v_mode{};
+std::uint16_t v_partial{};
+std::array<std::uint16_t, 3> v_segments{};
+std::array<std::uint16_t, 3> v_interleaving{};
+std::array<std::uint16_t, 3> v_rate{};
+std::array<std::uint16_t, 3> v_modulation{};
+};
+struct T_Anon19 {
 std::uint32_t v_x{};
 std::int32_t v_y{};
 };
-struct T_Anon19 {
+struct T_Anon2 {
+bool v_Locked{};
+double v_CNR{};
+bool v_HasCNR{};
+double v_StrengthDBm{};
+bool v_HasStrength{};
+Slice<std::string> v_Names{};
+};
+struct T_Anon20 {
 std::uint8_t v_bandCaps{};
 std::uint16_t v_setup{};
 std::uint16_t v_invGain{};
@@ -443,15 +464,7 @@ std::uint8_t v_betaExp{};
 std::uint8_t v_performAGCSoftsplit{};
 T_Anon15 v_split{};
 };
-struct T_Anon2 {
-bool v_Locked{};
-double v_CNR{};
-bool v_HasCNR{};
-double v_StrengthDBm{};
-bool v_HasStrength{};
-Slice<std::string> v_Names{};
-};
-struct T_Anon20 {
+struct T_Anon21 {
 std::uint32_t v_internal{};
 std::uint32_t v_sampling{};
 std::uint8_t v_pllPrediv{};
@@ -469,14 +482,14 @@ std::uint32_t v_ifreq{};
 std::uint32_t v_timf{};
 std::uint32_t v_xtalHz{};
 };
-struct T_Anon21 {
+struct T_Anon22 {
 T_dib8000* v_demod{};
 std::uint16_t v_deviceRevision{};
 std::uint16_t v_baseRegister{};
 std::uint16_t v_selectedInterface{};
 std::uint8_t v_gate{};
 };
-struct T_Anon22 {
+struct T_Anon23 {
 T_i2cMaster* v_master{};
 Bus* v_parent{};
 };
@@ -542,6 +555,8 @@ T_channel v_channel{};
 T_dib8000* v_demod{};
 T_tuner* v_tuner{};
 bool v_asleep{};
+bool v_searching{};
+Time v_tunedAt{};
 };
 struct T_Status {
 bool v_Locked{};
@@ -653,6 +668,7 @@ std::uint8_t v_symbolDuration{};
 Time v_timeout{};
 std::uint8_t v_longestIntlvLayer{};
 std::int64_t v_outputMode{};
+bool v_searched{};
 std::function<Error()> v_tunerSetParams{};
 std::function<std::uint32_t()> v_tunerFrequency{};
 std::function<void(std::uint8_t)> v_agcControl{};
@@ -674,6 +690,14 @@ std::uint8_t v_topresc{};
 struct T_slope {
 std::int16_t v_rangeValue{};
 std::int16_t v_slope{};
+};
+struct T_tmccRegisters {
+std::uint16_t v_mode{};
+std::uint16_t v_partial{};
+std::array<std::uint16_t, 3> v_segments{};
+std::array<std::uint16_t, 3> v_interleaving{};
+std::array<std::uint16_t, 3> v_rate{};
+std::array<std::uint16_t, 3> v_modulation{};
 };
 struct T_tuner {
 Bus* v_bus{};
@@ -748,6 +772,8 @@ Error m_Demod_Initialize(T_Demod* v_board);
 Error m_Demod_SetOutputMode(T_Demod* v_board,T_OutputMode v_mode);
 Error m_Demod_SetGPIO(T_Demod* v_board,std::uint8_t v_pin,bool v_high);
 Error m_Demod_Tune(T_Demod* v_board,std::uint32_t v_frequencyHz);
+Error m_Demod_attempt(T_Demod* v_board,std::uint32_t v_frequencyHz,std::array<std::uint32_t, 2>* v_words);
+std::tuple<std::int64_t,Error> m_Demod_pollForLock(T_Demod* v_board,std::int64_t v_stat);
 Error m_Demod_setParamOverride(T_Demod* v_board);
 std::uint8_t v_dib8090ComputePLLParameters(std::uint32_t v_frequencyHz);
 std::tuple<T_Status,Error> m_Demod_Status(T_Demod* v_board);
@@ -851,6 +877,8 @@ std::uint16_t m_dib8000_readLock(T_dib8000* v_state);
 bool v_isManualMode(T_channel* v_c);
 std::int64_t m_dib8000_tune(T_dib8000* v_state);
 void m_dib8000_getFrontend(T_dib8000* v_state);
+void m_tmccRegisters_apply(T_tmccRegisters v_registers,T_channel* v_c);
+T_tmccRegisters v_tmccFromWords(std::array<std::uint32_t, 2> v_words);
 Error m_dib8000_setFrontend(T_dib8000* v_state);
 std::int64_t m_dib8000_readStatus(T_dib8000* v_state);
 std::uint32_t m_dib8000_readUncBlocks(T_dib8000* v_state);
@@ -864,6 +892,7 @@ void m_i2cMaster_reset(T_i2cMaster* v_master);
 std::uint16_t m_i2cMaster_gateControl(T_i2cMaster* v_master,std::uint8_t v_address7,bool v_open);
 void m_i2cMaster_selectInterface(T_i2cMaster* v_master,std::uint16_t v_intf);
 bool m_Demod_SearchFailed(T_Demod* v_board);
+Error m_Demod_setFrontend(T_Demod*, std::uint32_t); void m_tuner_captrimOnMaster(T_tuner*, std::uint16_t);
 void m_dib8000_modifyWord(T_dib8000*, std::uint16_t, std::uint16_t, std::uint16_t);
 Slice<T_agcConfig> v_dib8090AGCConfig = Slice<T_agcConfig>{[&]() { T_agcConfig value{}; value.v_bandCaps = static_cast<std::uint8_t>((static_cast<std::uint8_t>((static_cast<std::uint8_t>((v_bandUHF) | (v_bandVHF))) | (v_bandLBand))) | (v_bandSBand)); value.v_setup = static_cast<std::uint16_t>((static_cast<std::int64_t>((static_cast<std::int64_t>((static_cast<std::int64_t>((static_cast<std::int64_t>((static_cast<std::int64_t>((static_cast<std::int64_t>((static_cast<std::int64_t>((static_cast<std::int64_t>((Shl<std::int64_t>(0,15)) | (Shl<std::int64_t>(0,14)))) | (Shl<std::int64_t>(5,11)))) | (Shl<std::int64_t>(0,10)))) | (Shl<std::int64_t>(0,9)))) | (Shl<std::int64_t>(0,8)))) | (Shl<std::int64_t>(3,5)))) | (Shl<std::int64_t>(0,4)))) | (Shl<std::int64_t>(5,1)))) | (Shl<std::int64_t>(0,0))); value.v_invGain = 787; value.v_timeStabiliz = 10; value.v_alphaLevel = 0; value.v_thlock = 118; value.v_wbdInv = 0; value.v_wbdRef = 3530; value.v_wbdSel = 1; value.v_wbdAlpha = 5; value.v_agc1Max = 65535; value.v_agc1Min = 0; value.v_agc2Max = 65535; value.v_agc2Min = 0; value.v_agc1Pt1 = 0; value.v_agc1Pt2 = 32; value.v_agc1Pt3 = 114; value.v_agc1Slope1 = 143; value.v_agc1Slope2 = 144; value.v_agc2Pt1 = 114; value.v_agc2Pt2 = 227; value.v_agc2Slope1 = 116; value.v_agc2Slope2 = 117; value.v_alphaMant = 28; value.v_alphaExp = 26; value.v_betaMant = 31; value.v_betaExp = 51; value.v_performAGCSoftsplit = 0; return value; }(),[&]() { T_agcConfig value{}; value.v_bandCaps = v_bandCBand; value.v_setup = static_cast<std::uint16_t>((static_cast<std::int64_t>((static_cast<std::int64_t>((static_cast<std::int64_t>((static_cast<std::int64_t>((static_cast<std::int64_t>((static_cast<std::int64_t>((static_cast<std::int64_t>((static_cast<std::int64_t>((Shl<std::int64_t>(0,15)) | (Shl<std::int64_t>(0,14)))) | (Shl<std::int64_t>(5,11)))) | (Shl<std::int64_t>(0,10)))) | (Shl<std::int64_t>(0,9)))) | (Shl<std::int64_t>(0,8)))) | (Shl<std::int64_t>(3,5)))) | (Shl<std::int64_t>(0,4)))) | (Shl<std::int64_t>(5,1)))) | (Shl<std::int64_t>(0,0))); value.v_invGain = 787; value.v_timeStabiliz = 10; value.v_alphaLevel = 0; value.v_thlock = 118; value.v_wbdInv = 0; value.v_wbdRef = 3530; value.v_wbdSel = 1; value.v_wbdAlpha = 5; value.v_agc1Max = 0; value.v_agc1Min = 0; value.v_agc2Max = 65535; value.v_agc2Min = 0; value.v_agc1Pt1 = 0; value.v_agc1Pt2 = 32; value.v_agc1Pt3 = 114; value.v_agc1Slope1 = 143; value.v_agc1Slope2 = 144; value.v_agc2Pt1 = 114; value.v_agc2Pt2 = 227; value.v_agc2Slope1 = 116; value.v_agc2Slope2 = 117; value.v_alphaMant = 28; value.v_alphaExp = 26; value.v_betaMant = 31; value.v_betaExp = 51; value.v_performAGCSoftsplit = 0; return value; }()};
 T_bandwidthConfig v_dib8090PLLConfig12MHz = [&]() { T_bandwidthConfig value{}; value.v_internal = 54000; value.v_sampling = 13500; value.v_pllPrediv = 1; value.v_pllRatio = 18; value.v_pllRange = 3; value.v_pllReset = 1; value.v_pllBypass = 0; value.v_enableRefdiv = 0; value.v_bypclkDiv = 0; value.v_ioClkEnCore = 1; value.v_adcClkSrc = 1; value.v_modulo = 2; value.v_sadCfg = static_cast<std::uint16_t>((static_cast<std::int64_t>((Shl<std::int64_t>(3,14)) | (Shl<std::int64_t>(1,12)))) | (Shl<std::int64_t>(599,0))); value.v_ifreq = static_cast<std::uint32_t>((Shl<std::int64_t>(0,25)) | (0)); value.v_timf = 20199727; value.v_xtalHz = 12000000; return value; }();
@@ -1023,16 +1052,50 @@ m_dib8000_wakeup((v_board)->v_demod);
 m_tuner_wakeup((v_board)->v_tuner);
 (v_board)->v_asleep = false;
 }
-m_channel_clear((&(v_board)->v_channel));
-((v_board)->v_channel).v_frequency = v_frequencyHz;
+(v_board)->v_searching = false;
 {
-Error v_err = m_dib8000_setFrontend((v_board)->v_demod);
+Error v_err = m_Demod_setFrontend(v_board,v_frequencyHz);
 if ((v_err != nullptr))
 {
 return v_err;
 }
 }
+(v_board)->v_searching = true;
 return ((v_board)->v_failure).v_err;
+}
+// attempt runs set_frontend once, with the parameters given or searched for.
+Error m_Demod_attempt(T_Demod* v_board,std::uint32_t v_frequencyHz,std::array<std::uint32_t, 2>* v_words)
+{
+m_channel_clear((&(v_board)->v_channel));
+((v_board)->v_channel).v_frequency = v_frequencyHz;
+if ((v_words != nullptr))
+{
+m_tmccRegisters_apply(v_tmccFromWords((*v_words)),(&(v_board)->v_channel));
+}
+Error v_err = m_dib8000_setFrontend((v_board)->v_demod);
+(v_board)->v_tunedAt = ((v_board)->v_demod)->v_now();
+return v_err;
+}
+// pollForLock tunes the channel again once retuneDelay has gone by without a
+// lock, as the frontend thread does, and gives the lock status.
+std::tuple<std::int64_t,Error> m_Demod_pollForLock(T_Demod* v_board,std::int64_t v_stat)
+{
+if ((((static_cast<std::int64_t>((v_stat) & (v_feHasLock)) == 0) && (v_board)->v_searching) && (((v_board)->v_demod)->v_now().Sub((v_board)->v_tunedAt) >= v_retuneDelay)))
+{
+{
+Error v_err = m_Demod_setFrontend(v_board,((v_board)->v_channel).v_frequency);
+if ((v_err != nullptr))
+{
+return {v_stat,v_err};
+}
+}
+v_stat = m_dib8000_readStatus((v_board)->v_demod);
+}
+if ((static_cast<std::int64_t>((v_stat) & (v_feHasLock)) != 0))
+{
+(v_board)->v_searching = false;
+}
+return {v_stat,nullptr};
 }
 // setParamOverride is dib8096_set_param_override, installed as the tuner's
 // set_params: it switches the VHF/UHF input, tunes the tuner, moves the
@@ -1166,11 +1229,17 @@ std::tuple<T_Status,Error> m_Demod_Status(T_Demod* v_board)
 Error v_err{};
 ((v_board)->v_failure).v_err = nullptr;
 T_dib8000* v_demod = (v_board)->v_demod;
-std::int64_t v_stat = m_dib8000_readStatus(v_demod);
+auto tmp7 = m_Demod_pollForLock(v_board,m_dib8000_readStatus(v_demod));
+std::int64_t v_stat = std::get<0>(tmp7);
+v_err = std::get<1>(tmp7);
+if ((v_err != nullptr))
+{
+return {[&]() { T_Status value{}; return value; }(),v_err};
+}
 T_Status v_status{};
-{ auto&& range7 = Slice<T_Anon3>{[&]() { T_Anon3 value{}; value.v_mask = v_feHasSignal; value.v_name = "SIGNAL"; return value; }(),[&]() { T_Anon3 value{}; value.v_mask = v_feHasCarrier; value.v_name = "CARRIER"; return value; }(),[&]() { T_Anon3 value{}; value.v_mask = v_feHasViterbi; value.v_name = "VITERBI"; return value; }(),[&]() { T_Anon3 value{}; value.v_mask = v_feHasSync; value.v_name = "SYNC"; return value; }(),[&]() { T_Anon3 value{}; value.v_mask = v_feHasLock; value.v_name = "LOCK"; return value; }()};
-for (std::int64_t index7=0; index7<Len(range7); ++index7) {
-auto v_bit = range7[index7];
+{ auto&& range8 = Slice<T_Anon3>{[&]() { T_Anon3 value{}; value.v_mask = v_feHasSignal; value.v_name = "SIGNAL"; return value; }(),[&]() { T_Anon3 value{}; value.v_mask = v_feHasCarrier; value.v_name = "CARRIER"; return value; }(),[&]() { T_Anon3 value{}; value.v_mask = v_feHasViterbi; value.v_name = "VITERBI"; return value; }(),[&]() { T_Anon3 value{}; value.v_mask = v_feHasSync; value.v_name = "SYNC"; return value; }(),[&]() { T_Anon3 value{}; value.v_mask = v_feHasLock; value.v_name = "LOCK"; return value; }()};
+for (std::int64_t index8=0; index8<Len(range8); ++index8) {
+auto v_bit = range8[index8];
 if ((static_cast<std::int64_t>((v_stat) & ((v_bit).v_mask)) != 0))
 {
 (v_status).v_Names = Append((v_status).v_Names,(v_bit).v_name);
@@ -1226,9 +1295,9 @@ if ((((v_state)->v_failure)->v_err != nullptr))
 {
 return 0;
 }
-auto tmp8 = I2cWriteRead((v_state)->v_bus,(v_state)->v_address,Slice<std::uint8_t>{v_register},2);
-Slice<std::uint8_t> v_data = std::get<0>(tmp8);
-Error v_err = std::get<1>(tmp8);
+auto tmp9 = I2cWriteRead((v_state)->v_bus,(v_state)->v_address,Slice<std::uint8_t>{v_register},2);
+Slice<std::uint8_t> v_data = std::get<0>(tmp9);
+Error v_err = std::get<1>(tmp9);
 if ((v_err != nullptr))
 {
 m_failure_record((v_state)->v_failure,MakeError("read DiB0090 register %#02x: %w",v_register,v_err));
@@ -1263,9 +1332,9 @@ void m_tuner_msleep(T_tuner* v_state,std::int64_t v_milliseconds)
 // writeRegs is dib0090_write_regs: consecutive registers from values.
 void m_tuner_writeRegs(T_tuner* v_state,std::uint8_t v_register,Slice<std::uint16_t> v_values)
 {
-{ auto&& range9 = v_values;
-for (std::int64_t index9=0; index9<Len(range9); ++index9) {
-auto v_value = range9[index9];
+{ auto&& range10 = v_values;
+for (std::int64_t index10=0; index10<Len(range10); ++index10) {
+auto v_value = range10[index10];
 m_tuner_writeReg(v_state,v_register,v_value);
 v_register++;
 }}
@@ -1293,9 +1362,9 @@ if ((static_cast<std::uint8_t>(((v_identity)->v_version) & (0x3)) == v_soc))
 return MakeError("DiB0090: SoC version %#02x belongs to a DiB7090 or DiB8096P, which this driver does not support",(v_identity)->v_version);
 }
 {
-auto switch10 = static_cast<std::uint8_t>(((Shr<std::uint8_t>((v_identity)->v_version,5))) & (0x7));
+auto switch11 = static_cast<std::uint8_t>(((Shr<std::uint8_t>((v_identity)->v_version,5))) & (0x7));
 do {
-if ((switch10 == v_mp001) || (switch10 == v_mp005) || (switch10 == v_mp008) || (switch10 == v_mp009)) {
+if ((switch11 == v_mp001) || (switch11 == v_mp005) || (switch11 == v_mp008) || (switch11 == v_mp009)) {
 }
 else
 {
@@ -1303,14 +1372,14 @@ return MakeError("DiB0090: unknown package variant (version %#02x)",(v_identity)
 }
 } while(false); }
 {
-auto switch11 = static_cast<std::uint8_t>(((v_identity)->v_version) & (0x1f));
+auto switch12 = static_cast<std::uint8_t>(((v_identity)->v_version) & (0x1f));
 do {
-if ((switch11 == v_p1G21R2) || (switch11 == v_p1G)) {
+if ((switch12 == v_p1G21R2) || (switch12 == v_p1G)) {
 (v_identity)->v_p1g = 1;
 }
-else if ((switch11 == v_p1DEF) || (switch11 == v_p1C)) {
+else if ((switch12 == v_p1DEF) || (switch12 == v_p1C)) {
 }
-else if ((switch11 == v_p1AB)) {
+else if ((switch12 == v_p1AB)) {
 return MakeError("DiB0090: P1-A/B detected: driver is deactivated - not available");
 }
 else
@@ -1421,15 +1490,15 @@ std::uint16_t v_enPWMRFMux = static_cast<std::uint16_t>(1);
 if ((((v_state)->v_config)->v_usePWMAGC != 0))
 {
 {
-auto switch12 = (v_state)->v_currentBand;
+auto switch13 = (v_state)->v_currentBand;
 do {
-if ((switch12 == v_bandCBand)) {
+if ((switch13 == v_bandCBand)) {
 v_rfRamp = v_rfRampPWMCBand;
 }
-else if ((switch12 == v_bandVHF)) {
+else if ((switch13 == v_bandVHF)) {
 v_rfRamp = v_rfRampPWMVHF;
 }
-else if ((switch12 == v_bandUHF)) {
+else if ((switch13 == v_bandUHF)) {
 v_rfRamp = v_rfRampPWMUHF;
 }
 } while(false); }
@@ -1535,19 +1604,19 @@ v_bb = 0;
 }
 At((v_state)->v_gain,0) = v_rf;
 At((v_state)->v_gain,1) = v_bb;
-auto tmp13_0 = (v_state)->v_rfRamp;
-auto tmp13_1 = 1;
-Slice<std::uint16_t> v_ramp = tmp13_0;
-std::int64_t v_at = tmp13_1;
+auto tmp14_0 = (v_state)->v_rfRamp;
+auto tmp14_1 = 1;
+Slice<std::uint16_t> v_ramp = tmp14_0;
+std::int64_t v_at = tmp14_1;
 std::uint16_t v_ref = v_rf;
 for (std::int64_t v_i = 0;(v_i < 7);v_i++)
 {
-auto tmp14_0 = static_cast<std::int64_t>(v_rampAt(v_ramp,v_at));
-auto tmp14_1 = static_cast<std::int64_t>(v_rampAt(v_ramp,Add<std::int64_t>(v_at,1)));
-auto tmp14_2 = static_cast<std::int64_t>(v_rampAt(v_ramp,Add<std::int64_t>(v_at,2)));
-std::int64_t v_g0 = tmp14_0;
-std::int64_t v_g1 = tmp14_1;
-std::int64_t v_g2 = tmp14_2;
+auto tmp15_0 = static_cast<std::int64_t>(v_rampAt(v_ramp,v_at));
+auto tmp15_1 = static_cast<std::int64_t>(v_rampAt(v_ramp,Add<std::int64_t>(v_at,1)));
+auto tmp15_2 = static_cast<std::int64_t>(v_rampAt(v_ramp,Add<std::int64_t>(v_at,2)));
+std::int64_t v_g0 = tmp15_0;
+std::int64_t v_g1 = tmp15_1;
+std::int64_t v_g2 = tmp15_2;
 std::uint16_t v_v{};
 {
 do {
@@ -1563,46 +1632,46 @@ v_v = static_cast<std::uint16_t>(static_cast<std::int64_t>((Mul<std::int64_t>((S
 }
 } while(false); }
 {
-auto switch15 = v_i;
+auto switch16 = v_i;
 do {
-if ((switch15 == 0)) {
+if ((switch16 == 0)) {
 At(v_gainReg,0) = v_v;
 }
-else if ((switch15 == 1)) {
+else if ((switch16 == 1)) {
 At(v_gainReg,0) |= Shl<std::uint16_t>(v_v,7);
 }
-else if ((switch15 == 2)) {
+else if ((switch16 == 2)) {
 At(v_gainReg,1) = v_v;
 }
-else if ((switch15 == 3)) {
+else if ((switch16 == 3)) {
 At(v_gainReg,1) |= Shl<std::uint16_t>(v_v,7);
 }
-else if ((switch15 == 4)) {
+else if ((switch16 == 4)) {
 At(v_gainReg,2) = static_cast<std::uint16_t>((v_v) | ((v_state)->v_rfLTDef));
 }
-else if ((switch15 == 5)) {
+else if ((switch16 == 5)) {
 At(v_gainReg,3) = Shl<std::uint16_t>(v_v,3);
 }
-else if ((switch15 == 6)) {
+else if ((switch16 == 6)) {
 At(v_gainReg,3) |= Shl<std::uint16_t>(v_v,8);
 }
 } while(false); }
 v_at += 3;
 if ((v_i == 4))
 {
-auto tmp16_0 = (v_state)->v_bbRamp;
-auto tmp16_1 = 1;
-v_ramp = tmp16_0;
-v_at = tmp16_1;
+auto tmp17_0 = (v_state)->v_bbRamp;
+auto tmp17_1 = 1;
+v_ramp = tmp17_0;
+v_at = tmp17_1;
 v_ref = v_bb;
 }
 }
 At(v_gainReg,3) |= (v_state)->v_bb1Def;
 At(v_gainReg,3) |= static_cast<std::uint16_t>((Mul<std::uint16_t>((static_cast<std::uint16_t>((v_bb) % (10))),100)) / (125));
-{ auto&& range17 = std::array<std::uint8_t, 4>{{0x08,0x0a,0x0f,0x01}};
-for (std::int64_t index17=0; index17<Len(range17); ++index17) {
-auto v_i = index17;
-auto v_register = range17[index17];
+{ auto&& range18 = std::array<std::uint8_t, 4>{{0x08,0x0a,0x0f,0x01}};
+for (std::int64_t index18=0; index18<Len(range18); ++index18) {
+auto v_i = index18;
+auto v_register = range18[index18];
 std::uint16_t v_v = At(v_gainReg,v_i);
 if ((v_force || (At((v_state)->v_gainReg,v_i) != v_v)))
 {
@@ -1741,9 +1810,9 @@ std::uint16_t v_slopesToScale(Slice<T_slope> v_slopes,std::int16_t v_val)
 {
 std::uint16_t v_rest{};
 std::uint16_t v_ret{};
-{ auto&& range18 = v_slopes;
-for (std::int64_t index18=0; index18<Len(range18); ++index18) {
-auto v_i = index18;
+{ auto&& range19 = v_slopes;
+for (std::int64_t index19=0; index19<Len(range19); ++index19) {
+auto v_i = index19;
 if ((v_val > (At(v_slopes,v_i)).v_rangeValue))
 {
 v_rest = static_cast<std::uint16_t>((At(v_slopes,v_i)).v_rangeValue);
@@ -1937,18 +2006,18 @@ std::int64_t m_tuner_getOffset(T_tuner* v_state)
 {
 std::int64_t v_ret = Mul<std::int64_t>(v_internWait,10);
 {
-auto switch19 = (v_state)->v_tuneState;
+auto switch20 = (v_state)->v_tuneState;
 do {
-if ((switch19 == v_tunerStep2)) {
+if ((switch20 == v_tunerStep2)) {
 m_tuner_writeReg(v_state,0x1f,0x7);
 (v_state)->v_tuneState = v_tunerStep3;
 }
-else if ((switch19 == v_tunerStep3)) {
+else if ((switch20 == v_tunerStep3)) {
 (v_state)->v_adcDiff = static_cast<std::int16_t>(m_tuner_readReg(v_state,0x1d));
 m_tuner_writeReg(v_state,0x1f,0x4);
 (v_state)->v_tuneState = v_tunerStep4;
 }
-else if ((switch19 == v_tunerStep4)) {
+else if ((switch20 == v_tunerStep4)) {
 (v_state)->v_adcDiff = static_cast<std::int16_t>([&]() { auto left = static_cast<std::int64_t>((v_state)->v_adcDiff); auto right = static_cast<std::int64_t>(m_tuner_readReg(v_state,0x1d)); return Sub<std::int64_t>(left,right); }());
 (v_state)->v_tuneState = v_tunerStep5;
 v_ret = 0;
@@ -1982,9 +2051,9 @@ std::int64_t m_tuner_dcOffsetCalibration(T_tuner* v_state)
 {
 std::int64_t v_ret = 0;
 {
-auto switch20 = (v_state)->v_tuneState;
+auto switch21 = (v_state)->v_tuneState;
 do {
-if ((switch20 == v_tunerStart)) {
+if ((switch21 == v_tunerStart)) {
 (v_state)->v_bb6 = 0;
 (v_state)->v_bb7 = 0x040d;
 std::uint16_t v_reg = static_cast<std::uint16_t>((m_tuner_readReg(v_state,0x24)) & (0x0ffb));
@@ -2001,18 +2070,18 @@ if ((((v_state)->v_identity).v_p1g != 0))
 m_tuner_dcStep0(v_state);
 v_ret = 50;
 }
-else if ((switch20 == v_tunerStep0)) {
+else if ((switch21 == v_tunerStep0)) {
 m_tuner_dcStep0(v_state);
 v_ret = 50;
 }
-else if ((switch20 == v_tunerStep1)) {
+else if ((switch21 == v_tunerStep1)) {
 m_tuner_setTrim(v_state);
 (v_state)->v_tuneState = v_tunerStep2;
 }
-else if ((switch20 == v_tunerStep2) || (switch20 == v_tunerStep3) || (switch20 == v_tunerStep4)) {
+else if ((switch21 == v_tunerStep2) || (switch21 == v_tunerStep3) || (switch21 == v_tunerStep4)) {
 v_ret = m_tuner_getOffset(v_state);
 }
-else if ((switch20 == v_tunerStep5)) {
+else if ((switch21 == v_tunerStep5)) {
 T_dcCalibration* v_dc = (&At((v_state)->v_dc,(v_state)->v_dcNext));
 if ((((v_state)->v_step == 0) && ((v_state)->v_adcDiff < 0)))
 {
@@ -2053,7 +2122,7 @@ else
 }
 }
 }
-else if ((switch20 == v_tunerStep6)) {
+else if ((switch21 == v_tunerStep6)) {
 m_tuner_writeReg(v_state,0x07,static_cast<std::uint16_t>(((v_state)->v_bb7) & ~(0x0008)));
 m_tuner_writeReg(v_state,0x1f,0x7);
 (v_state)->v_tuneState = v_tunerStart;
@@ -2078,9 +2147,9 @@ std::int64_t m_tuner_wbdCalibration(T_tuner* v_state)
 {
 std::uint8_t v_wbdGain{};
 {
-auto switch21 = (v_state)->v_tuneState;
+auto switch22 = (v_state)->v_tuneState;
 do {
-if ((switch21 == v_tunerStart)) {
+if ((switch22 == v_tunerStart)) {
 std::int64_t v_index = 0;
 for (;(static_cast<std::uint32_t>(((v_state)->v_currentRF) / (1000)) > static_cast<std::uint32_t>((At((v_state)->v_currentWBDTable,v_index)).v_maxFreq));)
 {
@@ -2107,7 +2176,7 @@ m_tuner_writeReg(v_state,0x24,static_cast<std::uint16_t>(((static_cast<std::int6
 (v_state)->v_wbdCalibrationGain = v_wbdGain;
 return 90;
 }
-else if ((switch21 == v_tunerStep0)) {
+else if ((switch22 == v_tunerStep0)) {
 (v_state)->v_wbdOffset = static_cast<std::uint16_t>(m_tuner_getSlowADCVal(v_state));
 (v_state)->v_tuneState = v_tunerStart;
 (v_state)->v_calibrate = static_cast<std::uint8_t>((v_state)->v_calibrate & ~(v_wbdCal));
@@ -2151,9 +2220,9 @@ std::int64_t m_tuner_captrimSearch(T_tuner* v_state)
 std::int64_t v_ret = 0;
 std::uint16_t v_lo4 = static_cast<std::uint16_t>(0xe900);
 {
-auto switch22 = (v_state)->v_tuneState;
+auto switch23 = (v_state)->v_tuneState;
 do {
-if ((switch22 == v_tunerStart)) {
+if ((switch23 == v_tunerStart)) {
 m_tuner_writeReg(v_state,0x10,0x2B1);
 m_tuner_writeReg(v_state,0x1e,0x0032);
 if (((v_state)->v_tunerIsTuned == 0))
@@ -2177,8 +2246,12 @@ if ((((v_state)->v_identity).v_p1g == 0))
 }
 (v_state)->v_adcDiff = 3000;
 (v_state)->v_tuneState = v_tunerStep0;
+if ((((v_state)->v_identity).v_p1g == 0))
+{
+m_tuner_captrimOnMaster(v_state,v_lo4);
 }
-else if ((switch22 == v_tunerStep0)) {
+}
+else if ((switch23 == v_tunerStep0)) {
 if ((((v_state)->v_identity).v_p1g != 0))
 {
 std::uint16_t v_ratio = static_cast<std::uint16_t>(31);
@@ -2193,7 +2266,7 @@ m_tuner_writeReg(v_state,0x18,static_cast<std::uint16_t>((v_lo4) | (static_cast<
 }
 (v_state)->v_tuneState = v_tunerStep1;
 }
-else if ((switch22 == v_tunerStep1)) {
+else if ((switch23 == v_tunerStep1)) {
 if ((((v_state)->v_identity).v_p1g != 0))
 {
 m_tuner_writeReg(v_state,0x40,static_cast<std::uint16_t>((static_cast<std::int64_t>((0x18c) | (Shl<std::int64_t>(0,1)))) | (0)));
@@ -2241,11 +2314,11 @@ else
 v_ret = 25;
 }
 }
-else if ((switch22 == v_tunerStep2)) {
+else if ((switch23 == v_tunerStep2)) {
 m_tuner_writeReg(v_state,0x18,static_cast<std::uint16_t>((v_lo4) | (static_cast<std::uint16_t>((v_state)->v_fcaptrim))));
 (v_state)->v_tuneState = v_tunerStep3;
 }
-else if ((switch22 == v_tunerStep3)) {
+else if ((switch23 == v_tunerStep3)) {
 (v_state)->v_calibrate = static_cast<std::uint8_t>((v_state)->v_calibrate & ~(v_captrimCal));
 (v_state)->v_tuneState = v_tunerStep0;
 }
@@ -2257,26 +2330,26 @@ std::int64_t m_tuner_getTemperature(T_tuner* v_state)
 {
 std::int64_t v_ret = 15;
 {
-auto switch23 = (v_state)->v_tuneState;
+auto switch24 = (v_state)->v_tuneState;
 do {
-if ((switch23 == v_tunerStart)) {
+if ((switch24 == v_tunerStart)) {
 (v_state)->v_wbdmux = m_tuner_readReg(v_state,0x10);
 m_tuner_writeReg(v_state,0x10,static_cast<std::uint16_t>((static_cast<std::uint16_t>(((v_state)->v_wbdmux) & ~((Shl<std::uint16_t>(0xff,3))))) | (Shl<std::uint16_t>(0x8,3))));
 (v_state)->v_bias = m_tuner_readReg(v_state,0x13);
 m_tuner_writeReg(v_state,0x13,static_cast<std::uint16_t>(((v_state)->v_bias) | (Shl<std::uint16_t>(0x3,8))));
 (v_state)->v_tuneState = v_tunerStep0;
 }
-else if ((switch23 == v_tunerStep0)) {
+else if ((switch24 == v_tunerStep0)) {
 (v_state)->v_adcDiff = static_cast<std::int16_t>(m_tuner_getSlowADCVal(v_state));
 m_tuner_writeReg(v_state,0x13,static_cast<std::uint16_t>((static_cast<std::uint16_t>(((v_state)->v_bias) & ~((Shl<std::uint16_t>(0x3,8))))) | (Shl<std::uint16_t>(0x2,8))));
 (v_state)->v_tuneState = v_tunerStep1;
 }
-else if ((switch23 == v_tunerStep1)) {
+else if ((switch24 == v_tunerStep1)) {
 std::int16_t v_val = static_cast<std::int16_t>(m_tuner_getSlowADCVal(v_state));
 (v_state)->v_temperature = Add<std::int16_t>(static_cast<std::int16_t>(Shr<std::int64_t>(static_cast<std::int64_t>(static_cast<std::int16_t>(Mul<std::int64_t>(([&]() { auto left = static_cast<std::int64_t>(v_val); auto right = static_cast<std::int64_t>((v_state)->v_adcDiff); return Sub<std::int64_t>(left,right); }()),180))),8)),55);
 (v_state)->v_tuneState = v_tunerStep2;
 }
-else if ((switch23 == v_tunerStep2)) {
+else if ((switch24 == v_tunerStep2)) {
 m_tuner_writeReg(v_state,0x13,(v_state)->v_bias);
 m_tuner_writeReg(v_state,0x10,(v_state)->v_wbdmux);
 (v_state)->v_tuneState = v_tunerStart;
@@ -2341,9 +2414,9 @@ return static_cast<std::uint32_t>(m_tuner_captrimSearch(v_state));
 }
 } while(false); }
 {
-auto switch24 = (v_state)->v_tuneState;
+auto switch25 = (v_state)->v_tuneState;
 do {
-if ((switch24 == v_tunerStart)) {
+if ((switch25 == v_tunerStart)) {
 (v_state)->v_currentBand = v_bandOfFrequency(static_cast<std::uint32_t>(((v_c)->v_frequency) / (1000)));
 std::int32_t v_offset = ((v_state)->v_config)->v_freqOffsetKHzVHF;
 if (((v_state)->v_currentBand == v_bandUHF))
@@ -2497,7 +2570,7 @@ m_tuner_writeReg(v_state,0x24,static_cast<std::uint16_t>((static_cast<std::uint1
 v_ret = 20;
 (v_state)->v_calibrate = v_captrimCal;
 }
-else if ((switch24 == v_tunerStep0)) {
+else if ((switch25 == v_tunerStep0)) {
 std::int64_t v_index = 0;
 for (;(static_cast<std::uint32_t>(((v_state)->v_currentRF) / (1000)) > static_cast<std::uint32_t>((At((v_state)->v_currentWBDTable,v_index)).v_maxFreq));)
 {
@@ -2527,7 +2600,7 @@ m_tuner_writeReg(v_state,0x0d,(v_tune)->v_mix);
 m_tuner_writeReg(v_state,0x0e,(v_tune)->v_load);
 (v_state)->v_tuneState = v_tunerStep1;
 }
-else if ((switch24 == v_tunerStep1)) {
+else if ((switch25 == v_tunerStep1)) {
 (v_state)->v_rfLTDef = 0x7c00;
 m_tuner_setBandwidth(v_state);
 (v_state)->v_tunerIsTuned = 1;
@@ -2595,9 +2668,9 @@ if ((((v_state)->v_failure)->v_err != nullptr))
 {
 return 0;
 }
-auto tmp25 = I2cWriteRead((v_state)->v_bus,(v_state)->v_address,Slice<std::uint8_t>{static_cast<std::uint8_t>(Shr<std::uint16_t>(v_register,8)),static_cast<std::uint8_t>(v_register)},2);
-Slice<std::uint8_t> v_data = std::get<0>(tmp25);
-Error v_err = std::get<1>(tmp25);
+auto tmp26 = I2cWriteRead((v_state)->v_bus,(v_state)->v_address,Slice<std::uint8_t>{static_cast<std::uint8_t>(Shr<std::uint16_t>(v_register,8)),static_cast<std::uint8_t>(v_register)},2);
+Slice<std::uint8_t> v_data = std::get<0>(tmp26);
+Error v_err = std::get<1>(tmp26);
 if ((v_err != nullptr))
 {
 m_failure_record((v_state)->v_failure,MakeError("read DiB8000 register %d: %w",v_register,v_err));
@@ -2638,12 +2711,12 @@ void m_dib8000_msleep(T_dib8000* v_state,std::int64_t v_milliseconds)
 std::uint16_t m_dib8000_fftToMode(T_dib8000* v_state)
 {
 {
-auto switch26 = ((v_state)->v_channel)->v_transmissionMode;
+auto switch27 = ((v_state)->v_channel)->v_transmissionMode;
 do {
-if ((switch26 == v_transmission2K)) {
+if ((switch27 == v_transmission2K)) {
 return 1;
 }
-else if ((switch26 == v_transmission4K)) {
+else if ((switch27 == v_transmission4K)) {
 return 2;
 }
 else
@@ -2668,18 +2741,18 @@ std::uint16_t v_sram = static_cast<std::uint16_t>(0x0205);
 (v_state)->v_outputMode = v_mode;
 std::uint16_t v_smoMode = static_cast<std::uint16_t>((static_cast<std::uint16_t>((m_dib8000_readWord(v_state,299)) & (0x0050))) | (Shl<std::uint16_t>(1,1)));
 {
-auto switch27 = v_mode;
+auto switch28 = v_mode;
 do {
-if ((switch27 == v_outmodeParallelGated)) {
+if ((switch28 == v_outmodeParallelGated)) {
 v_outreg = Shl<std::uint16_t>(1,10);
 }
-else if ((switch27 == v_outmodeParallelCont)) {
+else if ((switch28 == v_outmodeParallelCont)) {
 v_outreg = static_cast<std::uint16_t>((Shl<std::int64_t>(1,10)) | (Shl<std::int64_t>(1,6)));
 }
-else if ((switch27 == v_outmodeSerial)) {
+else if ((switch28 == v_outmodeSerial)) {
 v_outreg = static_cast<std::uint16_t>((static_cast<std::int64_t>((Shl<std::int64_t>(1,10)) | (Shl<std::int64_t>(2,6)))) | (Shl<std::int64_t>(0,1)));
 }
-else if ((switch27 == v_outmodeDiversity)) {
+else if ((switch28 == v_outmodeDiversity)) {
 if ((((v_state)->v_cfg).v_hostbusDiversity != 0))
 {
 v_outreg = static_cast<std::uint16_t>((Shl<std::int64_t>(1,10)) | (Shl<std::int64_t>(4,6)));
@@ -2690,15 +2763,15 @@ else
 v_sram |= 0x0c00;
 }
 }
-else if ((switch27 == v_outmodeFIFO)) {
+else if ((switch28 == v_outmodeFIFO)) {
 v_smoMode |= Shl<std::uint16_t>(3,1);
 v_fifoThreshold = 512;
 v_outreg = static_cast<std::uint16_t>((Shl<std::int64_t>(1,10)) | (Shl<std::int64_t>(5,6)));
 }
-else if ((switch27 == v_outmodeHighZ)) {
+else if ((switch28 == v_outmodeHighZ)) {
 v_outreg = 0;
 }
-else if ((switch27 == v_outmodeAnalogADC)) {
+else if ((switch28 == v_outmodeAnalogADC)) {
 v_outreg = static_cast<std::uint16_t>((Shl<std::int64_t>(1,10)) | (Shl<std::int64_t>(3,6)));
 m_dib8000_setAcquisitionMode(v_state);
 }
@@ -2733,17 +2806,17 @@ m_dib8000_writeWord(v_state,273,v_syncWait);
 }
 (v_state)->v_diversityOnOff = v_onoff;
 {
-auto switch28 = v_onoff;
+auto switch29 = v_onoff;
 do {
-if ((switch28 == 0)) {
+if ((switch29 == 0)) {
 m_dib8000_writeWord(v_state,270,1);
 m_dib8000_writeWord(v_state,271,0);
 }
-else if ((switch28 == 1)) {
+else if ((switch29 == 1)) {
 m_dib8000_writeWord(v_state,270,6);
 m_dib8000_writeWord(v_state,271,6);
 }
-else if ((switch28 == 2)) {
+else if ((switch29 == 2)) {
 m_dib8000_writeWord(v_state,270,0);
 m_dib8000_writeWord(v_state,271,1);
 }
@@ -2765,16 +2838,16 @@ std::uint16_t v_reg776 = static_cast<std::uint16_t>(0xffff);
 std::uint16_t v_reg900 = static_cast<std::uint16_t>((static_cast<std::uint16_t>((m_dib8000_readWord(v_state,900)) & (0xfffc))) | (0x3));
 std::uint16_t v_reg1280 = static_cast<std::uint16_t>((static_cast<std::uint16_t>((m_dib8000_readWord(v_state,1280)) & (0x00ff))) | (0xff00));
 {
-auto switch29 = v_mode;
+auto switch30 = v_mode;
 do {
-if ((switch29 == v_powerAll)) {
+if ((switch30 == v_powerAll)) {
 v_reg774 = 0x0000;
 v_reg775 = 0x0000;
 v_reg776 = 0x0000;
 v_reg900 &= 0xfffc;
 v_reg1280 &= 0x00ff;
 }
-else if ((switch29 == v_powerInterfaceOnly)) {
+else if ((switch30 == v_powerInterfaceOnly)) {
 v_reg1280 &= 0x00ff;
 }
 } while(false); }
@@ -2790,28 +2863,28 @@ void m_dib8000_setADCState(T_dib8000* v_state,std::int64_t v_no)
 std::uint16_t v_reg907 = m_dib8000_readWord(v_state,907);
 std::uint16_t v_reg908 = m_dib8000_readWord(v_state,908);
 {
-auto switch30 = v_no;
+auto switch31 = v_no;
 do {
-if ((switch30 == v_adcSlowOn)) {
+if ((switch31 == v_adcSlowOn)) {
 v_reg908 |= static_cast<std::uint16_t>((Shl<std::int64_t>(1,1)) | (Shl<std::int64_t>(1,0)));
 m_dib8000_writeWord(v_state,908,v_reg908);
 v_reg908 = static_cast<std::uint16_t>(v_reg908 & ~(Shl<std::uint16_t>(1,1)));
 }
-else if ((switch30 == v_adcSlowOff)) {
+else if ((switch31 == v_adcSlowOff)) {
 v_reg908 |= static_cast<std::uint16_t>((Shl<std::int64_t>(1,1)) | (Shl<std::int64_t>(1,0)));
 }
-else if ((switch30 == v_adcOn)) {
+else if ((switch31 == v_adcOn)) {
 v_reg907 &= 0x0fff;
 v_reg908 &= 0x0003;
 }
-else if ((switch30 == v_adcOff)) {
+else if ((switch31 == v_adcOff)) {
 v_reg907 = static_cast<std::uint16_t>((Shl<std::int64_t>(1,13)) | (Shl<std::int64_t>(1,12)));
 v_reg908 = static_cast<std::uint16_t>((static_cast<std::int64_t>((static_cast<std::int64_t>((static_cast<std::int64_t>((Shl<std::int64_t>(1,6)) | (Shl<std::int64_t>(1,5)))) | (Shl<std::int64_t>(1,4)))) | (Shl<std::int64_t>(1,3)))) | (Shl<std::int64_t>(1,1)));
 }
-else if ((switch30 == v_adcVBGEnable)) {
+else if ((switch31 == v_adcVBGEnable)) {
 v_reg907 = static_cast<std::uint16_t>(v_reg907 & ~(Shl<std::uint16_t>(1,15)));
 }
-else if ((switch30 == v_adcVBGDisable)) {
+else if ((switch31 == v_adcVBGDisable)) {
 v_reg907 |= Shl<std::uint16_t>(1,15);
 }
 } while(false); }
@@ -2974,9 +3047,9 @@ if ((((v_state)->v_failure)->v_err != nullptr))
 return {0,((v_state)->v_failure)->v_err};
 }
 {
-auto switch31 = v_value;
+auto switch32 = v_value;
 do {
-if ((switch31 == 0x8000) || (switch31 == 0x8001) || (switch31 == 0x8002) || (switch31 == 0x8090)) {
+if ((switch32 == 0x8000) || (switch32 == 0x8001) || (switch32 == 0x8002) || (switch32 == 0x8090)) {
 return {v_value,nullptr};
 }
 } while(false); }
@@ -2992,9 +3065,9 @@ m_dib8000_readUncBlocks(v_state);
 // reset is dib8000_reset.
 Error m_dib8000_reset(T_dib8000* v_state)
 {
-auto tmp32 = m_dib8000_identify(v_state);
-std::uint16_t v_revision = std::get<0>(tmp32);
-Error v_err = std::get<1>(tmp32);
+auto tmp33 = m_dib8000_identify(v_state);
+std::uint16_t v_revision = std::get<0>(tmp33);
+Error v_err = std::get<1>(tmp33);
 if ((v_err != nullptr))
 {
 return v_err;
@@ -3094,9 +3167,9 @@ return nullptr;
 }
 (v_state)->v_currentBand = v_band;
 T_agcConfig* v_agc{};
-{ auto&& range33 = ((v_state)->v_cfg).v_agc;
-for (std::int64_t index33=0; index33<Len(range33); ++index33) {
-auto v_i = index33;
+{ auto&& range34 = ((v_state)->v_cfg).v_agc;
+for (std::int64_t index34=0; index34<Len(range34); ++index34) {
+auto v_i = index34;
 if ((static_cast<std::uint8_t>(((At(((v_state)->v_cfg).v_agc,v_i)).v_bandCaps) & (v_band)) != 0))
 {
 v_agc = (&At(((v_state)->v_cfg).v_agc,v_i));
@@ -3167,9 +3240,9 @@ std::int64_t m_dib8000_agcStartup(T_dib8000* v_state)
 {
 std::int64_t v_ret = 0;
 {
-auto switch34 = (v_state)->v_tuneState;
+auto switch35 = (v_state)->v_tuneState;
 do {
-if ((switch34 == v_agcStart)) {
+if ((switch35 == v_agcStart)) {
 m_dib8000_setADCState(v_state,v_adcOn);
 if ((m_dib8000_setAGCConfig(v_state,v_bandOfFrequency(static_cast<std::uint32_t>((((v_state)->v_channel)->v_frequency) / (1000)))) != nullptr))
 {
@@ -3180,7 +3253,7 @@ break;
 v_ret = 70;
 (v_state)->v_tuneState = v_agcStep0;
 }
-else if ((switch34 == v_agcStep0)) {
+else if ((switch35 == v_agcStep0)) {
 if (((v_state)->v_agcControl != nullptr))
 {
 (v_state)->v_agcControl(1);
@@ -3189,11 +3262,11 @@ m_dib8000_restartAGC(v_state);
 v_ret = 50;
 (v_state)->v_tuneState = v_agcStep1;
 }
-else if ((switch34 == v_agcStep1)) {
+else if ((switch35 == v_agcStep1)) {
 v_ret = 70;
 (v_state)->v_tuneState = v_agcStep2;
 }
-else if ((switch34 == v_agcStep2)) {
+else if ((switch35 == v_agcStep2)) {
 m_dib8000_agcSoftSplit(v_state);
 if (((v_state)->v_agcControl != nullptr))
 {
@@ -3220,15 +3293,15 @@ m_dib8000_writeWord(v_state,30,static_cast<std::uint16_t>(static_cast<std::uint3
 std::uint32_t m_dib8000_ctrlTimf(T_dib8000* v_state,std::uint8_t v_op,std::uint32_t v_timf)
 {
 {
-auto switch35 = v_op;
+auto switch36 = v_op;
 do {
-if ((switch35 == v_timfSet)) {
+if ((switch36 == v_timfSet)) {
 (v_state)->v_timf = v_timf;
 }
-else if ((switch35 == v_timfUpdate)) {
+else if ((switch36 == v_timfUpdate)) {
 m_dib8000_updateTimf(v_state);
 }
-else if ((switch35 == v_timfGet)) {
+else if ((switch36 == v_timfGet)) {
 }
 } while(false); }
 m_dib8000_setBandwidth(v_state,6000);
@@ -3262,8 +3335,8 @@ Error m_dib8000_initialize(T_dib8000* v_state)
 {
 (v_state)->v_timfDefault = (((v_state)->v_cfg).v_pll)->v_timf;
 {
-auto tmp36 = m_dib8000_identify(v_state);
-Error v_err = std::get<1>(tmp36);
+auto tmp37 = m_dib8000_identify(v_state);
+Error v_err = std::get<1>(tmp37);
 if ((v_err != nullptr))
 {
 return v_err;
@@ -3287,9 +3360,9 @@ return ((v_state)->v_failure)->v_err;
 void m_channel_clear(T_channel* v_c)
 {
 (*v_c) = [&]() { T_channel value{}; value.v_deliverySystem = v_systemISDBT; value.v_transmissionMode = v_transmissionAuto; value.v_guardInterval = v_guardAuto; value.v_inversion = v_inversionAuto; value.v_isdbtLayerEnabled = 7; return value; }();
-{ auto&& range37 = (v_c)->v_layer;
-for (std::int64_t index37=0; index37<Len(range37); ++index37) {
-auto v_i = index37;
+{ auto&& range38 = (v_c)->v_layer;
+for (std::int64_t index38=0; index38<Len(range38); ++index38) {
+auto v_i = index38;
 At((v_c)->v_layer,v_i) = [&]() { T_layerParameters value{}; value.v_fec = v_fecAuto; value.v_modulation = v_modulationQAMAuto; return value; }();
 }}
 }
@@ -3302,15 +3375,15 @@ T_layerParameters* v_layer = (&At((v_c)->v_layer,v_layerIndex));
 std::uint16_t v_constellation{};
 std::uint16_t v_cr{};
 {
-auto switch38 = (v_layer)->v_modulation;
+auto switch39 = (v_layer)->v_modulation;
 do {
-if ((switch38 == v_modulationDQPSK)) {
+if ((switch39 == v_modulationDQPSK)) {
 v_constellation = 0;
 }
-else if ((switch38 == v_modulationQPSK)) {
+else if ((switch39 == v_modulationQPSK)) {
 v_constellation = 1;
 }
-else if ((switch38 == v_modulationQAM16)) {
+else if ((switch39 == v_modulationQAM16)) {
 v_constellation = 2;
 }
 else
@@ -3319,18 +3392,18 @@ v_constellation = 3;
 }
 } while(false); }
 {
-auto switch39 = (v_layer)->v_fec;
+auto switch40 = (v_layer)->v_fec;
 do {
-if ((switch39 == v_fec1_2)) {
+if ((switch40 == v_fec1_2)) {
 v_cr = 1;
 }
-else if ((switch39 == v_fec2_3)) {
+else if ((switch40 == v_fec2_3)) {
 v_cr = 2;
 }
-else if ((switch39 == v_fec3_4)) {
+else if ((switch40 == v_fec3_4)) {
 v_cr = 3;
 }
-else if ((switch39 == v_fec5_6)) {
+else if ((switch40 == v_fec5_6)) {
 v_cr = 5;
 }
 else
@@ -3347,15 +3420,15 @@ m_dib8000_writeWord(v_state,Add<std::uint16_t>(2,static_cast<std::uint16_t>(v_la
 if (((v_layer)->v_segmentCount > 0))
 {
 {
-auto switch40 = v_maxConstellation;
+auto switch41 = v_maxConstellation;
 do {
-if ((switch40 == v_modulationDQPSK) || (switch40 == v_modulationQPSK)) {
+if ((switch41 == v_modulationDQPSK) || (switch41 == v_modulationQPSK)) {
 if ((((v_layer)->v_modulation == v_modulationQAM16) || ((v_layer)->v_modulation == v_modulationQAM64)))
 {
 v_maxConstellation = (v_layer)->v_modulation;
 }
 }
-else if ((switch40 == v_modulationQAM16)) {
+else if ((switch41 == v_modulationQAM16)) {
 if (((v_layer)->v_modulation == v_modulationQAM64))
 {
 v_maxConstellation = (v_layer)->v_modulation;
@@ -3371,13 +3444,13 @@ std::uint16_t m_dib8000_adpFineTune(T_dib8000* v_state,std::int64_t v_maxConstel
 std::uint16_t v_anaGain{};
 std::array<std::uint16_t, 4>* v_adp{};
 {
-auto switch41 = v_maxConstellation;
+auto switch42 = v_maxConstellation;
 do {
-if ((switch41 == v_modulationQAM64)) {
+if ((switch42 == v_modulationQAM64)) {
 v_anaGain = 0x7;
 v_adp = (&v_adpQ64);
 }
-else if ((switch41 == v_modulationQAM16)) {
+else if ((switch42 == v_modulationQAM16)) {
 v_anaGain = 0x7;
 v_adp = (&v_adpQ16);
 }
@@ -3600,15 +3673,15 @@ std::uint32_t v_value{};
 for (std::uint16_t v_register = static_cast<std::uint16_t>(11);(v_register < 16);v_register += 2)
 {
 {
-auto switch42 = v_register;
+auto switch43 = v_register;
 do {
-if ((switch42 == 11)) {
+if ((switch43 == 11)) {
 v_value = Mul<std::uint32_t>(v_internal,v_wait0ms);
 }
-else if ((switch42 == 13)) {
+else if ((switch43 == 13)) {
 v_value = Mul<std::uint32_t>(v_internal,v_wait1ms);
 }
-else if ((switch42 == 15)) {
+else if ((switch43 == 15)) {
 v_value = Mul<std::uint32_t>(v_internal,v_wait2ms);
 }
 } while(false); }
@@ -3820,12 +3893,12 @@ std::uint32_t m_dib8000_getSymbolDuration(T_dib8000* v_state)
 T_channel* v_c = (v_state)->v_channel;
 std::int64_t v_i{};
 {
-auto switch43 = (v_c)->v_transmissionMode;
+auto switch44 = (v_c)->v_transmissionMode;
 do {
-if ((switch43 == v_transmission2K)) {
+if ((switch44 == v_transmission2K)) {
 v_i = 0;
 }
-else if ((switch43 == v_transmission4K)) {
+else if ((switch44 == v_transmission4K)) {
 v_i = 2;
 }
 else
@@ -3841,13 +3914,13 @@ void m_dib8000_setISDBTLoopParams(T_dib8000* v_state,std::int64_t v_loopStep)
 std::uint16_t v_reg32{};
 std::uint16_t v_reg37{};
 {
-auto switch44 = v_loopStep;
+auto switch45 = v_loopStep;
 do {
-if ((switch44 == v_loopTune1)) {
+if ((switch45 == v_loopTune1)) {
 v_reg32 = static_cast<std::uint16_t>((static_cast<std::uint16_t>((Shl<std::uint16_t>((Sub<std::uint16_t>(9,(v_state)->v_mode)),12)) | (Shl<std::uint16_t>(6,8)))) | (0x80));
 v_reg37 = static_cast<std::uint16_t>((static_cast<std::uint16_t>((Shl<std::int64_t>(3,5)) | (Shl<std::int64_t>(0,4)))) | ((Sub<std::uint16_t>(8,(v_state)->v_mode))));
 }
-else if ((switch44 == v_loopTune2)) {
+else if ((switch45 == v_loopTune2)) {
 v_reg32 = static_cast<std::uint16_t>((static_cast<std::uint16_t>((Shl<std::uint16_t>((Sub<std::uint16_t>(11,(v_state)->v_mode)),12)) | (Shl<std::uint16_t>(6,8)))) | (0x80));
 v_reg37 = static_cast<std::uint16_t>((Shl<std::uint16_t>((Add<std::uint16_t>(5,(v_state)->v_mode)),5)) | ((Sub<std::uint16_t>(10,(v_state)->v_mode))));
 }
@@ -3867,12 +3940,12 @@ void m_dib8000_setSyncWait(T_dib8000* v_state)
 T_channel* v_c = (v_state)->v_channel;
 std::uint16_t v_syncWait{};
 {
-auto switch45 = (v_c)->v_transmissionMode;
+auto switch46 = (v_c)->v_transmissionMode;
 do {
-if ((switch45 == v_transmission8K)) {
+if ((switch46 == v_transmission8K)) {
 v_syncWait = 256;
 }
-else if ((switch45 == v_transmission4K)) {
+else if ((switch46 == v_transmission4K)) {
 v_syncWait = 128;
 }
 else
@@ -3960,9 +4033,9 @@ std::uint16_t v_deeperInterleaver{};
 std::int64_t v_ret = 1;
 Time v_now = (v_state)->v_now();
 {
-auto switch46 = (v_state)->v_tuneState;
+auto switch47 = (v_state)->v_tuneState;
 do {
-if ((switch46 == v_demodStart)) {
+if ((switch47 == v_demodStart)) {
 m_dib8000_resetStats(v_state);
 (v_state)->v_status = v_statusTunePending;
 if (v_isManualMode(v_c))
@@ -3983,29 +4056,31 @@ if (((v_state)->v_channelParametersSet == 0))
 (v_state)->v_foundNFFT = v_transmissionAuto;
 (v_state)->v_foundGuard = v_guardAuto;
 (v_state)->v_tuneState = v_demodSearchNext;
+(v_state)->v_searched = true;
 }
 else
 {
 (v_state)->v_autosearchState = v_autosearchDone;
 (v_state)->v_tuneState = v_demodStep3;
+(v_state)->v_searched = false;
 }
 (v_state)->v_symbolDuration = static_cast<std::uint8_t>(m_dib8000_getSymbolDuration(v_state));
 }
-else if ((switch46 == v_demodSearchNext)) {
+else if ((switch47 == v_demodSearchNext)) {
 m_dib8000_autosearchStart(v_state);
 v_ret = 15;
 (v_state)->v_tuneState = v_demodStep1;
 }
-else if ((switch46 == v_demodStep1)) {
+else if ((switch47 == v_demodStep1)) {
 {
-auto switch47 = m_dib8000_autosearchIRQ(v_state);
+auto switch48 = m_dib8000_autosearchIRQ(v_state);
 do {
-if ((switch47 == 1)) {
+if ((switch48 == 1)) {
 (v_state)->v_status = v_statusTuneFailed;
 (v_state)->v_autosearchState = v_autosearchDone;
 (v_state)->v_tuneState = v_demodStop;
 }
-else if ((switch47 == 2)) {
+else if ((switch48 == 2)) {
 (v_state)->v_status = v_statusFFTSuccess;
 (v_state)->v_tuneState = v_demodStep3;
 if (((v_state)->v_autosearchState == v_autosearchSearchingGuard))
@@ -4017,16 +4092,16 @@ else
 (v_state)->v_autosearchState = v_autosearchDone;
 }
 }
-else if ((switch47 == 3)) {
+else if ((switch48 == 3)) {
 (v_state)->v_tuneState = v_demodStep2;
 }
 } while(false); }
 }
-else if ((switch46 == v_demodStep2)) {
+else if ((switch47 == v_demodStep2)) {
 {
-auto switch48 = (v_state)->v_autosearchState;
+auto switch49 = (v_state)->v_autosearchState;
 do {
-if ((switch48 == v_autosearchSearchingFFT)) {
+if ((switch49 == v_autosearchSearchingFFT)) {
 std::array<std::uint32_t, 4> v_corm{};
 At(v_corm,2) = [&]() { auto left = Shl<std::uint32_t>(static_cast<std::uint32_t>(m_dib8000_readWord(v_state,594)),16); auto right = static_cast<std::uint32_t>(m_dib8000_readWord(v_state,595)); return static_cast<std::uint32_t>((left) | (right)); }();
 At(v_corm,1) = [&]() { auto left = Shl<std::uint32_t>(static_cast<std::uint32_t>(m_dib8000_readWord(v_state,596)),16); auto right = static_cast<std::uint32_t>(m_dib8000_readWord(v_state,597)); return static_cast<std::uint32_t>((left) | (right)); }();
@@ -4040,12 +4115,12 @@ v_maxValue = v_findIndex;
 }
 }
 {
-auto switch49 = v_maxValue;
+auto switch50 = v_maxValue;
 do {
-if ((switch49 == 0)) {
+if ((switch50 == 0)) {
 (v_state)->v_foundNFFT = v_transmission2K;
 }
-else if ((switch49 == 1)) {
+else if ((switch50 == 1)) {
 (v_state)->v_foundNFFT = v_transmission4K;
 }
 else
@@ -4057,7 +4132,7 @@ else
 (v_state)->v_autosearchState = v_autosearchSearchingGuard;
 v_ret = 10;
 }
-else if ((switch48 == v_autosearchSearchingGuard)) {
+else if ((switch49 == v_autosearchSearchingGuard)) {
 (v_state)->v_foundGuard = static_cast<std::int64_t>(static_cast<std::uint16_t>((m_dib8000_readWord(v_state,570)) & (0x3)));
 (v_state)->v_tuneState = v_demodStep3;
 }
@@ -4069,20 +4144,23 @@ else
 }
 } while(false); }
 }
-else if ((switch46 == v_demodStep3)) {
+else if ((switch47 == v_demodStep3)) {
 m_dib8000_setISDBTLoopParams(v_state,v_loopTune1);
 m_dib8000_setISDBTCommonChannel(v_state,0,false);
 (v_state)->v_tuneState = v_demodStep4;
 }
-else if ((switch46 == v_demodStep4)) {
+else if ((switch47 == v_demodStep4)) {
+if ((((v_state)->v_channelParametersSet == 0) || static_cast<bool>(!((v_state)->v_searched))))
+{
 m_dib8000_demodRestart(v_state);
+}
 m_dib8000_setSyncWait(v_state);
 m_dib8000_setDiversityIn(v_state,(v_state)->v_diversityOnOff);
 v_locks = static_cast<std::uint16_t>(((Shr<std::uint16_t>(m_dib8000_readWord(v_state,180),6))) & (0x3f));
 (v_state)->v_timeout = m_dib8000_getTimeout(v_state,Mul<std::uint32_t>(2,static_cast<std::uint32_t>(v_locks)),true);
 (v_state)->v_tuneState = v_demodStep5;
 }
-else if ((switch46 == v_demodStep5)) {
+else if ((switch47 == v_demodStep5)) {
 v_locks = m_dib8000_readLock(v_state);
 if ((static_cast<std::uint16_t>((v_locks) & ((Shl<std::uint16_t>(0x3,11)))) != 0))
 {
@@ -4103,13 +4181,13 @@ if (v_now.After((v_state)->v_timeout))
 (v_state)->v_tuneState = v_demodStep6;
 }
 }
-else if ((switch46 == v_demodStep6)) {
+else if ((switch47 == v_demodStep6)) {
 m_dib8000_viterbiState(v_state,true);
 m_dib8000_setISDBTLoopParams(v_state,v_loopTune2);
 (v_state)->v_tuneState = v_demodStop;
 (v_state)->v_status = v_statusTuneFailed;
 }
-else if ((switch46 == v_demodStep7)) {
+else if ((switch47 == v_demodStep7)) {
 v_locks = m_dib8000_readLock(v_state);
 if ((static_cast<std::uint16_t>((v_locks) & ((Shl<std::uint16_t>(1,10)))) != 0))
 {
@@ -4122,13 +4200,13 @@ if (v_now.After((v_state)->v_timeout))
 (v_state)->v_tuneState = v_demodStep6;
 }
 }
-else if ((switch46 == v_demodStep8)) {
+else if ((switch47 == v_demodStep8)) {
 m_dib8000_viterbiState(v_state,true);
 m_dib8000_setISDBTLoopParams(v_state,v_loopTune2);
 (v_state)->v_tuneState = v_demodStep9;
 (v_state)->v_status = v_statusLocked;
 }
-else if ((switch46 == v_demodStep9)) {
+else if ((switch47 == v_demodStep9)) {
 if ((static_cast<std::uint16_t>(((Shr<std::uint16_t>(m_dib8000_readWord(v_state,1291),9))) & (0x1)) != 0))
 {
 for (std::int64_t v_i = 0;(v_i < 3);v_i++)
@@ -4143,12 +4221,12 @@ v_deeperInterleaver = static_cast<std::uint16_t>((At((v_c)->v_layer,0)).v_interl
 }
 }
 {
-auto switch50 = v_deeperInterleaver;
+auto switch51 = v_deeperInterleaver;
 do {
-if ((switch50 == 0)) {
+if ((switch51 == 0)) {
 v_locks = 2;
 }
-else if ((switch50 == 3)) {
+else if ((switch51 == 3)) {
 v_locks = 8;
 }
 else
@@ -4168,7 +4246,7 @@ else
 (v_state)->v_tuneState = v_demodStop;
 }
 }
-else if ((switch46 == v_demodStep10)) {
+else if ((switch47 == v_demodStep10)) {
 v_locks = m_dib8000_readLock(v_state);
 if ((static_cast<std::uint16_t>((v_locks) & ((Shl<std::uint16_t>(1,(Sub<std::uint8_t>(7,(v_state)->v_longestIntlvLayer)))))) != 0))
 {
@@ -4215,15 +4293,30 @@ if ((static_cast<std::int64_t>((m_dib8000_readStatus(v_state)) & (v_feHasSync)) 
 return ;
 }
 m_dib8000_readWord(v_state,508);
-std::uint16_t v_val = m_dib8000_readWord(v_state,570);
+T_tmccRegisters v_registers{};
+(v_registers).v_mode = m_dib8000_readWord(v_state,570);
+(v_registers).v_partial = m_dib8000_readWord(v_state,505);
+for (std::uint16_t v_i = static_cast<std::uint16_t>(0);(v_i < 3);v_i++)
+{
+At((v_registers).v_segments,v_i) = m_dib8000_readWord(v_state,Add<std::uint16_t>(493,v_i));
+At((v_registers).v_interleaving,v_i) = m_dib8000_readWord(v_state,Add<std::uint16_t>(499,v_i));
+At((v_registers).v_rate,v_i) = m_dib8000_readWord(v_state,Add<std::uint16_t>(481,v_i));
+At((v_registers).v_modulation,v_i) = m_dib8000_readWord(v_state,Add<std::uint16_t>(487,v_i));
+}
+m_tmccRegisters_apply(v_registers,v_c);
+}
+// apply sets the channel's parameters from the registers.
+void m_tmccRegisters_apply(T_tmccRegisters v_registers,T_channel* v_c)
+{
+std::uint16_t v_val = (v_registers).v_mode;
 (v_c)->v_inversion = static_cast<std::int64_t>(Shr<std::uint16_t>((static_cast<std::uint16_t>((v_val) & (0x40))),6));
 {
-auto switch51 = Shr<std::uint16_t>((static_cast<std::uint16_t>((v_val) & (0x30))),4);
+auto switch52 = Shr<std::uint16_t>((static_cast<std::uint16_t>((v_val) & (0x30))),4);
 do {
-if ((switch51 == 1)) {
+if ((switch52 == 1)) {
 (v_c)->v_transmissionMode = v_transmission2K;
 }
-else if ((switch51 == 2)) {
+else if ((switch52 == 2)) {
 (v_c)->v_transmissionMode = v_transmission4K;
 }
 else
@@ -4232,47 +4325,44 @@ else
 }
 } while(false); }
 {
-auto switch52 = static_cast<std::uint16_t>((v_val) & (0x3));
+auto switch53 = static_cast<std::uint16_t>((v_val) & (0x3));
 do {
-if ((switch52 == 0)) {
+if ((switch53 == 0)) {
 (v_c)->v_guardInterval = v_guard1_32;
 }
-else if ((switch52 == 1)) {
+else if ((switch53 == 1)) {
 (v_c)->v_guardInterval = v_guard1_16;
 }
-else if ((switch52 == 2)) {
+else if ((switch53 == 2)) {
 (v_c)->v_guardInterval = v_guard1_8;
 }
-else if ((switch52 == 3)) {
+else if ((switch53 == 3)) {
 (v_c)->v_guardInterval = v_guard1_4;
 }
 } while(false); }
-v_val = m_dib8000_readWord(v_state,505);
-(v_c)->v_isdbtPartialReception = static_cast<std::uint8_t>(static_cast<std::uint16_t>((v_val) & (1)));
-for (std::uint16_t v_i = static_cast<std::uint16_t>(0);(v_i < 3);v_i++)
+(v_c)->v_isdbtPartialReception = static_cast<std::uint8_t>(static_cast<std::uint16_t>(((v_registers).v_partial) & (1)));
+for (std::int64_t v_i = 0;(v_i < 3);v_i++)
 {
-v_val = static_cast<std::uint16_t>((m_dib8000_readWord(v_state,Add<std::uint16_t>(493,v_i))) & (0x0f));
-(At((v_c)->v_layer,v_i)).v_segmentCount = static_cast<std::uint8_t>(v_val);
-v_val = static_cast<std::uint16_t>((m_dib8000_readWord(v_state,Add<std::uint16_t>(499,v_i))) & (0x3));
+(At((v_c)->v_layer,v_i)).v_segmentCount = static_cast<std::uint8_t>(static_cast<std::uint16_t>((At((v_registers).v_segments,v_i)) & (0x0f)));
+v_val = static_cast<std::uint16_t>((At((v_registers).v_interleaving,v_i)) & (0x3));
 if ((v_val == 3))
 {
 v_val = 4;
 }
 (At((v_c)->v_layer,v_i)).v_interleaving = static_cast<std::uint8_t>(v_val);
-v_val = m_dib8000_readWord(v_state,Add<std::uint16_t>(481,v_i));
 {
-auto switch53 = static_cast<std::uint16_t>((v_val) & (0x7));
+auto switch54 = static_cast<std::uint16_t>((At((v_registers).v_rate,v_i)) & (0x7));
 do {
-if ((switch53 == 1)) {
+if ((switch54 == 1)) {
 (At((v_c)->v_layer,v_i)).v_fec = v_fec1_2;
 }
-else if ((switch53 == 2)) {
+else if ((switch54 == 2)) {
 (At((v_c)->v_layer,v_i)).v_fec = v_fec2_3;
 }
-else if ((switch53 == 3)) {
+else if ((switch54 == 3)) {
 (At((v_c)->v_layer,v_i)).v_fec = v_fec3_4;
 }
-else if ((switch53 == 5)) {
+else if ((switch54 == 5)) {
 (At((v_c)->v_layer,v_i)).v_fec = v_fec5_6;
 }
 else
@@ -4280,17 +4370,16 @@ else
 (At((v_c)->v_layer,v_i)).v_fec = v_fec7_8;
 }
 } while(false); }
-v_val = m_dib8000_readWord(v_state,Add<std::uint16_t>(487,v_i));
 {
-auto switch54 = static_cast<std::uint16_t>((v_val) & (0x3));
+auto switch55 = static_cast<std::uint16_t>((At((v_registers).v_modulation,v_i)) & (0x3));
 do {
-if ((switch54 == 0)) {
+if ((switch55 == 0)) {
 (At((v_c)->v_layer,v_i)).v_modulation = v_modulationDQPSK;
 }
-else if ((switch54 == 1)) {
+else if ((switch55 == 1)) {
 (At((v_c)->v_layer,v_i)).v_modulation = v_modulationQPSK;
 }
-else if ((switch54 == 2)) {
+else if ((switch55 == 2)) {
 (At((v_c)->v_layer,v_i)).v_modulation = v_modulationQAM16;
 }
 else
@@ -4299,6 +4388,22 @@ else
 }
 } while(false); }
 }
+}
+// tmccFromWords unpacks the registers as mb86h47.TMCC packs them.
+T_tmccRegisters v_tmccFromWords(std::array<std::uint32_t, 2> v_words)
+{
+T_tmccRegisters v_registers = [&]() { T_tmccRegisters value{}; value.v_mode = static_cast<std::uint16_t>(static_cast<std::uint32_t>((At(v_words,0)) & (0x73))); value.v_partial = static_cast<std::uint16_t>(static_cast<std::uint32_t>((Shr<std::uint32_t>(At(v_words,0),8)) & (1))); return value; }();
+std::array<std::uint32_t, 3> v_layers = std::array<std::uint32_t, 3>{{Shr<std::uint32_t>(At(v_words,0),12),At(v_words,1),Shr<std::uint32_t>(At(v_words,1),16)}};
+{ auto&& range56 = v_layers;
+for (std::int64_t index56=0; index56<Len(range56); ++index56) {
+auto v_i = index56;
+auto v_layer = range56[index56];
+At((v_registers).v_segments,v_i) = static_cast<std::uint16_t>(static_cast<std::uint32_t>((v_layer) & (0xf)));
+At((v_registers).v_interleaving,v_i) = static_cast<std::uint16_t>(static_cast<std::uint32_t>((Shr<std::uint32_t>(v_layer,4)) & (3)));
+At((v_registers).v_rate,v_i) = static_cast<std::uint16_t>(static_cast<std::uint32_t>((Shr<std::uint32_t>(v_layer,6)) & (7)));
+At((v_registers).v_modulation,v_i) = static_cast<std::uint16_t>(static_cast<std::uint32_t>((Shr<std::uint32_t>(v_layer,9)) & (3)));
+}}
+return v_registers;
 }
 // setFrontend is dib8000_set_frontend for a single frontend: tune the tuner,
 // start the AGC, then run the demodulator's state machine to the end, waiting
@@ -4342,7 +4447,7 @@ if (((v_wait == 0) || (((v_state)->v_failure)->v_err != nullptr)))
 {
 break;
 }
-v_wait = static_cast<std::int64_t>((Mul<std::int64_t>(10,(Add<std::int64_t>(v_wait,99)))) / (100));
+v_wait = static_cast<std::int64_t>(((Add<std::int64_t>(v_wait,9))) / (10));
 m_dib8000_msleep(v_state,v_wait);
 if (((v_state)->v_tuneState == v_agcStop))
 {

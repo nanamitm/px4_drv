@@ -93,6 +93,12 @@ struct Bus {
     virtual ~Bus()=default;
     virtual std::tuple<Slice<std::uint8_t>,Error> WriteRead(std::uint8_t address,Slice<std::uint8_t> write,std::int64_t length)=0;
     virtual Error Wait(std::int64_t duration)=0;
+    // 任意の I2C バスでも元の探索を使えるよう、ジョブ未対応は明示的に返す。
+    using MemoryResult = std::tuple<std::array<std::uint32_t,2>,bool,bool,Error>;
+    virtual MemoryResult RecallTMCC(std::uint32_t) { return {{},false,false,nullptr}; }
+    virtual MemoryResult RememberTMCC(std::uint8_t,std::uint32_t) { return {{},false,false,nullptr}; }
+    virtual std::tuple<std::int64_t,std::int64_t,bool,Error> Captrim(std::uint8_t,std::uint16_t,
+        std::uint32_t,std::int64_t,std::int64_t,std::int64_t,std::int64_t,std::int64_t) { return {0,0,false,nullptr}; }
     Error Write(std::uint8_t address,Slice<std::uint8_t> write){return std::get<1>(WriteRead(address,write,0));}
 };
 inline auto I2cWriteRead(Bus* bus,std::uint8_t address,Slice<std::uint8_t> write,std::int64_t length){return bus->WriteRead(address,write,length);}

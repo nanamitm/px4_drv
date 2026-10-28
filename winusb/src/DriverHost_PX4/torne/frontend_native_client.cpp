@@ -3,6 +3,25 @@
 #include "frontend_wait.hpp"
 
 namespace px4::torne {
+dibnative::Bus::MemoryResult NativeFrontendClient::TMCC(std::uint32_t kind,const std::vector<std::uint32_t>& parameters) {
+    if(auto error=CheckState())return {{},false,true,error};
+    std::array<std::uint32_t,3> results{};
+    const auto result=bus_.RunJob(kind,parameters,0,results,deadline_);
+    if(result!=I2cResult::ok)return {{},false,true,dibnative::MakeError("TMCC job failed",static_cast<unsigned>(result),static_cast<unsigned>(bus_.LastMemoryResult()),bus_.LastSystemError())};
+    if(auto error=CheckState())return {{},false,true,error};
+    return {{results[1],results[2]},results[0]!=0,true,nullptr};
+}
+dibnative::Bus::MemoryResult NativeFrontendClient::RecallTMCC(std::uint32_t key) {return TMCC(3,{key});}
+dibnative::Bus::MemoryResult NativeFrontendClient::RememberTMCC(std::uint8_t address,std::uint32_t key) {return TMCC(4,{address,key});}
+std::tuple<std::int64_t,std::int64_t,bool,dibnative::Error> NativeFrontendClient::Captrim(std::uint8_t address,std::uint16_t lo4,
+    std::uint32_t key,std::int64_t start,std::int64_t step,std::int64_t target,std::int64_t write,std::int64_t read) {
+    if(auto error=CheckState())return {0,0,true,error};
+    int best=0,diff=0;
+    const auto result=bus_.Captrim(address,lo4,key,static_cast<int>(start),static_cast<int>(step),static_cast<int>(target),write,read,best,diff,deadline_);
+    if(result!=I2cResult::ok)return {0,0,true,dibnative::MakeError("Captrim job failed",static_cast<unsigned>(result),static_cast<unsigned>(bus_.LastMemoryResult()),bus_.LastSystemError())};
+    if(auto error=CheckState())return {0,0,true,error};
+    return {best,diff,true,nullptr};
+}
 dibnative::Error NativeFrontendClient::CheckState() const {
     const auto state=WaitForSingleObject(cancel_,0);
     if(state!=WAIT_TIMEOUT)return dibnative::MakeError("native frontend cancelled/wait error",state==WAIT_FAILED?GetLastError():ERROR_OPERATION_ABORTED);

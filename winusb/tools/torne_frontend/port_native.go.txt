@@ -12,6 +12,8 @@ import (
  "go/token"
  "go/types"
  "os"
+ "os/exec"
+ "io"
  "path/filepath"
  "sort"
  "strconv"
@@ -149,7 +151,7 @@ func stmt(s ast.Stmt){
  default:panic(fmt.Sprintf("unsupported stmt %T %s",s,fs.Position(s.Pos())))
  }
 }
-func skip(f *ast.FuncDecl)bool{if f.Recv==nil{return f.Name.Name=="New"};t:=base(info.TypeOf(f.Recv.List[0].Type));return t=="tunerBus"||t=="Demod"&&(f.Name.Name=="flush"||f.Name.Name=="setTiming")||t=="dib8000"&&f.Name.Name=="modifyWord"}
+func skip(f *ast.FuncDecl)bool{if f.Recv==nil{return f.Name.Name=="New"};t:=base(info.TypeOf(f.Recv.List[0].Type));return t=="tunerBus"||t=="Demod"&&(f.Name.Name=="flush"||f.Name.Name=="setTiming"||f.Name.Name=="setFrontend")||t=="tuner"&&f.Name.Name=="captrimOnMaster"||t=="dib8000"&&f.Name.Name=="modifyWord"}
 func signature(f *ast.FuncDecl)string{
  sig:=info.Defs[f.Name].Type().(*types.Signature);name:=id(f.Name.Name);var a []string
  if sig.Recv()!=nil{name=method(info.Defs[f.Name].(*types.Func));a=append(a,typ(sig.Recv().Type())+" "+id(f.Recv.List[0].Names[0].Name))}
@@ -166,15 +168,18 @@ func (i localImporter)Import(path string)(*types.Package,error){if path=="github
 func main(){
  if len(os.Args)!=3{panic("source-dir output")};dir:=os.Args[1];pkgs,err:=parser.ParseDir(fs,dir,func(f os.FileInfo)bool{return strings.HasSuffix(f.Name(),".go")&&!strings.HasSuffix(f.Name(),"_test.go")},parser.ParseComments);if err!=nil{panic(err)}
  var files []*ast.File;var paths []string;for p:=range pkgs["dib8096"].Files{paths=append(paths,p)};sort.Strings(paths);for _,p:=range paths{files=append(files,pkgs["dib8096"].Files[p])}
- i2cf,err:=parser.ParseFile(fs,filepath.Join(dir,"../../../../pkg/i2c/i2c.go"),nil,0);if err!=nil{panic(err)};fallback:=importer.Default();cfg:=types.Config{Importer:fallback};i2cp,err:=cfg.Check("github.com/Till0196/coax/pkg/i2c",fs,[]*ast.File{i2cf},nil);if err!=nil{panic(err)};cfg.Importer=localImporter{fallback,i2cp};pkg,err:=cfg.Check("dib8096",fs,files,info);if err!=nil{panic(err)}
+ i2cf,err:=parser.ParseFile(fs,filepath.Join(dir,"../../../../pkg/i2c/i2c.go"),nil,0);if err!=nil{panic(err)};fallback:=importer.ForCompiler(fs,"gc",func(path string)(io.ReadCloser,error){
+ data,err:=exec.Command("go","list","-export","-f","{{.Export}}",path).Output();if err!=nil{return nil,err};return os.Open(strings.TrimSpace(string(data)))
+ });cfg:=types.Config{Importer:fallback};i2cp,err:=cfg.Check("github.com/Till0196/coax/pkg/i2c",fs,[]*ast.File{i2cf},nil);if err!=nil{panic(err)};cfg.Importer=localImporter{fallback,i2cp};pkg,err:=cfg.Check("dib8096",fs,files,info);if err!=nil{panic(err)}
  line("// SPDX-License-Identifier: GPL-2.0-only\n// Copyright 2026 Till0196; Copyright (C) 2005-9 DiBcom, SA et al.\n// Generated C++ port of the pinned local coax dib8096 sources.\n// Regenerate with tools/torne_frontend/port_native.go.txt; do not hand edit.\n#include \"dib8096_native_runtime.hpp\"\nnamespace px4::torne::dibnative {")
- for _,name:=range pkg.Scope().Names(){o:=pkg.Scope().Lookup(name);if tn,ok:=o.(*types.TypeName);ok{if s,ok:=tn.Type().Underlying().(*types.Struct);ok{if name!="tunerBus"{structs[name]=s;line("struct T_"+name+";")}}else{line("using T_"+name+" = "+typ(tn.Type().Underlying())+";")}}}
+ for _,name:=range pkg.Scope().Names(){o:=pkg.Scope().Lookup(name);if tn,ok:=o.(*types.TypeName);ok{if s,ok:=tn.Type().Underlying().(*types.Struct);ok{if name!="tunerBus"{structs[name]=s;line("struct T_"+name+";")}}else if _,isInterface:=tn.Type().Underlying().(*types.Interface);!isInterface{line("using T_"+name+" = "+typ(tn.Type().Underlying())+";")}}}
  // Discover nested and function-local anonymous structures in source order.
  for _,file:=range files{ast.Inspect(file,func(n ast.Node)bool{if e,ok:=n.(ast.Expr);ok{if t:=info.TypeOf(e);t!=nil{switch t.(type){case *types.Struct,*types.Slice,*types.Array:typ(t)}}};return true})}
  for _,name:=range pkg.Scope().Names(){if s:=structs[name];s!=nil{for i:=0;i<s.NumFields();i++{typ(s.Field(i).Type())}}}
  for _,name:=range pkg.Scope().Names(){if c,ok:=pkg.Scope().Lookup(name).(*types.Const);ok{value:=c.Val().ExactString();if c.Val().Kind()==constant.String{value=strconv.Quote(constant.StringVal(c.Val()))};line("constexpr "+typ(c.Type())+" "+id(name)+" = "+value+";")}}
  var names []string;for n:=range structs{names=append(names,n)};sort.Strings(names);for _,n:=range names{emitStruct(n)}
  for _,f:=range files{for _,d:=range f.Decls{if f,ok:=d.(*ast.FuncDecl);ok&&!skip(f){line(signature(f)+";")}}}
+ line("Error m_Demod_setFrontend(T_Demod*, std::uint32_t); void m_tuner_captrimOnMaster(T_tuner*, std::uint16_t);")
  line("void m_dib8000_modifyWord(T_dib8000*, std::uint16_t, std::uint16_t, std::uint16_t);")
  for _,f:=range files{for _,d:=range f.Decls{if g,ok:=d.(*ast.GenDecl);ok&&g.Tok==token.VAR{for _,spec:=range g.Specs{v:=spec.(*ast.ValueSpec);for i,n:=range v.Names{line(typ(info.Defs[n].Type())+" "+id(n.Name)+" = "+expr(v.Values[i])+";")}}}}}
  for _,file:=range files{line("// Source: "+filepath.Base(fs.Position(file.Pos()).Filename));for _,d:=range file.Decls{f,ok:=d.(*ast.FuncDecl);if !ok||skip(f){continue};if f.Doc!=nil{for _,text:=range strings.Split(strings.TrimSpace(f.Doc.Text()),"\n"){line("// "+text)}};line(signature(f));line("{");results=info.Defs[f.Name].Type().(*types.Signature).Results();resultNames=nil;for i:=0;i<results.Len();i++{r:=results.At(i);resultNames=append(resultNames,id(r.Name()));if r.Name()!=""&&r.Name()!="_"{line(typ(r.Type())+" "+id(r.Name())+"{};")}};for _,s:=range f.Body.List{stmt(s)};line("}")}}

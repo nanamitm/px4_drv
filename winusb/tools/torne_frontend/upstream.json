@@ -1,13 +1,13 @@
 {
   "repository": "https://github.com/Till0196/coax",
-  "revision": "2d9f2c263a3b080ecef3a8ede1eb86c6afa48405",
+  "revision": "471328e03942219544e78004e961d8f69d27f46f",
   "sha256": {
-    "internal/coaxd/demod/dib8096/board.go": "a44ce60f0c618c1f0c133af654fe5f55684eaa5423525a5a7ab5441ec74def23",
-    "internal/coaxd/demod/dib8096/dib0090.go": "9d8e398b46e8abf76dd6c1cbc99113c43c851965759ca023d15a72b1065effd9",
-    "internal/coaxd/demod/dib8096/dib8000.go": "0b60fa82b36cc545e02042608618d779e60b63b8912f2ae1dbd3271028fff1f5",
-    "internal/coaxd/demod/dib8096/dib8000_tune.go": "ca3ed96143213d87ff3cc9eb23971abdf386e0a2acdd7a1329c9a9680a1fb8ff",
-    "internal/coaxd/demod/dib8096/dib8096_test.go": "8515cb4cdf671fa2843dbba68c2487e2cde12f851a8d41b1d0deb62ccb7a8392",
-    "internal/coaxd/demod/dib8096/dibx000.go": "d89ec66574d6fd21063b997ef56b17ea230643f39607e7c6c7f72a334a0e488e",
+    "internal/coaxd/demod/dib8096/board.go": "ddf589cdb6562f5007f1b4fb65f538f3ebfc66d372d761f49add246967440bd5",
+    "internal/coaxd/demod/dib8096/dib0090.go": "efd50c476cea94e8cdcc5cf3b4c0e931c4b53f6bd34d8bb7e835b879c3df8d70",
+    "internal/coaxd/demod/dib8096/dib8000.go": "6d9e426dd956b20c6fcd52e89173415e6125e0f6587f0b63a59665c4445b50a4",
+    "internal/coaxd/demod/dib8096/dib8000_tune.go": "fa0d89c33dfc1a586451221ff366850882a0ec9d9e1bbbc4270fd4c676662cb0",
+    "internal/coaxd/demod/dib8096/dib8096_test.go": "fef9d09d073893d67e491b7456dc79df0e589e54b624f3bcad6325590584fc87",
+    "internal/coaxd/demod/dib8096/dibx000.go": "ed934e1863fdef6a5e3dc25e1615b0f06b8b56c2030754138aea7d73019f48b1",
     "internal/coaxd/demod/dib8096/tables.go": "309c1b65c77190c18721ceb38b2f0dbfec8d32bfa45676b5e1f0b7e8a4948108",
     "pkg/i2c/i2c.go": "c6d7c0a4507be892decc3ccc084f7804b5a50942d5d5c7f5ee2ed05856f4529a",
     "pkg/i2c/i2c_test.go": "3e9f87bc4a079c8c627eae96ee83f04b4bb13176f950d30cc1bac27da94f55af"

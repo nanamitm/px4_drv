@@ -10,6 +10,7 @@ import (
  "path/filepath"
  "testing"
  "time"
+ "github.com/Till0196/coax/pkg/i2c"
 )
 
 // Optional trace oracle for the C++ port. The existing Go fakeChip and fakeClock
@@ -36,13 +37,13 @@ func(b *nativeTraceBus) WriteRead(a byte,w []byte,n int)([]byte,error){
 func TestNativePortTrace(t *testing.T){
  dir:=os.Getenv("TORNE_NATIVE_TRACE_DIR");if dir==""{t.Skip("native comparison is opt-in")}
  if err:=os.MkdirAll(dir,0755);err!=nil{t.Fatal(err)}
- for _,mode:=range []string{"locked","nosignal","timeout","unknown","iofail","waitfail","cband"}{
+ for _,mode:=range []string{"locked","nosignal","timeout","unknown","iofail","waitfail","cband","jobs","retune"}{
   t.Run(mode,func(t *testing.T){
-   chip:=newFakeChip();if mode=="locked"||mode=="cband"{chip=lockedChip()};if mode=="unknown"{chip.registers[897]=0x7000}
+   chip:=newFakeChip();if mode=="locked"||mode=="cband"||mode=="jobs"||mode=="retune"{chip=lockedChip()};if mode=="unknown"{chip.registers[897]=0x7000}
    clock:=&fakeClock{now:time.Unix(1000,0)}
    file,err:=os.Create(filepath.Join(dir,mode+".go.trace"));if err!=nil{t.Fatal(err)};defer file.Close()
    bus:=&nativeTraceBus{chip:chip,clock:clock,file:file,failIO:mode=="iofail",failWait:mode=="waitfail"}
-   board:=New(bus);board.setTiming(clock.Now,func(d time.Duration){fmt.Fprintf(file,"S %d\n",d);if bus.failWait{board.failure.record(fmt.Errorf("injected wait failure"));return};clock.Sleep(d)},5*time.Second)
+   var master i2c.Bus=bus;memory:=&nativeMemoryBus{nativeTraceBus:bus,kept:map[uint32][2]uint32{}};if mode=="jobs"{master=memory};board:=New(master);board.setTiming(clock.Now,func(d time.Duration){fmt.Fprintf(file,"S %d\n",d);if bus.failWait{board.failure.record(fmt.Errorf("injected wait failure"));return};clock.Sleep(d)},5*time.Second)
    run:=func(kind byte,hz uint32){
     var e error;var body []byte
     switch kind{
@@ -55,10 +56,26 @@ func TestNativePortTrace(t *testing.T){
     ok:=1;if e!=nil{ok=0};fmt.Fprintf(file,"C %d %d %x\n",kind,ok,body)
    }
    run(0x10,0);if mode=="unknown"||mode=="iofail"||mode=="waitfail"{return}
+   if mode=="retune"{
+    chip.queues[1284]=[]uint16{1,0,1,1,0,2};chip.queues[568]=[]uint16{0,0,0x3ffe}
+    if e:=board.Tune(473142857);e!=nil||!board.SearchFailed(){t.Fatal("first search",e)};fmt.Fprintln(file,"RETRY initial")
+    if st,e:=board.Status();e!=nil||st.Locked{t.Fatal("premature retry",e)};fmt.Fprintln(file,"RETRY pending")
+    fmt.Fprintln(file,"S 1000000000");clock.Sleep(time.Second);run(0x13,0);run(0x14,0);return
+   }
    if mode=="nosignal"{chip.queues[1284]=[]uint16{1,0,1}}
    frequency:=uint32(473142857);if mode=="cband"{frequency=93142857}
    run(0x11,frequency);run(0x13,0);run(0x12,0);run(0x14,0)
    if mode=="locked"{chip.queues[1284]=[]uint16{1,0,2};run(0x11,213142857);run(0x13,0);run(0x14,0)}
+   if mode=="jobs"{run(0x11,473142857);run(0x13,0);memory.changed=true;run(0x11,473142857);run(0x13,0)}
   })
  }
 }
+
+// This oracle implements the optional interfaces independently of the C++ adapter.
+type nativeMemoryBus struct{*nativeTraceBus;kept map[uint32][2]uint32;changed bool}
+func(b *nativeMemoryBus)RecallTMCC(key uint32)([2]uint32,bool,error){fmt.Fprintln(b.file,"Q",key);w,ok:=b.kept[key];return w,ok,nil}
+func(b *nativeMemoryBus)RememberTMCC(address byte,key uint32)([2]uint32,bool,error){
+ fmt.Fprintln(b.file,"M",address,key)
+ r:=&rememberingChip{fakeChip:b.chip,kept:b.kept};w,changed,e:=r.RememberTMCC(address,key);changed=changed||b.changed;b.changed=false;return w,changed,e
+}
+func(b *nativeMemoryBus)Captrim(address byte,lo4 uint16,key uint32,start,step,target int,write,read time.Duration)(int,int,error){fmt.Fprintln(b.file,"K",address,lo4,key,start,step,target,int64(write),int64(read));return 41,7,nil}

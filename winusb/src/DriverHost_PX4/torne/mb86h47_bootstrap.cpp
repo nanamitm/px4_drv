@@ -214,6 +214,17 @@ void Bootstrap::Load(std::uint32_t base, const std::uint32_t *program, std::size
 void Bootstrap::Core1(std::uint32_t seed)
 {
 	Load(core1_base, programs::core1.data(), programs::core1.size());
+	// 周波数別キャッシュは通電中の再オープンをまたいで保持する。形式が異なる
+	// テーブルだけを消去し、プログラム更新前のデータを誤解釈することを防ぐ。
+	if (Read(core1_base + 0xa2c00) != 0x7ab1e002) {
+		std::array<std::uint8_t,64> empty{};
+		for (unsigned offset=0;offset<64*16;offset+=64)
+			Block(core1_base+0xa2800+offset,empty.data(),empty.size(),false);
+		Write(core1_base+0xa2c04,0);
+		Write(core1_base+0xa2c00,0x7ab1e002);
+	}
+	Write(core1_base+0xa3a00,0);
+	Write(core1_base+0xa3a40,0);
 	for (const std::uint32_t offset : {0xa3f00u, 0xa3f80u, 0xa3f7cu, 0xa3d00u, 0xa3d40u, 0xa3e44u})
 		Write(core1_base + offset, 0);
 	std::array<std::uint8_t, 64> zero{};

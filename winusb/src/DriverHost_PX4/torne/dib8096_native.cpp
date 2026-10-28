@@ -1,11 +1,48 @@
 // SPDX-License-Identifier: GPL-2.0-only
 // Copyright 2026 Till0196; Copyright (C) 2005-9 DiBcom, SA et al.
-// C++ adaptation of coax dib8096 at 2d9f2c263a3b080ecef3a8ede1eb86c6afa48405.
+// C++ adaptation of coax dib8096 at 471328e03942219544e78004e961d8f69d27f46f.
 #include "dib8096_native.hpp"
 #include <cstring>
 #include "dib8096_native_generated.inc"
 
 namespace px4::torne::dibnative {
+// Go の任意インターフェース部分だけを手書きで接続する。探索本体と TMCC の
+// 展開は生成コードを使い、未対応のバスは上流と同じ通常探索へ戻す。
+Error m_Demod_setFrontend(T_Demod* board,std::uint32_t frequency) {
+    auto* bus=board->v_demod->v_bus;
+    const auto key=frequency/1000;
+    auto recall=bus->RecallTMCC(key);
+    if(auto error=std::get<3>(recall))return error;
+    bool recalled=false;
+    if(std::get<1>(recall)) {
+        auto words=std::get<0>(recall);
+        if(auto error=m_Demod_attempt(board,frequency,&words))return error;
+        recalled=board->v_demod->v_status==v_statusDataLocked;
+    }
+    if(!recalled)if(auto error=m_Demod_attempt(board,frequency,nullptr))return error;
+    if(board->v_failure.v_err || !std::get<2>(recall) || board->v_demod->v_status!=v_statusDataLocked ||
+        !(m_dib8000_readStatus(board->v_demod)&v_feHasLock))return board->v_failure.v_err;
+    auto saved=bus->RememberTMCC(v_Address,key);
+    if(auto error=std::get<3>(saved))return error;
+    if(recalled && std::get<1>(saved)) {
+        auto words=std::get<0>(saved);
+        return m_Demod_attempt(board,frequency,&words);
+    }
+    return nullptr;
+}
+void m_tuner_captrimOnMaster(T_tuner* state,std::uint16_t lo4) {
+    if(state->v_failure->v_err)return;
+    auto result=state->v_bus->Captrim(state->v_address,lo4,state->v_channel->v_frequency/1000,
+        state->v_captrim,state->v_step,state->v_rest==0?200:400,3000000,4000000);
+    if(!std::get<2>(result))return;
+    if(auto error=std::get<3>(result)) {
+        m_failure_record(state->v_failure,MakeError("DiB0090 capacitor trim search",error));
+        return;
+    }
+    state->v_fcaptrim=static_cast<std::int8_t>(std::get<0>(result));
+    state->v_adcDiff=static_cast<std::int16_t>(std::get<1>(result));
+    state->v_tuneState=v_tunerStep3;
+}
 void m_dib8000_modifyWord(T_dib8000* state,std::uint16_t reg,std::uint16_t keep,std::uint16_t set)
 {
     // 旧Go helperのproxyBusはModifierを実装しないため、同じread-modify-writeを使う。
@@ -28,6 +65,16 @@ public:
         return parent_.WriteRead(address,write,length);
     }
     Error Wait(std::int64_t duration) override{return parent_.Wait(duration);}
+    std::tuple<std::int64_t,std::int64_t,bool,Error> Captrim(std::uint8_t address,std::uint16_t lo4,
+        std::uint32_t key,std::int64_t start,std::int64_t step,std::int64_t target,std::int64_t write,std::int64_t read) override {
+        if(master_.v_gate!=address) {
+            m_i2cMaster_selectInterface(&master_,v_interfaceTuner);
+            m_dib8000_writeWord(master_.v_demod,static_cast<std::uint16_t>(master_.v_baseRegister+1),m_i2cMaster_gateControl(&master_,address>>1,true));
+            if(master_.v_demod->v_failure->v_err)return {0,0,true,master_.v_demod->v_failure->v_err};
+            master_.v_gate=address;
+        }
+        return parent_.Captrim(address,lo4,key,start,step,target,write,read);
+    }
 };
 }
 namespace px4::torne {
