@@ -1,0 +1,33 @@
+; PX-S1UD Siano RIO WinUSB binding.
+[Version]
+Signature="$Windows NT$"
+Class=Media
+ClassGuid={4d36e96c-e325-11ce-bfc1-08002be10318}
+Provider=%AuthorName%
+DriverVer=10/28/2026,26.10.28.0
+CatalogFile=px4_drv_winusb.cat
+
+[Manufacturer]
+%AuthorName%=PXS1UD_WinUSB,ntx86,ntamd64,ntarm64
+
+[PXS1UD_WinUSB.ntx86]
+%PXS1UD_WinUSB.DeviceDesc%=PXS1UD_WinUSB.DeviceInstall,USB\VID_3275&PID_0080
+[PXS1UD_WinUSB.ntamd64]
+%PXS1UD_WinUSB.DeviceDesc%=PXS1UD_WinUSB.DeviceInstall,USB\VID_3275&PID_0080
+[PXS1UD_WinUSB.ntarm64]
+%PXS1UD_WinUSB.DeviceDesc%=PXS1UD_WinUSB.DeviceInstall,USB\VID_3275&PID_0080
+
+[PXS1UD_WinUSB.DeviceInstall]
+Include=winusb.inf
+Needs=WINUSB.NT
+[PXS1UD_WinUSB.DeviceInstall.Services]
+Include=winusb.inf
+Needs=WINUSB.NT.Services
+[PXS1UD_WinUSB.DeviceInstall.HW]
+AddReg=PXS1UD_WinUSB.DeviceSetup.AddReg
+[PXS1UD_WinUSB.DeviceSetup.AddReg]
+HKR,,DeviceInterfaceGUIDs,0x00010000,"{ba60b2ee-5f40-40ca-bc5d-b4dd0fc56511}"
+
+[Strings]
+AuthorName="px4_drv contributors"
+PXS1UD_WinUSB.DeviceDesc="PLEX PX-S1UD ISDB-T Receiver (WinUSB experimental)"

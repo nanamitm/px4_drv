@@ -64,6 +64,12 @@ PX-BCUDの長時間録画・スリープ復帰と、torneの現行統合版で�
   - 既定の抽出済みファームウェアで問題なく動作することが知られているため、特段実用性はない
 - README（このページ）に WinUSB 版のインストール方法などを追記
 
+### PX-S1UD 対応（Windows）
+
+PLEX PX-S1UD（USB ID `3275:0080`）向けに、WinUSB を直接使う地デジ1チューナーのバックエンドを追加しました。
+`BonDriver_PX-S1UD.dll` と firmware は通常配布に含まれます。
+導入条件と実機検証の範囲は [PX-S1UD の導入手順](winusb/docs/px-s1ud.md) を参照してください。
+
 ### 変更点 (Linux 版)
 
 動作確認は Ubuntu 22.04 LTS (x64) で行っています。
@@ -180,6 +186,7 @@ certutil.exe -addstore TrustedPublisher ".\px4_drv_winusb.cer"
 
 - RTL2838UHIDIR: `BonDriver_RTLSDR`（[導入手順](docs/rtlsdr-install.md)を参照。`rtlsdr` サブフォルダーも必須）
 - Sony torne CECH-ZD1J: `BonDriver_Torne`
+- PX-S1UD: `BonDriver_PX-S1UD`（[導入手順と検証範囲](winusb/docs/px-s1ud.md)を参照。`firmware` と `licenses` フォルダーも必要）
 - PX-BCUD: `BonDriver_PX-BCUD`（アンテナ給電非対応。外部給電と `LNBPower=0` が必要）
 
 お使いの PC に合うビット数のフォルダの中のファイルを**すべて**選択し、TVTest や EDCB などのソフトウェアが指定する BonDriver の配置フォルダにコピーします。  

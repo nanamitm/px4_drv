@@ -25,6 +25,7 @@ winusb/pkg/signing-tools/WindowsProtectedFiles.xml text eol=crlf
 
 # バイナリは改行変換しない
 *.bin -text
+*.inp -text
 *.cat -text
 *.cer -text
 *.dll -text
