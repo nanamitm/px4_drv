@@ -262,6 +262,16 @@ private:
     }
     void Run() noexcept
     {
+        // アイソクロナス転送はフレーム番号を追い越されると転送全体が
+        // USBD_STATUS_ISO_NOT_ACCESSED_BY_HW で失敗し、再投入では取り返せない。
+        // 5要求 x 64マイクロフレーム = 40ms より長く受信スレッドが実行されないと
+        // この状態に入るため、計算負荷と同じ優先度では高負荷時に維持できない。
+        // 実測 (3Dスライサーで全論理プロセッサを占有、各4回) では base 8 で失敗4回と
+        // 復旧予算切れによる停止、base 10 で失敗1回、base 13 で0回だった。
+        // NORMAL_PRIORITY_CLASS のスレッドで 13 を超える値は TIME_CRITICAL になる。
+        // 投入の遅れが欠落にならないバルク転送の他機種は、この引き上げの対象外。
+        if (!SetThreadPriority(GetCurrentThread(),THREAD_PRIORITY_TIME_CRITICAL))
+            msg_warn("PX-BCUD: TS worker priority raise failed win32=%lu\n",GetLastError());
         RecoveryBudget budget;
         Clock::time_point outage{};
         bool have_outage=false;
@@ -507,13 +517,24 @@ private:
             max_framing_us=(std::max)(max_framing_us,entry.framing_end_us-entry.completed_us);
             if (worker_error_) break;
             if (!output.empty()) {
-                for (std::size_t offset=0;offset<output.size();offset+=188) {
-                    if(!gate.Accept(output.data()+offset)){++startup_discarded;continue;}
-                    std::size_t written=188;
-                    if (!stream_buf_->Write(output.data()+offset,written) || written!=188) {
-                        fail("stream_buffer_write",next,ERROR_BUFFER_OVERFLOW);break;
-                    }
-                    if (outage && !reported_recovery) {
+                // PatGate が開くまではパケット単位で捨てるが、開いた後の Accept は
+                // 無条件に true を返すため、残り全体を1回の Write で渡す。
+                // 188バイトごとに呼ぶと1要求 (最大320パケット) あたり StreamBuffer の
+                // ロック取得が320回になり、この区間で実行を奪われる機会が増える。
+                // 実測では優先度を base 10 まで上げても write 区間 31.9ms に対し
+                // 消費CPUは 47us で、処理量ではなく区間の長さが投入遅れにつながった。
+                std::size_t begin=0;
+                while (begin<output.size() && !gate.Accept(output.data()+begin)) {
+                    ++startup_discarded;begin+=188;
+                }
+                if (begin<output.size()) {
+                    const std::size_t requested=output.size()-begin;
+                    std::size_t written=requested;
+                    // 部分書き込みはリング満杯を示す。書けた分は配信済みとして残し、
+                    // パケット単位で書いていたときと同じく失敗として扱う。
+                    if (!stream_buf_->Write(output.data()+begin,written) || written!=requested) {
+                        fail("stream_buffer_write",next,ERROR_BUFFER_OVERFLOW);
+                    } else if (outage && !reported_recovery) {
                         reported_recovery=true;recovering_=false;
                         msg_warn("PX-BCUD: auto recovery resumed count=%llu outage_ms=%llu possible_ts_loss=1\n",
                             static_cast<unsigned long long>(recovery_count_),
