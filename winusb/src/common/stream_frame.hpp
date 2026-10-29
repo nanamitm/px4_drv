@@ -8,6 +8,7 @@
 namespace px4 {
 // SET_DATA_ID_FRAMED で選択した接続だけの形式。Windows x86/x64 の LE 固定幅値。
 struct StreamFrameHeader {
+    // TS と分割 TLV の両方を運ぶため、length は188の倍数に限らないバイト数。
     std::uint32_t magic, epoch, length;
 };
 static_assert(sizeof(StreamFrameHeader)==12,"stream frame wire size");
@@ -31,7 +32,7 @@ public:
         if(offset_==payload_.size()) {
             StreamFrameHeader header{};
             if(!exact(&header,sizeof(header)) || header.magic!=StreamFrameMagic || !header.epoch ||
-                !header.length || header.length>StreamFrameMax || header.length%188)return false;
+                !header.length || header.length>StreamFrameMax)return false;
             payload_.resize(header.length);
             if(!exact(payload_.data(),payload_.size()))return false;
             offset_=0;epoch_=header.epoch;

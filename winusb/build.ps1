@@ -1,4 +1,4 @@
-﻿param([string]$SigningPfxPath='', [string]$SigningPasswordEnvironment='', [string]$SigningPasswordFile='', [switch]$RequireSignedApplications)
+param([string]$SigningPfxPath='', [string]$SigningPasswordEnvironment='', [string]$SigningPasswordFile='', [switch]$RequireSignedApplications)
 
 
 # カレントディレクトリに移動
@@ -21,10 +21,7 @@ if ((Get-Command msbuild -ErrorAction SilentlyContinue) -eq $null) {
     $vswhere_path = Join-Path -Path ${env:ProgramFiles(x86)} -ChildPath 'Microsoft Visual Studio\Installer\vswhere.exe'
 
     if ((Test-Path $vswhere_path) -eq $True) {
-        # VS 2022 (17.x) and newer VS releases can build the v143 project
-        # when that toolset is installed.  Do not reject VS 18.x only because
-        # the desktop app happens to have the newer IDE.
-        $msbuild_file_path = & $vswhere_path -latest -version '[17.0,19.0)' -requires Microsoft.Component.MSBuild -find 'MSBuild\Current\Bin\MSBuild.exe' | Select-Object -First 1
+        $msbuild_file_path = & $vswhere_path -latest -version '[17.0,18.0)' -requires Microsoft.Component.MSBuild -find 'MSBuild\Current\Bin\MSBuild.exe' | Select-Object -First 1
 
         if ($msbuild_file_path -ne $null) {
             $msbuild_dir_path = Split-Path $msbuild_file_path -Parent
@@ -34,7 +31,7 @@ if ((Get-Command msbuild -ErrorAction SilentlyContinue) -eq $null) {
 }
 
 if ((Get-Command msbuild -ErrorAction SilentlyContinue) -eq $null) {
-    throw 'MSBuild was not found. Install Visual Studio with MSBuild and the v143 toolset.'
+    throw 'MSBuild was not found. Install Visual Studio 2022 with MSBuild.'
 }
 
 # カタログファイルと INF の不一致をビルド前に検出し、署名対象と異なるドライバーパッケージの生成を防ぐ
@@ -112,6 +109,32 @@ foreach ($build_platform in $build_platforms) {
         & "build/$build_platform/Release-static/$torne_test.exe"
         if ($LASTEXITCODE -ne 0) { throw "Torne test failed: $torne_test ($build_platform)" }
     }
+
+    # 共通受信機の変更が RTL-SDR の非同期選局と helper の通信形式を壊していないことを検証
+    foreach ($rtl_test in @('receiver_tune_completion_test', 'rtlsdr_protocol_test')) {
+        msbuild "tests/$rtl_test.vcxproj" /p:"Configuration=Release-static;Platform=$build_platform;PlatformToolset=v143"
+        if ($LASTEXITCODE -ne 0) { throw "RTL-SDR test build failed: $rtl_test ($build_platform)" }
+        & "build/$build_platform/Release-static/$rtl_test.exe"
+        if ($LASTEXITCODE -ne 0) { throw "RTL-SDR test failed: $rtl_test ($build_platform)" }
+    }
+
+    # 模擬 I2C で ISDB-C・J.83B の設定と失敗時の復帰を検証
+    & "build/$build_platform/Release-static/j83b_driver_test.exe"
+    if ($LASTEXITCODE -ne 0) {
+        throw "J83B driver test failed. platform: $build_platform"
+    }
+
+    # 作った TS で、TSMF の TS 番号による選択・ヘッダーのない搬送波の素通し・分割 TLV の自動判定を検証
+    & "build/$build_platform/Release-static/tsmf_filter_test.exe"
+    if ($LASTEXITCODE -ne 0) {
+        throw "TSMF filter test failed. platform: $build_platform"
+    }
+
+    # ISDB-C と J.83B の ChSet の列の解釈と不正な行の扱い、配布の ChSet がすべて読めることを検証
+    & "build/$build_platform/Release-static/chset_isdbc_test.exe" "pkg/BonDriver_PX4/BonDriver_PX4-C.ChSet.txt" "pkg/BonDriver_PX4/BonDriver_PX4-J83B.ChSet.txt"
+    if ($LASTEXITCODE -ne 0) {
+        throw "ISDB-C ChSet test failed. platform: $build_platform"
+    }
 }
 
 # dist/ フォルダにビルドされたファイルをコピー
@@ -170,6 +193,7 @@ Copy-Item pkg/BonDriver_PX4/BonDriver_PX-MLT.ini dist/BonDriver_PX-MLT_32bit/Bon
 Copy-Item pkg/BonDriver_PX4/BonDriver_PX4-T.ChSet.txt dist/BonDriver_PX-MLT_32bit/BonDriver_PX4-T.ChSet.txt
 Copy-Item pkg/BonDriver_PX4/BonDriver_PX4-S.ChSet.txt dist/BonDriver_PX-MLT_32bit/BonDriver_PX4-S.ChSet.txt
 Copy-Item pkg/BonDriver_PX4/BonDriver_PX4-C.ChSet.txt dist/BonDriver_PX-MLT_32bit/BonDriver_PX4-C.ChSet.txt
+Copy-Item pkg/BonDriver_PX4/BonDriver_PX4-J83B.ChSet.txt dist/BonDriver_PX-MLT_32bit/BonDriver_PX4-J83B.ChSet.txt
 Copy-Item build/x86/Release-static/DriverHost_PX4.exe dist/BonDriver_PX-MLT_32bit/DriverHost_PX4.exe
 Copy-Item pkg/DriverHost_PX4/DriverHost_PX4.ini dist/BonDriver_PX-MLT_32bit/DriverHost_PX4.ini
 Copy-Item pkg/DriverHost_PX4/it930x-firmware.bin dist/BonDriver_PX-MLT_32bit/it930x-firmware.bin
@@ -180,6 +204,7 @@ Copy-Item pkg/BonDriver_PX4/BonDriver_PX-MLT.ini dist/BonDriver_PX-MLT_64bit/Bon
 Copy-Item pkg/BonDriver_PX4/BonDriver_PX4-T.ChSet.txt dist/BonDriver_PX-MLT_64bit/BonDriver_PX4-T.ChSet.txt
 Copy-Item pkg/BonDriver_PX4/BonDriver_PX4-S.ChSet.txt dist/BonDriver_PX-MLT_64bit/BonDriver_PX4-S.ChSet.txt
 Copy-Item pkg/BonDriver_PX4/BonDriver_PX4-C.ChSet.txt dist/BonDriver_PX-MLT_64bit/BonDriver_PX4-C.ChSet.txt
+Copy-Item pkg/BonDriver_PX4/BonDriver_PX4-J83B.ChSet.txt dist/BonDriver_PX-MLT_64bit/BonDriver_PX4-J83B.ChSet.txt
 Copy-Item build/x64/Release-static/DriverHost_PX4.exe dist/BonDriver_PX-MLT_64bit/DriverHost_PX4.exe
 Copy-Item pkg/DriverHost_PX4/DriverHost_PX4.ini dist/BonDriver_PX-MLT_64bit/DriverHost_PX4.ini
 Copy-Item pkg/DriverHost_PX4/it930x-firmware.bin dist/BonDriver_PX-MLT_64bit/it930x-firmware.bin

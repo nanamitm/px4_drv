@@ -19,13 +19,10 @@
 
 struct cxd2858er_config {
 	u32 xtal;
-	bool isdbc_reference_profile;
-	/* Sony/TBS HELENE J83B_5_6 行。既定無効、信号で未検証。 */
-	bool experimental_j83b;
-	/* J.83B でも RF/IF 過大入力の検出レベルに地デジの値を使う試験用設定。既定無効。 */
-	bool j83b_ter_overload_level;
 	struct {
 		bool lna;
+		/* 待機中も地上波の RF 入力の整合を保つか (Sony の SONY_HELENE_CONFIG_POWERSAVE_TERR_RFIN_MATCHING) */
+		bool rfin_matching;
 	} ter;
 	struct {
 		bool lna;
@@ -57,22 +54,11 @@ int cxd2858er_set_params_t(struct cxd2858er_tuner *tuner,
 			   enum cxd2858er_system system,
 			   u32 freq, u32 bandwidth);
 int cxd2858er_set_params_c(struct cxd2858er_tuner *tuner,
-			   u32 freq, u32 bandwidth);
+			   u32 freq, bool j83b);
 int cxd2858er_set_params_s(struct cxd2858er_tuner *tuner,
 			   enum cxd2858er_system system,
 			   u32 freq, u32 symbol_rate);
 int cxd2858er_stop(struct cxd2858er_tuner *tuner);
-
-/* 地上・ケーブル側の AGC 生値と、参照実装の換算式による入力レベルの推定値。
- * 推定値は CXD2858ER 用に校正されていない。 */
-struct cxd2858er_rssi {
-	u8 if_agc;
-	u8 rf_agc;
-	u8 if_bpf_gc;
-	s32 rssi_x100;
-};
-int cxd2858er_read_rssi_t(struct cxd2858er_tuner *tuner, u32 freq,
-			  struct cxd2858er_rssi *rssi);
 #ifdef __cplusplus
 }
 #endif

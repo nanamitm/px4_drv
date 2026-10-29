@@ -35,7 +35,7 @@
   <PropertyGroup>
     <OutDir>$(MSBuildThisFileDirectory)..\build\$(PlatformTarget)\$(Configuration)\</OutDir>
     <IntDir>$(MSBuildThisFileDirectory)build\stream_stop_test\$(PlatformTarget)\$(Configuration)\</IntDir>
-    <IncludePath>$(VC_IncludePath);$(WindowsSDK_IncludePath);$(MSBuildThisFileDirectory)..\src\DriverHost_PX4;$(MSBuildThisFileDirectory)..\src\common</IncludePath>
+    <IncludePath>$(VC_IncludePath);$(WindowsSDK_IncludePath);$(MSBuildThisFileDirectory)..\src\DriverHost_PX4;$(MSBuildThisFileDirectory)..\src\common;$(MSBuildThisFileDirectory)..\..\driver</IncludePath>
   </PropertyGroup>
   <ItemDefinitionGroup>
     <ClCompile>
@@ -60,6 +60,7 @@
     <ClCompile Include="stream_stop_test.cpp" />
     <ClCompile Include="..\src\DriverHost_PX4\ringbuffer.cpp" />
     <ClCompile Include="..\src\DriverHost_PX4\receiver_base.cpp" />
+    <ClCompile Include="..\..\driver\tsmf.c" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="..\src\DriverHost_PX4\ringbuffer.hpp" />

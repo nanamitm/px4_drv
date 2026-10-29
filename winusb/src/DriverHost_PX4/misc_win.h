@@ -36,6 +36,7 @@ typedef uint32_t u32;
 
 static inline void * kzalloc(size_t size, int dummy)
 {
+	(void)dummy;
 	void *p;
 
 	p = malloc(size);

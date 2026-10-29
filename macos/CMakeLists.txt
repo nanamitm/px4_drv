@@ -123,6 +123,7 @@ set(DRIVER_C_SRCS
     "${DRIVER_DIR}/it930x.c"
     "${DRIVER_DIR}/cxd2856er.c"
     "${DRIVER_DIR}/cxd2858er.c"
+    "${DRIVER_DIR}/tsmf.c"
     "${DRIVER_DIR}/tc90522.c"
     "${DRIVER_DIR}/r850.c"
     "${DRIVER_DIR}/rt710.c"

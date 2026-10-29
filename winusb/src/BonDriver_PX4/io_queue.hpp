@@ -2,6 +2,7 @@
 
 #pragma once
 
+#include <atomic>
 #include <cstddef>
 #include <atomic>
 #include <cstdint>
@@ -52,6 +53,7 @@ public:
 	std::size_t GetFreeBufferCount() const;
 	bool WaitDataBuffer(std::chrono::milliseconds ms);
 	void PurgeDataBuffer();
+	void SetReadFlushInterval(std::chrono::milliseconds interval) noexcept;
 
 	bool Read(void *buf, std::size_t &size, std::size_t &remain_count, bool blocking);
 	bool ReadBuffer(void **buf, std::size_t &size, std::size_t &remain_count, bool blocking);
@@ -88,6 +90,7 @@ private:
 	std::size_t current_ofs_;
 	int data_ignore_count_;
 	int data_ignore_remain_;
+	std::atomic<std::chrono::milliseconds::rep> read_flush_interval_;
 	std::unique_ptr<std::thread> th_;
 };
 

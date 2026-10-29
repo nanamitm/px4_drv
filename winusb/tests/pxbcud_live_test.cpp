@@ -1,3 +1,4 @@
+#include <array>
 // SPDX-License-Identifier: GPL-2.0-only
 #include "../src/DriverHost_PX4/pxbcud/device.hpp"
 #include "msg.h"

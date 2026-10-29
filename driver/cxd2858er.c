@@ -3,10 +3,10 @@
  * Sony CXD2858ER driver (cxd2858er.c)
  *
  * Copyright (c) 2018-2021 nns779
- * J.83B reference portions:
- * Copyright (c) 2022 Sony Semiconductor Solutions Corporation
- * Copyright (c) 2021 Davin zhang <Davin@tbsdtv.com>
- * Copyright (c) 2026 Yoonji Park <koreapyj@dcmys.kr>
+ *
+ * ISDB-C と J.83B 用に参照した PLEX の Linux ドライバーの Sony のコード (sony_helene.c・sony_tuner_helene.c):
+ * https://github.com/soralis0912/it930x_driver_native/tree/64fd4f3fd04cd8c19855250ebd88278734d4eba6/api/DW_Frontend/CXD2856/tuner/terr_cable_sat_helene
+ * Copyright 2016 Sony Semiconductor Solutions Corporation
  */
 
 #include "print_format.h"
@@ -108,7 +108,11 @@ static int cxd2858er_power_on(struct cxd2858er_tuner *tuner)
 	if (ret)
 		return ret;
 
-	ret = cxd2858er_write_reg(tuner, 0x67, 0x00);
+	/* rfin_matching のときは、Sony の SONY_HELENE_CONFIG_POWERSAVE_TERR_RFIN_MATCHING に従い、待機中も地上波の RF 入力の整合を保つ
+	 * PX-MLT5PE は1つの地上波・ケーブルの RF 入力を全チューナーへ分配していて、既定の待機状態では、チューナーが待機と動作を切り替えるときに
+	 * 隣のチューナーで受信中の 256QAM (ISDB-C の UHF 帯や J.83B) に誤りが出る
+	 * 地デジと BS/CS の受信ではこの誤りは出ないため、PLEX の公開ドライバーと同じ既定の待機状態を基本とし、ISDB-C か J.83B を使うときだけ整合を保つ */
+	ret = cxd2858er_write_reg(tuner, 0x67, (tuner->config.ter.rfin_matching) ? 0x02 : 0x00);
 	if (ret)
 		return ret;
 
@@ -414,16 +418,13 @@ exit:
 }
 
 int cxd2858er_set_params_c(struct cxd2858er_tuner *tuner,
-			   u32 freq, u32 bandwidth)
+			   u32 freq, bool j83b)
 {
 	int ret = 0;
 	u8 data[17];
 
-	if (bandwidth != 6)
-		return -EINVAL;
-	/* J.83B の REF_R は出典で値を確定できる水晶だけに限定する。 */
-	if (tuner->config.experimental_j83b && tuner->config.xtal != 16000 &&
-		tuner->config.xtal != 24000)
+	/* 周波数のレジスターは kHz の20ビットのため、その範囲の周波数だけを書き込む */
+	if (freq > 0xfffff)
 		return -EINVAL;
 
 	ret = i2c_comm_master_gate_ctrl(tuner->i2c, true);
@@ -470,10 +471,8 @@ int cxd2858er_set_params_c(struct cxd2858er_tuner *tuner,
 	data[1] = 0x02;
 	data[2] = 0x1e;
 	data[3] = 0x67;
-	/* cxd2878.c helene_tune_terr(): cable の REF_R は水晶周波数依存。
-	 * PXMLT は 16 MHz。既存値は比較用に参照フラグ false で保持する。 */
-	data[4] = (tuner->config.isdbc_reference_profile || tuner->config.experimental_j83b) &&
-		(tuner->config.xtal == 16000) ? 0x10 : 0x18;
+	/* sony_helene.c の TER_tune() に従い、ケーブル受信用の REF_R (Fref = 1 MHz) を水晶周波数に合わせる */
+	data[4] = (tuner->config.xtal == 16000) ? 0x10 : 0x18;
 	data[5] = 0x1c;
 	data[6] = 0x78;
 	data[7] = 0x08;
@@ -487,37 +486,23 @@ int cxd2858er_set_params_c(struct cxd2858er_tuner *tuner,
 		goto exit;
 
 	data[0] = 0x00;
-	/* Sony/TBS g_terr_param_table_helene の SONY_HELENE_DTV_DVBC_6:
-	 * RF_GAIN=AUTO / IF_BPF_GC=4。64QAM と 256QAM の設定は共通。
-	 * 参照の helene_tune_terr() は FREIA enum で表を引くため1行ずれるが、
-	 * ここでは指定された HELENE DVB-C 6 MHz 行の値を採用する。 */
-	data[1] = (tuner->config.isdbc_reference_profile || tuner->config.experimental_j83b) ? 0x84 : 0x85;
+	/* Sony の sony_helene.c の CXD2856 世代の表では、DVB-C 6 MHz (ISDB-C が使う設定) と J.83B 5.6 Msps の IF_BPF_GC はどちらも 0x04 */
+	data[1] = 0x84;
 	data[2] = 0x00;
 	data[3] = 0x02;
 	data[4] = 0x21;
 	data[5] = 0x00;
-	/* 出典: Sony/TBS cxd2878.c (GPL-2.0), g_terr_param_table_helene の
-	 * SONY_HELENE_DTV_J83B_5_6 と helene_tune_terr()。他の列は DVB-C 6 と
-	 * 同一。FIF_OFFSET=-5, BW_OFFSET=+2 を5bitで格納する。
-	 * 参照関数の FREIA enum と HELENE 表の添字ずれは移植せず名前で選ぶ。
-	 * 待機 50 ms は既存/出典共通の校正手順で、短縮の実測根拠がない。 */
-	data[6] = tuner->config.experimental_j83b ? 0x1b : 0x1a;
-	data[7] = tuner->config.experimental_j83b ? 0x02 : 0x1c;
+	/* sony_helene.c の SONY_HELENE_DTV_J83B_5_6 に従い、J.83B では FIF_OFFSET=-5、BW_OFFSET=+2 を5ビットで格納する
+	 * 他の設定値は DVB-C 6 MHz と共通で、書き込み後は sony_tuner_helene.c と同じ50ミリ秒の校正待ちが必要 */
+	data[6] = j83b ? 0x1b : 0x1a;
+	data[7] = j83b ? 0x02 : 0x1c;
 	data[8] = freq & 0xff;
 	data[9] = (freq >> 8) & 0xff;
 	data[10] = (freq >> 16) & 0x0f;
 	data[11] = 0xff;
 	data[12] = 0x01;
-	/* 0x75-0x76 は RF/IF 過大入力の検出レベルと推定される (意味は未確認)。
-	 * 同じ基板の別受信機の起動時に J.83B の C/N が瞬間的に約 6 dB 下がるため、
-	 * 地デジの値 (0x99, 0x00) で落ち込みが減るかを試す設定を用意する。 */
-	if (tuner->config.experimental_j83b && tuner->config.j83b_ter_overload_level) {
-		data[13] = 0x99;
-		data[14] = 0x00;
-	} else {
-		data[13] = 0xd9;
-		data[14] = 0x0f;
-	}
+	data[13] = 0xd9;
+	data[14] = 0x0f;
 	data[15] = 0x24;
 	data[16] = 0x87;
 	ret = cxd2858er_write_regs(tuner, 0x68, data, 17);
@@ -555,6 +540,7 @@ int cxd2858er_set_params_s(struct cxd2858er_tuner *tuner,
 
 	switch (tuner->system) {
 	case CXD2858ER_ISDB_T_SYSTEM:
+	case CXD2858ER_ISDB_C_SYSTEM:
 		ret = cxd2858er_stop_t(tuner);
 		break;
 
@@ -669,14 +655,17 @@ static int cxd2858er_stop_t(struct cxd2858er_tuner *tuner)
 	int ret = 0;
 	u8 data[3];
 
-	if (tuner->system != CXD2858ER_ISDB_T_SYSTEM)
+	/* ISDB-C も地上波側の RF 経路を使うため同じ手順で停止する */
+	if (tuner->system != CXD2858ER_ISDB_T_SYSTEM &&
+	    tuner->system != CXD2858ER_ISDB_C_SYSTEM)
 		return -EINVAL;
 
 	ret = cxd2858er_write_reg(tuner, 0x74, 0x02);
 	if (ret)
 		return ret;
 
-	ret = cxd2858er_write_reg_mask(tuner, 0x67, 0x00, 0xfe);
+	/* 電源投入時と同じく、rfin_matching のときは待機中も RF 入力の整合を保つ (bit0 の RF_EXT は保持する) */
+	ret = cxd2858er_write_reg_mask(tuner, 0x67, (tuner->config.ter.rfin_matching) ? 0x02 : 0x00, 0xfe);
 	if (ret)
 		return ret;
 
@@ -738,144 +727,15 @@ static int cxd2858er_stop_s(struct cxd2858er_tuner *tuner)
 	if (ret)
 		return ret;
 
+	/* 衛星の受信中に rfin_matching になったチューナーも、待機へ戻るときに地上波の RF 入力の整合を保つ状態にそろえる */
+	if (tuner->config.ter.rfin_matching) {
+		ret = cxd2858er_write_reg_mask(tuner, 0x67, 0x02, 0x02);
+		if (ret)
+			return ret;
+	}
+
 	tuner->system = CXD2858ER_UNSPECIFIED_SYSTEM;
 	return 0;
-}
-
-/* 地上・ケーブル側の RF/IF AGC を読み、入力レベルを推定する。
- * 手順と換算式は Sony / TBS 公開ドライバ (cxd2878.c, GPL-2.0) の ascot3_read_rssi()
- * を参照した。CXD2858ER の地上側は同じレジスタ配置 (0x59/0x5b/0x69/0x87/0x88) を
- * 使うが、換算表は HELENE 用に校正されていないため、推定値は目安として扱う。
- * 参照実装は終了時に 0x88 へ 0x04 を書くが、このドライバの選局は 0x88=0x00 で
- * 終えるため、読み取り前の 0x59/0x87/0x88 の値を保存して書き戻す。 */
-int cxd2858er_read_rssi_t(struct cxd2858er_tuner *tuner, u32 freq,
-			  struct cxd2858er_rssi *rssi)
-{
-	static const s32 if_bpf_gc_table[16] = {
-		0, 0, 0, 0, 2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 20, 20
-	};
-	int ret = 0, rret = 0;
-	u8 saved59 = 0, saved87 = 0, saved88 = 0, tmp = 0;
-	u8 data[2];
-	s32 ifgain, rfgain, rfgainmax, agc_x140, maxagc_x140;
-
-	if (!rssi)
-		return -EINVAL;
-	memset(rssi, 0, sizeof(*rssi));
-
-	if (tuner->system != CXD2858ER_ISDB_T_SYSTEM &&
-	    tuner->system != CXD2858ER_ISDB_C_SYSTEM)
-		return -EINVAL;
-
-	ret = i2c_comm_master_gate_ctrl(tuner->i2c, true);
-	if (ret)
-		return ret;
-
-	ret = cxd2858er_read_reg(tuner, 0x59, &saved59);
-	if (!ret)
-		ret = cxd2858er_read_reg(tuner, 0x87, &saved87);
-	if (!ret)
-		ret = cxd2858er_read_reg(tuner, 0x88, &saved88);
-	if (ret)
-		goto exit;
-
-	data[0] = 0xc4;
-	data[1] = 0x41;
-	ret = cxd2858er_write_regs(tuner, 0x87, data, 2);
-	if (ret)
-		goto restore;
-
-	/* IF AGC を ADC へ接続して読む */
-	data[0] = 0x05;
-	data[1] = 0x01;
-	ret = cxd2858er_write_regs(tuner, 0x59, data, 2);
-	if (!ret)
-		ret = cxd2858er_read_reg(tuner, 0x5b, &rssi->if_agc);
-	if (ret)
-		goto restore;
-
-	/* RF AGC を ADC へ接続して読む */
-	data[0] = 0x03;
-	data[1] = 0x01;
-	ret = cxd2858er_write_regs(tuner, 0x59, data, 2);
-	if (!ret)
-		ret = cxd2858er_read_reg(tuner, 0x5b, &rssi->rf_agc);
-
-restore:
-	rret = cxd2858er_write_reg(tuner, 0x59, saved59);
-	if (!rret)
-		rret = cxd2858er_write_reg(tuner, 0x88, saved88);
-	if (!rret)
-		rret = cxd2858er_write_reg(tuner, 0x87, saved87);
-	if (!ret)
-		ret = rret;
-	if (ret)
-		goto exit;
-
-	ret = cxd2858er_read_reg(tuner, 0x69, &tmp);
-	if (ret)
-		goto exit;
-	rssi->if_bpf_gc = tmp & 0x0f;
-
-	agc_x140 = rssi->if_agc * 140;
-	if (agc_x140 > 9945)
-		ifgain = 870 + if_bpf_gc_table[rssi->if_bpf_gc] * 100;
-	else
-		ifgain = 870 + if_bpf_gc_table[rssi->if_bpf_gc] * 100 +
-			 (769 * (9945 - agc_x140) + 1275) / 2550;
-
-	maxagc_x140 = ((rssi->if_agc > rssi->rf_agc) ? rssi->if_agc : rssi->rf_agc) * 140;
-
-	if (freq > 700000)
-		rfgainmax = 4150;
-	else if (freq > 600000)
-		rfgainmax = 4130;
-	else if (freq > 532000)
-		rfgainmax = 4170;
-	else if (freq > 464000)
-		rfgainmax = 4050;
-	else if (freq > 400000)
-		rfgainmax = 4280;
-	else if (freq > 350000)
-		rfgainmax = 4260;
-	else if (freq > 320000)
-		rfgainmax = 4110;
-	else if (freq > 285000)
-		rfgainmax = 4310;
-	else if (freq > 215000)
-		rfgainmax = 4250;
-	else if (freq > 184000)
-		rfgainmax = 4020;
-	else if (freq > 172000)
-		rfgainmax = 3920;
-	else if (freq > 150000)
-		rfgainmax = 4080;
-	else if (freq > 86000)
-		rfgainmax = 4180;
-	else if (freq > 65000)
-		rfgainmax = 4200;
-	else
-		rfgainmax = 4020;
-
-	if (maxagc_x140 < 4896)
-		rfgain = rfgainmax;
-	else if (maxagc_x140 < 5457)
-		rfgain = rfgainmax - (70 * (maxagc_x140 - 4896) + 127) / 255;
-	else if (maxagc_x140 < 8823)
-		rfgain = rfgainmax - 154;
-	else if (maxagc_x140 < 24786)
-		rfgain = rfgainmax - 154 - (70 * (maxagc_x140 - 8823) + 127) / 255;
-	else if (maxagc_x140 < 30090)
-		rfgain = rfgainmax - 4536 - (57 * (maxagc_x140 - 24786) + 127) / 255;
-	else
-		rfgain = rfgainmax - 4536 - 1186 - (160 * (maxagc_x140 - 30090) + 127) / 255;
-
-	/* 参照実装の「チューナー入力換算」の値 (0.01 dBm 単位)。復調器側の IF 出力補正は含めない。 */
-	rssi->rssi_x100 = -ifgain - rfgain;
-
-exit:
-	i2c_comm_master_gate_ctrl(tuner->i2c, false);
-	return ret;
 }
 
 int cxd2858er_stop(struct cxd2858er_tuner *tuner)

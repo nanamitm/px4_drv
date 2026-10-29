@@ -19,67 +19,81 @@ PLEX 社の [Webサイト](http://plex-net.co.jp) にて配布されている公
 
 PX-BCUDの長時間録画・スリープ復帰と、torneの現行統合版で残る実機検証が完了するまで、公開リリースを保留しています。
 
-- エラー発生時の MessageBox を表示しない設定を追加 
-  - BonDriver の ini 内の `DisplayErrorMessage` を 1 に設定すると今まで通り MessageBox が表示される
-- BS/CS の ChSet に2024年10月～2025年1月に行われた BS トランスポンダ再編後の物理チャンネル情報を反映
-- [hendecarows 氏のフォーク](https://github.com/hendecarows/px4_drv) での更新を取り込み、DTV02A-1T1S-U / DTV03A-1TU / PX-M1UR / PX-S1UR に対応
+#### 新デバイス対応・機能追加
+
 - PX-Q3PE5 に対応し、inf ファイルを追加
+- [hendecarows 氏のフォーク](https://github.com/hendecarows/px4_drv) での更新を取り込み、DTV02A-1T1S-U / DTV03A-1TU / PX-M1UR / PX-S1UR に対応
 - PX-MLT5PE のリブランド品である DTV02A-5TS-P (USB Product ID: 0x924e) に対応し、inf ファイルを追加 (v0.6.1 以降)
+- 各機種の内蔵 B-CAS カードリーダーを利用するためのドライバを追加 (v0.6.0 以降)
+  - 同梱の `WinSCard.dll` を利用するアプリケーションの実行ファイルと同じフォルダに配置すると、内蔵カードリーダーを優先して利用できるようになる
+  - Windows が認識している外付けカードリーダーも引き続き利用できる
+- PX-MLT 系チューナー (PX-MLT5PE / PX-MLT8PE / DTV02A-4TS-P / DTV02A-5TS-P) において、ケーブルテレビ (トランスモジュレーション方式: ISDB-C) とスカパー！プレミアムサービス光 (J.83 Annex B) の受信に対応 (v0.7.0 以降)
+  - [n0atl 氏のフォーク](https://github.com/n0atl/px4_drv) と [aoiro-labo 氏のフォーク](https://github.com/aoiro-labo/px4_drv) で進められていた対応を基にしている
+  - 受信方法は [ケーブルテレビ (ISDB-C) / スカパー！プレミアムサービス光 (J.83B) の受信](#ケーブルテレビ-isdb-c--スカパープレミアムサービス光-j83b-の受信) を参照のこと
+
+#### 設定ファイル・ドライバ構成ファイルの改善
+
 - inf ファイルをより分かりやすい名前に変更
-- inf ファイルを ARM 版 Windows でもインストールできるようにする
-  - 実機がないので試せていないけど、おそらくインストールできるはず
-  - ref: https://mevius.5ch.net/test/read.cgi/avi/1625673548/762
-- inf ファイルを改善し、チューナーをタスクトレイの「ハードウェアの安全な取り外し」に表示しないようにする
-  - ref: https://mevius.5ch.net/test/read.cgi/avi/1666581918/207
 - inf ファイルに自己署名を行い、自己署名証明書のインストールだけで正式なドライバーと認識されるように
   - 以前は署名がないためインストール時にドライバー署名の強制の無効化が必要だったが、事前に自己署名証明書を適切な証明書ストアにインストールしておけばこの作業が不要になる
   - ref: https://mevius.5ch.net/test/read.cgi/avi/1577466040/104-108
 - 自己署名証明書のインストール・アンインストールスクリプトを追加
   - 拡張子が .jse となっているが、これは PowerShell スクリプトにダブルクリックで実行させるための JScript コードを先頭の行に加えたもの
+- inf ファイルを ARM 版 Windows でもインストールできるようにする
+  - 実機がないので試せていないけど、おそらくインストールできるはず
+  - ref: https://mevius.5ch.net/test/read.cgi/avi/1625673548/762
+- inf ファイルを改善し、チューナーをタスクトレイの「ハードウェアの安全な取り外し」に表示しないようにする
+  - ref: https://mevius.5ch.net/test/read.cgi/avi/1666581918/207
 - 地上波の ChSet に物理 53ch ～ 62ch の定義を追加
   - 物理 53ch ～ 62ch は地上波の割り当て周波数から削除されているが、現在も ”イッツコムch10” など、一部ケーブルテレビの自主放送の割り当て周波数として使われている
 - BS/CS の ChSet に2022年3月開局の BS 新チャンネル（BS松竹東急・BSJapanext・BSよしもと）の定義を追加
+- BS/CS の ChSet に2024年10月～2025年1月に行われた BS トランスポンダ再編後の物理チャンネル情報を反映
+
+#### ドライバの品質改善
+
+- エラー発生時の MessageBox を表示しない設定を追加 
+  - BonDriver の ini 内の `DisplayErrorMessage` を 1 に設定すると今まで通り MessageBox が表示される
 - バージョン情報が DLL のプロパティに表示されないのを修正
+- チャンネル切り替え、USB の切断・再接続、内蔵カードリーダーとの同時利用に関する安定性を改善 (v0.6.0 以降)
+
+#### ビルド・ドキュメント
+
 - ビルドとパッケージングを全自動で行うスクリプトを追加
   - Visual Studio 2022（C++ 開発環境・v143）と Python 3 を用意し、`winusb/build.cmd` または `build.ps1` でビルドとパッケージングを行う。通常ビルドに Go は不要で、開発用の比較試験と移植ソースの再生成にのみ必要。
-- 各機種の内蔵 B-CAS カードリーダーを利用するためのドライバを追加 (v0.6.0 以降)
-  - 同梱の `WinSCard.dll` を利用するアプリケーションの実行ファイルと同じフォルダに配置すると、内蔵カードリーダーを優先して利用できるようになる
-  - Windows が認識している外付けカードリーダーも引き続き利用できる
-- チャンネル切り替え、USB の切断・再接続、内蔵カードリーダーとの同時利用に関する安定性を改善 (v0.6.0 以降)
 - fwtool: PX-W3PE5 / PX-Q3PE4 / PX-Q3PE5 / PX-W3U4 / PX-Q3U4 / PX-MLT5PE / PX-MLT8PE の2021年版公式 Windows ドライバからのファームウェア抽出に対応
   - 既定の抽出済みファームウェアで問題なく動作することが知られているため、特段実用性はない
 - README（このページ）に WinUSB 版のインストール方法などを追記
-
-### 変更点 (macOS 版)
-
-- Apple Silicon (ARM) および Intel Mac 向けのユーザー空間デーモン `DriverHost_PX4` を追加
-  - libusb を用いた USB デバイスアクセスと、UNIX ドメインソケットによる IPC を実装
-  - Linux カーネルモジュール・Windows WinUSB 版と同一のデバイスロジックを共有しているため、対応デバイスは同一
-
-### 変更点 (ISDB-C トラモジ対応・実験的)
-
-- [n0atl 氏のフォーク](https://github.com/n0atl/px4_drv) での更新を取り込み、PX-MLT 系チューナーで CATV のトランスモジュレーション方式 (ISDB-C / ITU-T J.83 Annex C) を受信できるようにする
-  - WinUSB 版: 64QAM / 256QAM の受信、TSMF の Relative stream 抽出、dantto4k 連携用の生 TLV 出力に対応
-  - Linux 版: 通常の ISDB-C TS 受信経路のみを実験的に含む (実機未検証)
-  - macOS 版: `px4rec C` による ISDB-C 選局、TSMF ストリーム選択、生 TLV 出力に対応。PX-MLT5PE と 1 つの CATV 回線で、64QAM の通常 TS 受信と、256QAM の TSMF から取り出した生 TLV の出力を確認済み (256QAM では誤りが残る場合があり、長時間受信は未検証)
-  - 設定方法や制限事項は [docs/isdbc_winusb_experimental.md](docs/isdbc_winusb_experimental.md) を参照
 
 ### 変更点 (Linux 版)
 
 動作確認は Ubuntu 22.04 LTS (x64) で行っています。
 
-- チップ構成が一部変更された、ロット番号 2309 (2023年9月) 以降の DTV02A-1T1S-U に対応
-- [otya 氏のフォーク](https://github.com/otya128/px4_drv) での更新を取り込み、安定性と互換性を改善
+#### 新デバイス対応・機能追加
+
 - [techmadot 氏のフォーク](https://github.com/techmadot/px4_drv) の更新を取り込み、PX-M1UR / PX-S1UR に対応
-- [kznrluk 氏のフォーク](https://github.com/kznrluk/px4_drv) の更新を取り込み、Linux カーネル 6.4 系以降の API 変更に対応
 - [hendecarows 氏のフォーク](https://github.com/hendecarows/px4_drv) での更新を取り込み、DTV03A-1TU に対応
-- PX-MLT5PE のリブランド品である DTV02A-5TS-P (USB Product ID: 0x924e) に対応
-- WinUSB 版と同じく、PX-S1UR を ISDB2056 系の共通処理に統合し、設計の異なる DTV03A-1TU (ISDBT2071) を単独の実装に分離
-- Linux 4.15 (Ubuntu 18.04 の初期カーネル) 以降でビルドできるように修正
-- https://github.com/tsukumijima/px4_drv/pull/33 をマージし、IBT (Indirect Branch Tracking) 対応に伴う `objtool` の検査強化により、Linux 6.15 系などでモジュールをビルド・ロードできない問題に対応
-  - 当初は保守的に Linux 6.15.4 以降でのみ `module_init()` と `module_exit()` を使っていたが、これらは古いカーネルでも利用できるため、v0.6.0 以降ではカーネル版による分岐を削除して統一
-- https://github.com/tsukumijima/px4_drv/pull/6 をマージし、Linux カーネル 6.8 系以降の API 変更に対応
+- チップ構成が一部変更された、ロット番号 2309 (2023年9月) 以降の DTV02A-1T1S-U に対応
+- PX-MLT5PE のリブランド品である DTV02A-5TS-P (USB Product ID: 0x924e) に対応 (v0.6.1 以降)
+- 各機種の内蔵 B-CAS カードリーダーを利用するためのドライバを追加 (v0.7.0 以降)
+  - 別途 `px4-drv-pcsc` ドライバをインストールすることで、pcscd から内蔵カードリーダーを認識・利用できるようになる
+  - pcscd が既定で認識している外付けカードリーダーも引き続き利用できる
+-  PX-MLT 系チューナー (PX-MLT5PE / PX-MLT8PE / DTV02A-4TS-P / DTV02A-5TS-P) において、WinUSB 版と同じくケーブルテレビ (トランスモジュレーション方式: ISDB-C) とスカパー！プレミアムサービス光 (J.83 Annex B) の受信に対応 (v0.7.0 以降)
+  - 受信方法は [ケーブルテレビ (ISDB-C) / スカパー！プレミアムサービス光 (J.83B) の受信](#ケーブルテレビ-isdb-c--スカパープレミアムサービス光-j83b-の受信) を参照のこと
+
+#### ドライバの品質改善
+
+- [otya 氏のフォーク](https://github.com/otya128/px4_drv) での更新を取り込み、安定性と互換性を改善
 - https://github.com/tsukumijima/px4_drv/pull/3 をマージし、`ctrl_timeout` をモジュールパラメーターに追加
+- [kznrluk 氏のフォーク](https://github.com/kznrluk/px4_drv) の更新を取り込み、Linux カーネル 6.4 系以降の API 変更に対応
+- https://github.com/tsukumijima/px4_drv/pull/6 をマージし、Linux カーネル 6.8 系以降の API 変更に対応
+- https://github.com/tsukumijima/px4_drv/pull/33 をマージし、IBT (Indirect Branch Tracking) 対応に伴う `objtool` の検査強化により、Linux 6.15 系などでモジュールをビルド・ロードできない問題に対応 (v0.6.0 以降)
+  - 当初は保守的に Linux 6.15.4 以降でのみ `module_init()` と `module_exit()` を使っていたが、これらは古いカーネルでも利用できるため、v0.6.0 以降ではカーネル版による分岐を削除して統一した
+- チャンネル切り替え、USB の切断・再接続に関する安定性を改善 (v0.6.0 以降)
+- Linux 4.15 (Ubuntu 18.04 の初期カーネル) 以降でビルドできるように修正 (v0.7.0 以降)
+- WinUSB 版と同じく、PX-S1UR を ISDB2056 系の共通処理に統合し、設計の異なる DTV03A-1TU (ISDBT2071) を単独の実装に分離 (v0.7.0 以降)
+
+#### ビルド・ドキュメント
+
 - Debian パッケージ (.deb) の作成とインストールに対応
 - DKMS でのインストール時にファームウェアを自動でインストールするように変更
 - README (このページ) に Debian パッケージからのインストール方法などを追記
@@ -98,11 +112,6 @@ PX-BCUDの長時間録画・スリープ復帰と、torneの現行統合版で�
 	- PX-MLT8PE
     - PX-M1UR
     - PX-S1UR
-    - PX-BCUD（Windows WinUSB版のみ、実験的。アンテナへの外部給電が必要）
-
-- Sony
-
-    - torne CECH-ZD1J（Windows WinUSB版のみ、実験的。現行の統合版と配布設定の組み合わせは実機未検証）
 
 - e-Better
 
@@ -168,6 +177,8 @@ certutil.exe -addstore TrustedPublisher ".\px4_drv_winusb.cer"
 - DTV03A-1TU: `BonDriver_ISDBT2071`
 - PX-M1UR: `BonDriver_PX-M1UR`
 - PX-S1UR: `BonDriver_PX-S1UR`
+
+- RTL2838UHIDIR: `BonDriver_RTLSDR`（[専用の導入手順](winusb/docs/rtlsdr-bondriver.md)を参照）
 - Sony torne CECH-ZD1J: `BonDriver_Torne`
 - PX-BCUD: `BonDriver_PX-BCUD`（アンテナ給電非対応。外部給電と `LNBPower=0` が必要）
 
@@ -180,30 +191,6 @@ IT930xを使用する機種では、同梱の `it930x-firmware.bin` も必要で
 
 使用にあたり、特段 ini ファイルの設定変更などは必要ありません。ソフトウェアごとにチャンネルスキャンを行えばそのまま視聴できます。  
 なお、BonDriver の ini ファイル内の `DisplayErrorMessage` を 1 に設定すると、オリジナル同様にエラー発生時にメッセージボックスを表示します。
-
-#### PX-MLT8PE で J.83B を受信する場合
-
-BonDriver は ini ファイルの `[ReceiverDefinitionN]` を `OpenPriority` の大きい順に試し、最初に開けた受信機を使います。`OpenPriority` の既定値は 0 で、同じ値の定義は記載順に試します。  
-PX-MLT8PE は 1 枚の基板に 5 チューナー側 (デバイス名 `PLEX PX-MLT8PE5`) と 3 チューナー側 (`PLEX PX-MLT8PE3`) の 2 つのデバイスを持ちます。J.83B (ISDB-C の実験的対応) の再現試験では、受信中の TS に連続性エラーが記録される操作が 3 つ見つかりました。
-
-- 3 チューナー側で受信中に、5 チューナー側の電源が入ったとき (逆向きでは記録されていません)
-- 同じデバイスの別の受信機を開いた後の最初の選局 (開いたままの選局し直しと、選局しない Open では記録されていません)
-- 同じデバイスの別の受信機で受信していた地デジを閉じたとき
-
-同じデバイス内の操作による誤りは、受信機の組み合わせで大きく変わります。5 チューナー側でも、受信機 0 と 1 の組み合わせでは記録されず、受信機 1 と 2 の組み合わせでは 7 分間の試験で 138 件記録されました。地デジ・BS では、どの操作でも誤りは記録されず、信号レベルの落ち込みも測定のふらつきと区別できませんでした。256QAM の J.83B は、短い乱れで誤り訂正の限界を超えやすいためと考えられます。
-
-後の 2 つは、チューナーの RF 部が停止状態から動き出す、または停止する変化に続いて起きています。`DriverHost_PX4.ini` の J.83B を受信するデバイスの節 (`[DeviceDefinitionN]` に対応する `[DeviceDefinitionN.Config]`) に次の設定を入れると、DriverHost_PX4 の起動時に電源を入れて全チューナーを動作状態にし、以後の Open・Close ではチューナーを初期化・停止しなくなります。
-
-```ini
-HoldBackendPower=true
-ExperimentalWarmTuners=true
-```
-
-5 チューナー側の受信機 1 と 2 の組み合わせでは、この設定で連続性エラーが 138 件から 0 件になりました。`HoldBackendPower=true` は、3 チューナー側の受信中に 5 チューナー側の電源が入ることも防ぎます。どちらの設定も、使っていない間の消費電力が増えます。`ExperimentalWarmTuners` の効果を確かめたのは上記の組み合わせの短時間の試験だけで、ほかの組み合わせ、PX-MLT5PE、長時間の録画は確認していません。
-
-同梱の `BonDriver_PX-MLT.ini` は 3 チューナー側に `OpenPriority=-1` を指定し、5 チューナー側を先に使います。上記の設定を入れない構成でも、5 チューナー側の電源投入の影響を受ける 3 チューナー側を、5 チューナー側が埋まるまで使わずに済みます。J.83B 用に BonDriver を分けて ini を書く場合も、3 チューナー側の定義に同じ指定を入れると 5 チューナー側が優先されます。
-
-各設定の詳細と試験結果は [docs/isdbc_winusb_experimental.md](docs/isdbc_winusb_experimental.md) の「バックエンド電源の保持」「地デジの受信機を閉じるときのチューナー停止」「チューナーを動作させたままにする」を参照してください。
 
 ### 4. 内蔵 B-CAS カードリーダーの利用
 
@@ -406,19 +393,14 @@ gcc, make, カーネルソース/ヘッダ, dkms がインストールされて�
 
 ### 4. 内蔵 B-CAS カードリーダーの利用
 
-次の機種の内蔵カードリーダーは、pcscd 用のドライバー (`px4-drv-pcsc`) をインストールすると、外付けのカードリーダーと同じように、Mirakurun や EDCB などの PC/SC に対応したアプリケーションから使えます。  
-内蔵カードリーダーを使わない場合は、この手順は不要です。
-
-- PLEX PX-W3U4 / PX-Q3U4 / PX-W3PE4 / PX-Q3PE4 / PX-W3PE5 / PX-Q3PE5
-- PLEX PX-MLT5PE / PX-MLT8PE
-- PLEX PX-M1UR / PX-S1UR
-- e-Better DTV02A-5TS-P / DTV02A-4TS-P / DTV02A-1T1S-U / DTV03A-1TU
+**v0.7.0 以降、pcscd 用ドライバ (`px4-drv-pcsc`) を別途インストールすることで、内蔵カードリーダーを外付けカードリーダー同様に利用できるようになりました！**  
+内蔵 B-CAS カードリーダーを使わない場合は、この手順は不要です。
 
 > [!NOTE]
-> Docker で Mirakurun などを動かしている場合は、pcscd をホストとコンテナのどちらで動かすかによって、ドライバーをインストールする場所が変わります。  
-> 先に [Docker で使う場合](#docker-で使う場合) を読んでください。
+> Mirakurun などを Docker 環境で稼働させている場合は、pcscd をホストとコンテナのどちらで動かすかによって、ドライバのインストール先が異なります。  
+> 先に [Docker 環境からカードリーダーにアクセスする場合](#docker-環境からカードリーダーにアクセスする場合) をお読みください。 
 
-#### pcscd 用ドライバーのインストール
+#### pcscd 用ドライバ (px4-drv-pcsc) のインストール
 
 Releases から、CPU アーキテクチャに合った Debian パッケージ (amd64 か arm64) をダウンロードし、pcscd と一緒にインストールします。  
 Ubuntu 20.04 以降と、同じ世代以降の Debian 系ディストリビューションで動作します。
@@ -431,26 +413,27 @@ Ubuntu 20.04 以降と、同じ世代以降の Debian 系ディストリビュ�
 
 `udevadm` の2行は、すでに接続しているチューナーのカードリーダーを、新しくインストールした pcscd から開けるようにするためのものです。
 
-> [!NOTE]
-> 更新したときも、インストールの後に pcscd を再起動すると読み込まれます。  
-> カードを使っている最中に再起動すると復号が途切れるため、録画や視聴をしていないときに実行してください。
+> [!IMPORTANT]
+> 基本的に、異なるバージョンの px4_drv と px4-drv-pcsc を混在させて利用することはできません。  
+> px4_drv と px4-drv-pcsc の更新後は、必ず pcscd を再起動してください。
 
-> [!TIP]
-> ソースからビルドしてインストールすることもできます。C++17 に対応したコンパイラー、make 、pkg-config 、pcsc-lite の開発用ファイル (Debian / Ubuntu では `libpcsclite-dev`) が必要です。  
+> [!TIP]  
+> ソースからビルドしてインストールすることもできます。  
+> C++17 に対応したコンパイラー、make 、pkg-config 、pcsc-lite の開発用ヘッダー (Debian / Ubuntu では `libpcsclite-dev`) が必要です。  
 > ```
 > $ make -C pcsc
 > $ sudo make -C pcsc install
 > ```
 
-#### 認識の確認
+#### 内蔵カードリーダーの認識を確認
 
 B-CAS カードを挿した状態で、`pcsc-tools` の `pcsc_scan` を実行します。
 
 	$ sudo apt install -y pcsc-tools
 	$ pcsc_scan
 
-次のように、内蔵カードリーダーの名前の下に `Card inserted` と、末尾に `B-CAS Card` の判定が表示されれば使えます。  
-確かめたら、Ctrl+C で終了します。
+次のように、内蔵カードリーダーの名前の下に `Card inserted` と、末尾に `B-CAS Card` の判定が表示されれば利用可能です。  
+確認が完了したら、Ctrl+C で `pcsc_scan` を終了します。
 
 ```
  Reader 0: PLEX PX-W3U4 Smart Card Reader [ID: CD65353E4231AA77] (000001711009061) 00 00
@@ -463,27 +446,38 @@ Possibly identified card (using /usr/share/pcsc/smartcard_list.txt):
 	Japanese Chijou Digital B-CAS Card (pay TV)
 ```
 
-リーダー名の `[ID: ...]` は、Windows 版のリーダー名の `(ID: ...)` と同じ値です。  
-Windows と Linux の両方で、同じ機器を共通の ID で識別できます。
+> [!TIP]  
+> リーダー名の `[ID: ...]` は、Windows 版のリーダー名の `(ID: ...)` と同じ値になるよう設計されています。  
+> Windows と Linux の両方で、同じチューナー機器を共通の ID で識別できます。
 
-#### 認識されない場合
+#### 内蔵カードリーダーが認識されない場合
 
-- **カードリーダーが表示されない:** `ls /dev/px4card/` で、カードリーダーのデバイスファイルがあるかを確かめます。  
-  ない場合は、インストールした px4_drv が内蔵カードリーダーに対応したバージョンかを確かめます。  
-  ある場合は、[インストール](#pcscd-用ドライバーのインストール) の `udevadm` の2行と pcscd の再起動を、もう一度実行します
-- **`Card state` が `Card inserted` にならない:** B-CAS カードの向き (裏表) と、奥まで挿し込まれているかを確かめます
-- **リーダー名に `[ID: ...]` が入っていない:** カーネルモジュールを読み込み直したときなどに起きます。pcscd を再起動すると解消します
+- **カードリーダーが表示されない:** `ls /dev/px4card/` で、カードリーダーのデバイスファイルが存在するかを確認してください。  
+  デバイスファイルが存在しない場合は、インストールした px4_drv が内蔵カードリーダーに対応したバージョンかを確認してください。  
+  デバイスファイルが存在する場合は、以下のコマンドを再度実行してください。  
+  ```
+  $ sudo udevadm trigger --subsystem-match=px4card
+  $ sudo udevadm settle
+  $ sudo systemctl restart pcscd
+  ```
+- **`Card state` が `Card inserted` にならない:** B-CAS カードの向き (裏表) と、奥まで挿し込まれているかを確認してください。
+- **リーダー名に `[ID: ...]` が入っていない:** カーネルモジュールを読み込み直したときなどに発生します。pcscd を再起動することで解消されます。
 
-それでも表示されない場合は、`journalctl -u pcscd` で pcscd のログを確かめます。  
-デバイスファイルを開けなかったときは、`open(...) failed` と、その理由が出ます。
+それでもカードリーダーが表示されない場合は、`journalctl -u pcscd` で pcscd のログを確認してください。  
+デバイスファイルのオープンに失敗した際には `open(...) failed` と、その理由が出力されます。
 
-#### root 以外のサービスから使う場合
+#### root 以外のサービスから使う場合 (Ubuntu 24.04 / Debian 13 以降)
 
-Ubuntu 24.04 以降と Debian 13 以降の pcscd は、接続してきたプログラムを polkit で確かめ、ログインしていないユーザーからの接続を拒否します。  
-このため、Mirakurun や EDCB を root 以外のユーザーの systemd サービスとして動かすと、カードリーダーを使えません (外付けのカードリーダーでも同じで、pcscd のログに `is NOT authorized for action: access_pcsc` が出ます)。  
-Ubuntu 22.04 以前と Debian 12 以前の pcscd はこの確認をしないため、次の設定は不要です。
+Ubuntu 24.04 / Debian 13 以降の pcscd は、接続してきたプログラムを polkit で検証し、ログインしていないユーザーからの接続を拒否します。  
+このため、Mirakurun / EDCB を一般ユーザー権限 (root 以外) の systemd サービスとして稼働させている場合、カードリーダーにアクセスできなくなります。
 
-接続が拒否される場合は、次の polkit のルールを `/etc/polkit-1/rules.d/50-pcscd-recorder.rules` に置き、サービスのユーザー (この例では `mirakurun`) に許可します。
+> [!NOTE]
+> この問題は内蔵カードリーダー固有の問題ではなく、外付けカードリーダーでも同様に発生します。  
+> カードリーダーへのアクセスが拒否された場合、pcscd のログに `is NOT authorized for action: access_pcsc` が出力されます。
+> なお、Ubuntu 22.04 / Debian 12 以前の pcscd は当該チェックを行わないため、この設定を記述する必要はありません。
+
+カードリーダーへのアクセスが拒否される場合には、次の polkit ルールを `/etc/polkit-1/rules.d/50-pcscd-recorder.rules` に配置し、  
+systemd サービスの起動ユーザー (この例では `mirakurun`) がカードリーダーにアクセスできるように設定してください。
 
 ```js
 polkit.addRule(function(action, subject) {
@@ -496,394 +490,52 @@ polkit.addRule(function(action, subject) {
 ```
 
 > [!NOTE]
-> 録画アプリケーションはカードリーダーのデバイスファイルを直接開かず、pcscd に接続します。  
-> チューナーの `video` グループとは違い、アプリケーションのユーザーを `pcscd` グループに加える必要はありません。
+> recisdb などの受信ソフトウェアは、カードリーダーのデバイスファイルには直接アクセスせず、pcscd 経由で間接的にアクセスします。  
+> チューナーデバイスの `video` グループと異なり、recisdb を実行するユーザーを `pcscd` グループに追加する必要はありません。
 
-#### Docker で使う場合
+#### Docker 環境からカードリーダーにアクセスする場合
 
-カーネルモジュールはホストにインストールします。  
-pcscd は、ホストとコンテナのどちらか一方だけで動かし、それに合わせて pcscd 用ドライバーをインストールする場所を選びます。
+Docker 環境からカードリーダーにアクセスするには、ホストの pcscd を使うか、コンテナ内で pcscd を立ち上げるかの2つの方法があります。
 
-- **コンテナ内で pcscd を動かす (Mirakurun の既定の構成):** コンテナのイメージにドライバーを追加してビルドし直します
-- **ホストの pcscd を使う:** イメージはそのままで済みますが、ホストとコンテナの pcsc-lite のバージョンが大きく違うと接続できないことがあります
+- **コンテナ内で pcscd を動かす (Mirakurun の既定の構成):** コンテナのイメージにドライバを追加してビルドし直します
+- **ホストの pcscd を使う:** イメージはそのままで済みますが、ホストとコンテナの pcsc-lite のバージョンが異なる場合は接続できないことがあります
 
 > [!WARNING]
-> ホストとコンテナの両方で pcscd を動かすと、カードリーダーへのアクセスが競合し、片方が使えなくなります。
+> 事前に px4_drv のカーネルモジュールがホスト側にインストールされている必要があります。  
+> ホストとコンテナの両方で pcscd を起動するとカードリーダーへのアクセスが競合し、どちらか一方が正常に動作しなくなってしまいます。
 
 ##### コンテナ内で pcscd を動かす
 
-Mirakurun の公式イメージには pcscd 用ドライバーが入っていないので、Debian パッケージを追加したイメージを作ります。  
-arm64 の機器 (Raspberry Pi など) では、ファイル名の `amd64` を `arm64` に変えます。
+Mirakurun の公式イメージには pcscd 用ドライバが入っていないため、事前に px4-drv-pcsc の Debian パッケージを追加したイメージを作成します。  
+起動用の `docker-compose.yml` は Mirakurun 公式のものをベースに、`image` だけをこのイメージに変更してください。  
 
 ```dockerfile
+# arm64 環境では "amd64" を "arm64" に変更してください
 FROM chinachu/mirakurun:latest
 ADD https://github.com/tsukumijima/px4_drv/releases/download/v0.6.1/px4-drv-pcsc_0.6.1_amd64.deb /tmp/
 RUN dpkg -i /tmp/px4-drv-pcsc_0.6.1_amd64.deb && rm /tmp/px4-drv-pcsc_0.6.1_amd64.deb
 ```
 
-`docker-compose.yml` は Mirakurun の公式のもの (`/dev:/dev` の volume 、`network_mode: host` 、`device_cgroup_rules`) のまま、`image` だけをこのイメージに変えます。  
-そのうえで、ホストの pcscd を止めます。
+完了したら、ホストの pcscd を停止します。
 
 	$ sudo systemctl disable --now pcscd.socket pcscd.service
 
 > [!NOTE]
-> すべての機器を取り外すと `/dev/px4card` ごと消えるため、`/dev/px4card` だけをコンテナへマウントすると、抜き差しした後にコンテナから見えなくなります。  
-> 公式の構成のとおり、`/dev` 全体をマウントしてください。
+> 全てのチューナー機器が取り外されると、`/dev/px4card` はディレクトリごと消滅します。  
+> `/dev/px4card` だけをコンテナへマウントしてしまうと、USB を抜き差しした後にデバイスファイルがコンテナから見えなくなってしまう可能性があります。  
+> 公式の Docker Compose に従い、`/dev` 全体をマウントしてください。
 
 ##### ホストの pcscd を使う
 
-ホストに pcscd 用ドライバーを [インストール](#pcscd-用ドライバーのインストール) し、コンテナ内の pcscd は動かさずに、ホストの pcscd のソケットディレクトリをコンテナへマウントします。  
-Mirakurun では、環境変数 `DISABLE_PCSCD=1` を設定し、`/var/run/pcscd:/var/run/pcscd` をマウントします。
+事前に pcscd 用ドライバをホストマシンに [インストール](#pcscd-用ドライバ-px4-drv-pcsc-のインストール) しておいてください。
+
+その後、コンテナ内では pcscd を起動させず、代わりにホスト上の pcscd のソケットディレクトリをコンテナ内にマウントします。  
+Mirakurun の場合は、環境変数 `DISABLE_PCSCD=1` を設定した上で、`/var/run/pcscd:/var/run/pcscd` をコンテナ内にマウントしてください。
 
 > [!WARNING]
-> Mirakurun の `docker-compose.yml` の例のように、ソケットファイル (`pcscd.comm`) だけをマウントすると、ホストの pcscd が再起動したときにコンテナから接続できなくなります。  
-> ディレクトリごとマウントしてください。  
-> また、ホストとコンテナの pcsc-lite のバージョンが大きく違うと接続できないことがあります。その場合は、コンテナ内で pcscd を動かす構成を使ってください。
-
-## インストール (macOS)
-
-macOS 版は、ユーザー空間デーモン `DriverHost_PX4` として動作します。  
-デーモンが起動すると、UNIX ドメインソケット (`/tmp/px4_ctrl_pipe.sock`, `/tmp/px4_data_pipe.sock`) 経由でチューナーの制御・TS データの取得が可能になります。
-
-あわせて、デーモンのクライアントとして機能する `px4rec` コマンドも同時にビルドされます。  
-`px4rec` は録画した TS データを stdout または指定ファイルに出力するシンプルなコマンドラインツールで、Linux の `recpt1` に相当する役割を担います。
-
-`DriverHost_PX4` は、macOS のドライバから USB デバイスを切り離して取得するため、**root 権限 (`sudo`) で起動する必要があります**。
-デーモンが作成するソケットは全ユーザーが接続できるため、`px4rec` や Mirakurun は一般ユーザーのままで利用できます。
-
-`px4rec` は、制御ソケットに接続できない場合に、同じディレクトリに配置された `DriverHost_PX4` を自動起動してから再接続を試みます。
-ただし、自動起動されるデーモンは `px4rec` と同じユーザーで動くため、`px4rec` を一般ユーザーで実行している場合はチューナーを取得できません。**デーモンはあらかじめ `sudo` または launchd で起動しておいてください。**
-
-> [!IMPORTANT]
-> **Linux の `/dev/px4video*` との互換性について**
->
-> Linux ドライバは `ioctl()` によって制御するキャラクタデバイスを提供しますが、macOS ではユーザー空間からカーネル拡張なしに `/dev/*` デバイスノードを作成することはできません。  
-> このため、`recpt1` や `recisdb` などの既存 Linux バイナリをそのまま macOS で使用することはできません。
->
-> 代わりに、同梱の `px4rec` コマンドを `recpt1` の代わりに使用するか、`mirakurun` の `command:` 設定に `px4rec` を指定することで、同等の機能を利用できます。
-
-### 1. 前提条件のインストール
-
-[Homebrew](https://brew.sh/) がインストールされている必要があります。
-
-	$ xcode-select --install            # Xcode コマンドラインツール (未インストールの場合)
-	$ brew install cmake libusb
-
-### 2. ソースコードの取得とビルド
-
-	$ git clone https://github.com/stuayu/px4_drv.git
-	$ cd px4_drv
-	$ git checkout integration/macos-isdbc-tsmf   # macOS 対応が develop へ取り込まれるまでの間
-	$ cmake -S macos -B macos/build -DCMAKE_BUILD_TYPE=Release
-	$ cmake --build macos/build
-
-以降のコマンドは、すべてリポジトリのルート (`px4_drv/`) で実行します。
-
-ビルドが成功すると `macos/build/` に次のファイルが生成されます。
-
-| ファイル | 内容 |
-| --- | --- |
-| `DriverHost_PX4` | デーモン本体 |
-| `px4rec` | 録画コマンド |
-| `DriverHost_PX4.ini` | 設定ファイル (ビルド時に自動でコピーされる) |
-
-### 3. ファームウェアの配置
-
-`it930x-firmware.bin` を `macos/build/` に置きます。ファームウェアは自動ではコピーされません。
-リポジトリに同梱している抽出済みのファームウェアを使う場合は、次のコマンドだけで完了です。
-
-	$ cp etc/it930x-firmware.bin macos/build/
-
-公式ドライバから自分で抽出する場合は、同梱ファームウェアをコピーする代わりに次を実行します。
-
-	$ make -C fwtool
-	$ curl -L -o pxw3u4_BDA_ver1x64.zip http://plex-net.co.jp/plex/pxw3u4/pxw3u4_BDA_ver1x64.zip
-	$ unzip -oj pxw3u4_BDA_ver1x64.zip pxw3u4_BDA_ver1x64/PXW3U4.sys && rm pxw3u4_BDA_ver1x64.zip
-	$ ./fwtool/fwtool PXW3U4.sys macos/build/it930x-firmware.bin && rm PXW3U4.sys
-
-### 4. 動作確認
-
-インストールする前に、ビルドしたものが動くことを確認します。チューナーを接続し、`sudo` を付けてデーモンを起動します。
-
-	$ sudo ./macos/build/DriverHost_PX4
-
-`DriverHost_PX4 started. (resident)` と表示され、`libusb_claim_interface() failed` が出ていなければ、チューナーを取得できています。
-デーモンを動かしたまま別のターミナルを開き、地上波の物理チャンネル (下の例では 27) を 10 秒録画します。
-
-	$ cd px4_drv
-	$ ./macos/build/px4rec -d 10 T 27 test.ts
-	$ ls -l test.ts
-
-`test.ts` が 20 MB 前後のサイズで作られていれば受信できています。チャンネル番号は、お住まいの地域で受信できる物理チャンネルに置き換えてください。確認が済んだら、デーモンを起動したターミナルで `Ctrl-C` を押して終了します。
-
-### 5. デーモンの起動
-
-常用する場合は、下の「[システムへインストールして launchd で起動](#システムへインストールして-launchd-で起動)」の手順で登録してください。Mac の起動時に root 権限で自動的に起動します。
-
-`DriverHost_PX4` は root 権限で起動します。一般ユーザーで起動してもプロセスは動きますが、チューナーを取得できず、ログに `libusb_claim_interface() failed` と表示されます。
-
-`px4rec` 実行時に `DriverHost_PX4` が起動していなければ、同じディレクトリにある `DriverHost_PX4` が自動起動されますが、`px4rec` と同じユーザーで動きます。`px4rec` を `sudo` で実行した場合に限り、自動起動されたデーモンがチューナーを取得でき、`px4rec` の終了後も常駐し続けます。
-
-#### 手動起動
-
-デーモンを手動で起動する場合は、`sudo` を付けて実行します。バックグラウンドで起動するとパスワードを入力できないため、先に `sudo -v` で認証を済ませておきます。
-
-	$ sudo -v
-	$ sudo ./macos/build/DriverHost_PX4 &
-
-標準出力と標準エラー出力をログへ保存する場合は、次のように起動します。
-
-	$ sudo nohup ./macos/build/DriverHost_PX4 \
-	    > /tmp/DriverHost_PX4.log 2>&1 &
-
-`DriverHost_PX4.ini` と `it930x-firmware.bin` は、実行ファイルと同じ `macos/build/` に配置します。実行時のカレントディレクトリは実行ファイルのディレクトリへ変更されるため、別のディレクトリから絶対パスで起動しても、この配置関係は維持されます。
-
-#### 起動オプション
-
-| オプション | 説明 |
-| --- | --- |
-| `-t <秒>`, `--idle-timeout=<秒>` | 接続がない状態がこの秒数続いたときに終了する (既定値: `0` = 終了せず常駐) |
-| `-r`, `--resident` | クライアントが接続していなくても終了せず常駐する (`--idle-timeout=0` と同じ。既定の動作) |
-| `-h`, `--help` | 使い方を表示する |
-
-既定では、クライアントが接続していなくてもデーモンは終了せず常駐します。
-
-使っていないときはデーモンを終了させたい場合は、無接続のまま待つ秒数を指定します。次の例では、最後のクライアントが切断されてから 300 秒後に終了します。
-
-	$ sudo ./macos/build/DriverHost_PX4 --idle-timeout=300 &
-
-デーモンは `SIGINT` または `SIGTERM` で終了処理を開始し、受信の停止とソケットの削除を行ってから終了します。`kill -9` で停止すると、この後始末を行いません。
-
-	$ sudo kill $(pgrep -f macos/build/DriverHost_PX4)
-
-#### デーモンの動作
-
-デーモンは次の UNIX ドメインソケットを作成します。
-
-| 用途 | ソケット |
-| --- | --- |
-| チューナー制御 | `/tmp/px4_ctrl_pipe.sock` |
-| TS データ取得 | `/tmp/px4_data_pipe.sock` |
-
-ソケットのパーミッションは `0666` で、この Mac にログインできるユーザーであれば誰でもチューナーを利用できます。
-
-既定では、接続の有無にかかわらずデーモンは終了しません。`--idle-timeout` に 1 以上の秒数を指定した場合に限り、最後のクライアントが切断されてから 1 秒間隔で接続数を確認し、無接続のまま指定した秒数が経過したときに終了します。制御接続またはデータ接続が 1 つでも残っている間は終了しません。複数の `px4rec` や Mirakurun の録画処理から同時に接続できます。
-
-同じデーモンを複数起動することはできません。2つ目のプロセスはロックファイル `/tmp/px4_drv_host.lock` で既存プロセスを検出し、終了します。
-
-#### システムへインストールして launchd で起動
-
-ビルドした一式を root 所有のディレクトリへインストールし、LaunchDaemon として登録します。Mac の起動時に root 権限で起動し、ログインしていなくても動作します。異常終了したときは launchd が再起動します。
-
-root で動かす実行ファイルを一般ユーザーが書き換えられる場所 (ホームディレクトリ以下の `macos/build/` など) に置いたまま登録すると、そのユーザーが root 権限を得られてしまいます。必ず root 所有のディレクトリへコピーしてください。
-
-**1. ファイルのインストール**
-
-	$ sudo mkdir -p /usr/local/px4_drv
-	$ sudo cp macos/build/DriverHost_PX4 macos/build/px4rec macos/build/DriverHost_PX4.ini macos/build/it930x-firmware.bin /usr/local/px4_drv/
-	$ sudo chown -R root:wheel /usr/local/px4_drv
-	$ sudo chmod 755 /usr/local/px4_drv /usr/local/px4_drv/DriverHost_PX4 /usr/local/px4_drv/px4rec
-	$ sudo chmod 644 /usr/local/px4_drv/DriverHost_PX4.ini /usr/local/px4_drv/it930x-firmware.bin
-
-**2. LaunchDaemon の作成**
-
-次のコマンドをそのまま貼り付けると、`/Library/LaunchDaemons/io.px4.DriverHost_PX4.plist` が作成されます。
-
-	$ sudo tee /Library/LaunchDaemons/io.px4.DriverHost_PX4.plist > /dev/null <<-'EOF'
-	<?xml version="1.0" encoding="UTF-8"?>
-	<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
-	  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-	<plist version="1.0">
-	<dict>
-	  <key>Label</key>
-	  <string>io.px4.DriverHost_PX4</string>
-	  <key>ProgramArguments</key>
-	  <array>
-	    <string>/usr/local/px4_drv/DriverHost_PX4</string>
-	  </array>
-	  <key>WorkingDirectory</key>
-	  <string>/usr/local/px4_drv</string>
-	  <key>RunAtLoad</key>
-	  <true/>
-	  <key>KeepAlive</key>
-	  <dict>
-	    <key>SuccessfulExit</key>
-	    <false/>
-	  </dict>
-	  <key>ThrottleInterval</key>
-	  <integer>30</integer>
-	  <key>StandardOutPath</key>
-	  <string>/var/log/DriverHost_PX4.log</string>
-	  <key>StandardErrorPath</key>
-	  <string>/var/log/DriverHost_PX4.error.log</string>
-	</dict>
-	</plist>
-	EOF
-
-LaunchDaemon の plist は、所有者が root、パーミッションが `644` でなければ読み込まれません。
-
-	$ sudo chown root:wheel /Library/LaunchDaemons/io.px4.DriverHost_PX4.plist
-	$ sudo chmod 644 /Library/LaunchDaemons/io.px4.DriverHost_PX4.plist
-	$ plutil -lint /Library/LaunchDaemons/io.px4.DriverHost_PX4.plist
-
-**3. 登録と起動**
-
-手動で起動したデーモンが残っている場合は、先に停止します。
-
-	$ sudo pkill DriverHost_PX4
-	$ sudo launchctl bootstrap system /Library/LaunchDaemons/io.px4.DriverHost_PX4.plist
-
-**4. 確認**
-
-	$ sudo launchctl print system/io.px4.DriverHost_PX4 | grep -E 'state|pid|last exit'
-	$ ls -l /tmp/px4_ctrl_pipe.sock /tmp/px4_data_pipe.sock
-	$ cat /var/log/DriverHost_PX4.log /var/log/DriverHost_PX4.error.log
-	$ /usr/local/px4_drv/px4rec -d 10 T 27 test.ts
-
-`state = running` と表示され、ソケットが 2 つ存在し、`px4rec` で録画できれば完了です。以降は Mac を再起動しても自動的に起動します。
-
-デーモンは既定で常駐するため、起動オプションは不要です。`KeepAlive` の `SuccessfulExit` を `false` にしているので、launchd が再起動するのは異常終了したときだけです。`kill` による正常終了や、すでに別の `DriverHost_PX4` が動いていて二重起動を検出した場合 (どちらも終了コード 0) は再起動しません。`KeepAlive` を単に `true` にすると、手動起動したデーモンが残っている間、launchd が起動と終了を繰り返します。`ThrottleInterval` は、ファームウェアの配置漏れなどで起動に失敗し続けたときの再起動間隔 (秒) です。
-
-- plist を書き換えたときは、いったん `bootout` してから `bootstrap` し直します
-- デーモンだけを再起動するときは `sudo launchctl kickstart -k system/io.px4.DriverHost_PX4` を使います
-- ビルドし直したときは、「1. ファイルのインストール」のコマンドをもう一度実行してから再起動します
-- Mirakurun の `command:` には `/usr/local/px4_drv/px4rec` を指定します
-
-停止と登録解除:
-
-	$ sudo launchctl bootout system/io.px4.DriverHost_PX4
-
-録画中に停止すると TS が途中で終了します。録画処理を先に終了し、クライアントが切断されたことを確認してから停止します。
-#### tmux で起動
-
-ターミナルを閉じても動作させ、ログを確認したい場合は tmux を使用します。
-
-	$ tmux new-session -d -s px4-driver \
-	    'sudo ./macos/build/DriverHost_PX4 2>&1 | tee /tmp/DriverHost_PX4.log'
-	$ tmux attach -t px4-driver   # パスワードを求められていたら入力する
-
-デタッチは `Ctrl-b` の後に `d` です。セッションとデーモンの状態は次で確認できます。
-
-	$ tmux has-session -t px4-driver
-	$ ls -l /tmp/px4_ctrl_pipe.sock /tmp/px4_data_pipe.sock
-
-デーモンは既定で常駐するため、クライアントが切断されてもソケットは残ります。`--idle-timeout` を指定して起動した場合に限り、無接続が続くとデーモンが終了してソケットが消えます。
-
-#### 起動確認とトラブルシューティング
-
-ソケットだけでなく、プロセスとログを確認します。
-
-	$ pgrep -af DriverHost_PX4
-	$ ls -l /tmp/px4_ctrl_pipe.sock /tmp/px4_data_pipe.sock
-	$ tail -f /tmp/DriverHost_PX4.log
-
-ソケットが存在してもプロセスが動いていなければ、前回の異常終了で残ったソケットの可能性があります。プロセスが存在しないことを確認してから、対象ファイルだけを削除し、再起動します。
-
-	$ sudo rm -f /tmp/px4_ctrl_pipe.sock /tmp/px4_data_pipe.sock /tmp/px4_drv_host.lock
-	$ sudo ./macos/build/DriverHost_PX4
-
-起動時に `DriverHost_PX4.ini` または `it930x-firmware.bin` を読み込めない場合は、配置とファイル名を確認します。USB デバイスを認識できない場合は、USB 接続、対応機種、ログのエラーを確認します。
-
-ログに `libusb_claim_interface() failed: LIBUSB_ERROR_ACCESS` や「USB デバイスを取得する権限がありません」と表示される場合は、デーモンを root 権限で起動していません。いったん停止し、`sudo` を付けて起動し直してください。`could not open lock file` と表示される場合は、別のユーザー (root) で起動したデーモンがすでに動いています。
-
-### 6. 録画 (px4rec)
-
-`px4rec [options] T|S|C <channel> [output|-]` で TS データを録画できます。macOS 版の ISDB-C、TSMF、生 TLV 出力は実験的な対応です。PX-MLT5PE と 1 つの CATV 回線で受信を確認していますが、256QAM のチャンネルでは誤りが残る場合があり、長時間受信と、TSMF から通常の TS を取り出す経路は未検証です。
-
-> [!NOTE]
-> 接続されているチューナーが対応していない系統を指定した場合は `OPEN failed` で終了します。  
-> また、アンテナが未接続・無信号・受信条件不一致の場合は `TUNE failed` で終了します。
-
-	# 地上波 (ISDB-T) 27ch を 60 秒録画してファイルに保存
-	$ ./macos/build/px4rec -d 60 T 27 output.ts
-
-	# 衛星受信対応チューナーで、BS トランスポンダ 3 を stdout に出力 (パイプで他ツールへ渡す場合)
-	$ ./macos/build/px4rec S 3 - | ffplay -i -
-
-	# B-CAS カードで B25 デスクランブルを行いながら録画 (--b25 オプション)
-	$ ./macos/build/px4rec --b25 -d 60 T 13 output_decoded.ts
-
-	# CATV C13 を 60 秒録画 (ISDB-C、変調方式は自動)
-	$ ./macos/build/px4rec -d 60 C 13 cable.ts
-
-	# 中心周波数を直接指定し、補正値と変調方式を固定
-	$ ./macos/build/px4rec --freq-khz 473000 --freq-offset -1 --modulation 256 C 13 relay.ts
-
-	# TSMF の Relative stream 0 を選択して生 TLV を保存
-	$ ./macos/build/px4rec --tsmf 0 --tsmf-slot-offset 0 --tlv C 13 stream.tlv
-
-オプション一覧:
-
-| オプション | 説明 |
-| --- | --- |
-| `-i N` | 使用するチューナーのインデックス (0 始まり、デフォルト: -1 = 最初の空きチューナー) |
-| `-d N` | 録画時間を秒で指定 (省略すると SIGTERM/Ctrl+C まで継続) |
-| `--b25` | B-CAS カードを使って ARIB STD-B25 のデスクランブル処理を行う (macOS の PC/SC フレームワーク経由) |
-| `--freq-khz kHz` | C 専用。中心周波数を直接指定 (1〜4294967295 kHz)。指定時はチャンネル番号からの周波数計算が不要 |
-| `--freq-offset kHz` | C 専用。中心周波数への補正値 (符号付き32bit整数、既定 0)。補正後は1〜4294967295 kHzが必要 |
-| `--modulation 64\|256` | C 専用。64QAM または256QAMを固定。省略時は自動 (64QAM、未ロック時に256QAM) |
-| `--tsmf 0-14` | C 専用。TSMF の Relative stream 番号を指定 |
-| `--tsmf-slot-offset n` | C 専用。TSMF slot offset (符号付き32bit整数、既定 0)。`--tsmf` が必要 |
-| `--tlv` | C 専用。TSMF 内の TLV 型ストリームを生 TLV で出力。`--tsmf` が必要。TS 用の復号処理である `--b25` との併用は対象外 |
-| `--help` / `-h` | usage を表示 |
-| `T` / `S` / `C` | ISDB-T (地上波) / ISDB-S (衛星) / ISDB-C (CATV トラモジ) |
-| チャンネル | T: 物理チャンネル番号 13–62 / S: トランスポンダ番号 0–11 (BS), 12–23 (CS110) / C: CATV Cチャンネル番号 13–63 |
-| 出力先 | ファイルパス、または `-` (標準出力、省略時も標準出力) |
-
-ISDB-C の C13〜C22 は物理チャンネル3〜12、C23〜C63 は物理チャンネル22〜62に対応します。中心周波数は `93000 + 物理チャンネル × 6000` kHzで、物理チャンネル12だけ2000 kHzを加算します。UHF/VHF帯の再送信などでは `--freq-khz` で中心周波数を指定できます。直接指定時も Cチャンネル番号13〜63が必要です。
-
-C専用オプションを T/S と併用した場合、値が範囲外の場合、`--tsmf` なしで slot offset または TLV を指定した場合は、選局前にエラーになります。TSMF未指定時は通常のTS、指定時は選択したストリームのTS、`--tlv` 併用時は生TLVが出力されます。
-
-> [!NOTE]
-> `--b25` を使用する場合は、macOS に接続された PC/SC 対応 IC カードリーダーに B-CAS カードを挿入してください。  
-> macOS の PC/SC フレームワーク (`PCSC.framework`) を使用するため、追加のドライバやライブラリは不要です。
-
-### 7. mirakurun との連携
-
-`mirakurun` の設定ファイル (`tuners.yml`) に以下のように記述することで、mirakurun 経由で EPGStation や Chinachu から利用できます。
-
-`DriverHost_PX4` はあらかじめ launchd (または `sudo`) で起動しておき、`command:` には `px4rec` の絶対パスを指定してください。
-Mirakurun を一般ユーザーで動かしている場合、`px4rec` からの自動起動ではチューナーを取得できません。
-
-```yaml
-- name: PX4-T1
-  types:
-    - GR
-  command: /path/to/px4rec T <ch>
-
-- name: PX4-S1
-  types:
-    - BS
-    - CS
-  command: /path/to/px4rec -i 1 S <ch>
-```
-
-### 8. 確認
-
-デーモンが起動すると、UNIX ドメインソケットが作成されます。
-
-	$ ls /tmp/px4_ctrl_pipe.sock /tmp/px4_data_pipe.sock
-	/tmp/px4_ctrl_pipe.sock  /tmp/px4_data_pipe.sock
-
-ソケットファイルが存在していれば、デーモンは起動しています。チューナーを取得できているかは、ログに `libusb_claim_interface() failed` が出ていないことで確認します。
-
-## アンインストール (macOS)
-
-### 1. デーモンの停止
-
-launchd に登録している場合は、先に登録を解除します。
-
-	$ sudo launchctl bootout system/io.px4.DriverHost_PX4
-	$ sudo rm /Library/LaunchDaemons/io.px4.DriverHost_PX4.plist
-
-実行中の `DriverHost_PX4` プロセスを停止します。
-
-	$ sudo pkill DriverHost_PX4
-
-### 2. ファイルの削除
-
-	$ rm -rf macos/build
-	$ sudo rm -rf /usr/local/px4_drv   # launchd 用にコピーした場合
+> Mirakurun 公式の `docker-compose.yml` のようにソケットファイル (`pcscd.comm`) だけをマウントすると、ホストの pcscd が再起動した際にコンテナから接続できなくなります。  
+> 必ず `/var/run/pcscd` ディレクトリごとコンテナへマウントしてください。  
+> また、ホストとコンテナの pcsc-lite のバージョンが大きく異なると接続できないことがあります。その場合は、コンテナ内で pcscd を動かす構成を検討してください。
 
 ## アンインストール (Windows)
 
@@ -935,16 +587,67 @@ launchd に登録している場合は、先に登録を解除します。
 
 BonDriver は専用のものが必要になるため、公式 (Jacky版) BonDriver や radi-sh 氏版 BonDriver_BDA と併用することはできません。
 
-### macOS
-
-`DriverHost_PX4` デーモンを起動した状態で、または `px4rec` に同梱された自動起動機能を通じて、UNIX ドメインソケット (`/tmp/px4_ctrl_pipe.sock`, `/tmp/px4_data_pipe.sock`) を経由し、Windows WinUSB 版と同一のコマンドプロトコルで通信することで、TS データを受信することが可能です。
-
 ### Linux
 
 recpt1 や [BonDriverProxy_Linux](https://github.com/u-n-k-n-o-w-n/BonDriverProxy_Linux) 等の PT シリーズ用 chardev ドライバに対応したソフトウェアを使用することで、TS データを受信することが可能です。  
 recpt1 は、PLEX 社より配布されているものを使用する必要はありません。
 
 BonDriverProxy_Linux と、PLEX PX-MLT5PE や e-Better DTV02A-1T1S-U などのデバイスファイル1つで ISDB-T と ISDB-S のどちらも受信可能なチューナーを組み合わせて使用する場合は、BonDriver として BonDriverProxy_Linux に同梱されている BonDriver_LinuxPT の代わりに、[BonDriver_LinuxPTX](https://github.com/nns779/BonDriver_LinuxPTX) を使用してください。
+
+## ケーブルテレビ (ISDB-C) / スカパー！プレミアムサービス光 (J.83B) の受信
+
+このフォークの旧実験用設定から更新する場合は、[上流統合時の移行事項](docs/upstream-isdbc-integration.md)を先に確認してください。
+
+**v0.7.0 以降、PX-MLT 系チューナー (PX-MLT5PE / PX-MLT8PE / DTV02A-4TS-P / DTV02A-5TS-P) なら、地上波や BS/CS に加え、ケーブルテレビ (ISDB-C) とスカパー！プレミアムサービス光 (J.83 Annex B) を受信できるようになりました！**
+
+- ISDB-C (J.83 Annex C): ケーブルテレビ局が地上波・地上波 (区域外再送信)・BS・専門チャンネルをトランスモジュレーション方式で再送信する放送
+  - 実装にあたり、実際に PX-MLT5PE とケーブルテレビ（イッツコム）の環境で動作確認を行っています。
+- J.83 Annex B: フレッツ・テレビなどの光回線経由で送られる「スカパー！プレミアムサービス光」の放送
+  - スカパー！プレミアムサービス光は、ユーザーの環境でチャンネルスキャン・受信が正常に行えたと報告を受けています。
+
+### Windows
+
+`BonDriver_PX-MLT.dll` は、既定では従来通り、地上波・BS/CS のみが受信対象として設定されています。  
+ケーブルテレビを受信するには、`BonDriver_PX-MLT.ini` → `[BonDriver]` → `System` に `ISDB-C` を、  
+スカパー！プレミアムサービス光を受信するには `J.83B` を明示的に追加してください (例: `System="ISDB-T,ISDB-S,ISDB-C"`)。
+
+```ini
+[BonDriver]
+Name="PX-MLT"
+; ケーブルテレビ (ISDB-C) を受信する際は 2つ目、スカパー！プレミアムサービス光 (J.83B) を受信する際は
+; 3つ目の System の行の先頭の ; を外し、1つ目の行の先頭に ; を付ける
+System="ISDB-T,ISDB-S"
+;System="ISDB-T,ISDB-S,ISDB-C"
+;System="ISDB-T,ISDB-S,J.83B"
+...
+```
+
+> [!TIP]  
+> EDCB (EpgDataCap_Bon) などの「全チューニング空間の全チャンネルを順に選局して一括でチャンネルスキャンを行う」受信ソフトウェアでは、実際には全て受信できないチューニング空間であっても、チャンネルスキャン時に毎回選局されます。  
+> ケーブルテレビのチャンネル定義は約450行、スカパー！プレミアムサービス光は約110行あり、受信できない環境では1チャンネルごとに受信を待ってから次へ進む形となるため、既定でこれらのチューニング空間を有効にすると、チャンネルスキャンに非常に時間が掛かります。  
+> こうした理由により、アンテナで地上波と BS/CS だけを受信している大半のユーザーのチャンネルスキャンまで遅くなってしまうことから、ISDB-C / J.83B は既定では無効化されています。
+
+> [!NOTE]  
+> ケーブルテレビでは、1つの物理チャンネルで複数の放送をまとめて送出していることがあります (TSMF 方式)。  
+> チャンネル定義にある「C52Ch/TS1」のような行は、こうした TSMF 方式で送出されているチャンネルの、2本目以降の TS を受信するためのものです。  
+> 当該物理チャンネルに該当する TS がなければ、チャンネルスキャン時に自動的に除外されます。
+
+> [!NOTE]
+> BS4K が再送信されているケーブルテレビにおいて 4K 放送を受信するには、別途 [BonDriver_dantto4k](https://github.com/nekohkr/dantto4k) と組み合わせてご利用ください。
+
+### Linux
+
+[recisdb](https://github.com/kazuki0824/recisdb-rs) を使い、次のようにチャンネルを指定して ISDB-C / J.83B を受信できます。  
+
+- `ISDBC-C52` (ケーブルテレビ: C52)、`ISDBC-20` (ケーブルテレビ: UHF 20ch)
+- `ISDBC-C52_1` (ケーブルテレビ: C52 の2本目の TS (TSMF))
+- `J83B-H001` 〜 `J83B-H105`、`J83B-374950` (スカパー！プレミアムサービス光: 番号か中心周波数 (kHz) で指定)
+
+受信ソフトウェアを開発する方向けの ioctl 仕様は、[ISDB-C と J.83 Annex B の選局の仕様](docs/isdbc_tuning.md) に記載されています。
+
+> [!WARNING]  
+> 2026/10/29 現在、recisdb の ISDB-C / J.83B サポートは [kazuki0824/recisdb-rs#202](https://github.com/kazuki0824/recisdb-rs/pull/202) にて開発中です。  
+> recisdb の新バージョンがリリースされるまでは、こちらのブランチを自ビルドした上でご利用ください。
 
 ## LNB電源の出力
 

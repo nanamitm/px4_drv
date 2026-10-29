@@ -124,7 +124,7 @@ void StreamServer::StreamConnection::StreamWorker(std::shared_ptr<px4::ReceiverB
 	stream_buf->HandleReadWithEpoch(config_.out_buffer_size / 4,
 		[this,framed](const void *buf, std::size_t size,std::uint32_t epoch) {
 			if(framed){
-				if(size>px4::StreamFrameMax || size%188)return false;
+				if(!size || size>px4::StreamFrameMax)return false;
 				const px4::StreamFrameHeader header{px4::StreamFrameMagic,epoch,static_cast<std::uint32_t>(size)};
 				std::size_t written=0;
 				if(!conn_->Write(&header,sizeof(header),written,stream_quit_event_) || written!=sizeof(header))return false;

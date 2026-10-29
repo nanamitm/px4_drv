@@ -1,4 +1,4 @@
-﻿<?xml version="1.0" encoding="utf-8"?>
+<?xml version="1.0" encoding="utf-8"?>
 <Project DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <ItemGroup Label="ProjectConfigurations">
     <ProjectConfiguration Include="Debug|Win32"><Configuration>Debug</Configuration><Platform>Win32</Platform></ProjectConfiguration>
@@ -64,6 +64,7 @@
     <ClCompile Include="pxbcud_live_device.cpp" />
     <ClCompile Include="..\src\DriverHost_PX4\device_base.cpp" />
     <ClCompile Include="..\src\DriverHost_PX4\receiver_base.cpp" />
+    <ClCompile Include="..\..\driver\tsmf.c" />
     <ClCompile Include="..\src\DriverHost_PX4\receiver_manager.cpp" />
     <ClCompile Include="..\src\DriverHost_PX4\ringbuffer.cpp" />
     <ClCompile Include="..\src\common\config.cpp" />

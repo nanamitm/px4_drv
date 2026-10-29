@@ -76,14 +76,7 @@ namespace command {
 	enum class ParameterType : std::uint32_t {
 		UNDEFINED = 0,
 		BANDWIDTH = 1,
-		SYMBOL_RATE,
-		MODULATION,
-		TSMF_MODE,
-		TSMF_RELATIVE_STREAM,
-		TSMF_SLOT_OFFSET,
-		/* Select raw TLV output after TSMF slot selection.  This is used
-		 * only by the dantto4k input path; ordinary TSMF remains MPEG-TS. */
-		TSMF_OUTPUT_TLV,
+		TSMF_STREAM,
 		STREAM_ID = 16,
 	};
 

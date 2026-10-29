@@ -33,12 +33,8 @@ enum cxd2856er_system {
 	CXD2856ER_UNSPECIFIED_SYSTEM = 0,
 	CXD2856ER_ISDB_T_SYSTEM,
 	CXD2856ER_ISDB_S_SYSTEM,
-	CXD2856ER_ISDB_C_SYSTEM
-};
-
-enum cxd2856er_isdbc_modulation {
-	CXD2856ER_ISDBC_64QAM = 64,
-	CXD2856ER_ISDBC_256QAM = 256,
+	CXD2856ER_ISDB_C_SYSTEM,
+	CXD2856ER_J83B_SYSTEM
 };
 
 enum cxd2856er_i2c_target {
@@ -48,14 +44,6 @@ enum cxd2856er_i2c_target {
 
 union cxd2856er_system_params {
 	u32 bandwidth;
-	struct {
-		u32 symbol_rate;
-		u32 modulation;
-		bool experimental_profile;
-		bool reference_profile;
-		/* 既定無効。J.83B 5.6 Msps の信号でロック・TS は未検証。 */
-		bool experimental_j83b;
-	} isdbc;
 };
 
 struct cxd2856er_demod {
@@ -69,11 +57,9 @@ struct cxd2856er_demod {
 	struct cxd2856er_config config;
 	enum cxd2856er_state state;
 	enum cxd2856er_system system;
-	/* Tune diagnostics only: reset on each tune and used to rate-limit log. */
-	u32 isdbt_lock_checks;
-	u32 isdbc_lock_checks;
-	/* 内部モードの寿命管理用。公開系統は ISDB-C のまま。 */
-	bool j83b_active;
+	/* ISDB-C と J.83B の起動は、途中で失敗しても停止で既定値へ戻せるよう、先に起動中の状態にする
+	 * その起動が最後まで終わっていないと、同じ方式の選局し直しで済ませずに、停止してから起動し直す */
+	bool cable_wakeup_incomplete;
 };
 
 #ifdef __cplusplus
@@ -168,44 +154,6 @@ int cxd2856er_is_ts_locked_isdbc(struct cxd2856er_demod *demod, bool *locked);
 int cxd2856er_read_cnr_raw_isdbt(struct cxd2856er_demod *demod, u16 *value);
 int cxd2856er_read_cnr_raw_isdbs(struct cxd2856er_demod *demod, u16 *value);
 int cxd2856er_read_cnr_raw_isdbc(struct cxd2856er_demod *demod, u16 *value);
-
-/* J.83B 実験経路の診断用スナップショット。すべて未校正の生値。 */
-struct cxd2856er_j83b_monitor {
-	u16 cnr_raw;
-	u16 if_agc_raw;
-	u8 qam;
-	u8 ar_status_raw;
-	u8 ts_status_raw;
-	u8 vq_status_raw;
-	u8 interleave_raw;
-	u8 spectrum_raw;
-	bool interleave_valid;
-	s16 carrier_offset_raw;
-	u16 trial_symbol_rate_raw;
-	s32 timing_integral_raw;
-	u8 sampling_rate_mode_raw;
-	u32 ber_bit_errors;
-	u8 ber_period_exp;
-	bool ber_valid;
-	u32 per_packet_errors;
-	u8 per_period_exp;
-	bool per_valid;
-	u16 rs_packet_errors;
-	bool rs_valid;
-};
-int cxd2856er_read_j83b_monitor(struct cxd2856er_demod *demod,
-			      struct cxd2856er_j83b_monitor *value);
-
-/* 他受信機の選局直後を短い間隔で記録するための縮小版。未校正の生値。 */
-struct cxd2856er_j83b_rs_sample {
-	u8 ar_status_raw;
-	u8 ts_status_raw;
-	u16 if_agc_raw;
-	u16 rs_packet_errors;
-	bool rs_valid;
-};
-int cxd2856er_read_j83b_rs_sample(struct cxd2856er_demod *demod,
-				  struct cxd2856er_j83b_rs_sample *value);
 #ifdef __cplusplus
 }
 #endif

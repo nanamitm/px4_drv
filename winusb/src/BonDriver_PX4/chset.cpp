@@ -4,6 +4,7 @@
 
 #include <mutex>
 #include <fstream>
+#include <cstdlib>
 
 #include "util.hpp"
 
@@ -22,7 +23,7 @@ bool ChannelSet::Load(const std::wstring &path, px4::SystemType system) noexcept
 	while (true) {
 		char line[256];
 		std::streamsize gcount;
-		char *line_head, *tmp_head, *tmp_tail = nullptr;
+		char *tmp_head, *tmp_tail = nullptr;
 
 		if (!ifs.getline(line, 256))
 			break;
@@ -37,24 +38,17 @@ bool ChannelSet::Load(const std::wstring &path, px4::SystemType system) noexcept
 			gcount--;
 		}
 
-		// Empty separator lines must not be interpreted as channel 0.  In
-		// particular, a blank line after a CATV space used to replace C13 (the
-		// first channel) with an empty entry.
-		line_head = line;
-		while (*line_head == ' ' || *line_head == '\t')
-			line_head++;
-
-		if (*line_head == '\0' || *line_head == ';') {
+		if (line[0] == ';') {
 			// comment
 			continue;
 		}
 
-		if (*line_head == '$') {
+		if (line[0] == '$') {
 			// tuning space
 			std::wstring name;
 			std::uint32_t space_id;
 
-			tmp_head = line_head + 1;
+			tmp_head = line + 1;
 
 			// name
 			Split(&tmp_head, &tmp_tail, '\t');
@@ -73,7 +67,7 @@ bool ChannelSet::Load(const std::wstring &path, px4::SystemType system) noexcept
 			std::uint32_t space_id, ch_id;
 			ChannelInfo ch;
 
-			tmp_head = line_head;
+			tmp_head = line;
 
 			// name
 			Split(&tmp_head, &tmp_tail, '\t');
@@ -96,62 +90,21 @@ bool ChannelSet::Load(const std::wstring &path, px4::SystemType system) noexcept
 			Split(&tmp_head, &tmp_tail, '\t');
 			ch_id = px4::util::atoui32(tmp_head);
 
-			// ptx_ch
-			Split(&tmp_head, &tmp_tail, '\t');
-			ch.ptx_ch = px4::util::atoui32(tmp_head);
-
-			// tsid
-			Split(&tmp_head, &tmp_tail, '\t');
-			ch.tsid = static_cast<std::uint16_t>(px4::util::atoui32(tmp_head));
-
-			// optional RF centre frequency in kHz (sixth field)
-			if (tmp_tail) {
-				Split(&tmp_head, &tmp_tail, '\t');
-				ch.freq_khz = px4::util::atoui32(tmp_head);
-
-				// Optional signed ISDB-C correction in kHz (seventh field).
-				if (tmp_tail) {
-					Split(&tmp_head, &tmp_tail, '\t');
-					ch.isdbc_freq_offset_khz = px4::util::atoi32(tmp_head);
-					ch.has_isdbc_freq_offset = true;
-
-					// The eighth field is either a TSMF Relative stream number
-					// (0-14), or an ISDB-C constellation (64/256).  The latter
-					// form lets a regular channel select its QAM profile without
-					// dummy TSMF fields.
-					if (tmp_tail) {
-						Split(&tmp_head, &tmp_tail, '\t');
-						const auto field8 = px4::util::atoui32(tmp_head);
-						if (field8 == 64 || field8 == 256) {
-							ch.isdbc_modulation = static_cast<std::uint16_t>(field8);
-						} else {
-							ch.tsmf_relative_stream = static_cast<std::uint8_t>(field8);
-							ch.is_tsmf = true;
-
-							// Optional signed TSMF slot-map offset (ninth field).
-							if (tmp_tail) {
-								Split(&tmp_head, &tmp_tail, '\t');
-								ch.tsmf_slot_offset = px4::util::atoi32(tmp_head);
-
-								// Optional modulation after the TSMF fields (tenth field).
-								if (tmp_tail) {
-									Split(&tmp_head, &tmp_tail, '\t');
-									const auto modulation = px4::util::atoui32(tmp_head);
-									if (modulation == 64 || modulation == 256)
-										ch.isdbc_modulation = static_cast<std::uint16_t>(modulation);
-
-									/* Optional eleventh field: raw TLV output for a TSMF
-									 * stream.  It is deliberately opt-in so existing TSMF
-									 * entries continue returning ordinary MPEG-TS. */
-									if (tmp_tail) {
-										Split(&tmp_head, &tmp_tail, '\t');
-										ch.tsmf_output_tlv = px4::util::atoui32(tmp_head) == 1;
-									}
-								}
-							}
-						}
-					}
+			if (system == px4::SystemType::ISDB_C || system == px4::SystemType::J83B) {
+				if (!ParseCable(&tmp_head, &tmp_tail, system, ch)) {
+					if (strict_)
+						return false;
+					else
+						continue;
 				}
+			} else {
+				// ptx_ch
+				Split(&tmp_head, &tmp_tail, '\t');
+				ch.ptx_ch = px4::util::atoui32(tmp_head);
+
+				// tsid
+				Split(&tmp_head, &tmp_tail, '\t');
+				ch.tsid = static_cast<std::uint16_t>(px4::util::atoui32(tmp_head));
 			}
 
 			if (!AddChannel(space_id, ch_id, ch))
@@ -265,6 +218,48 @@ void ChannelSet::Split(char **head, char **tail, char c) noexcept
 	*tail = t;
 
 	return;
+}
+
+bool ChannelSet::ParseCable(char **head, char **tail, px4::SystemType system, ChannelInfo &ch) noexcept
+{
+	auto parse = [](const char *str, long min, long max, long &value) noexcept {
+		char *end;
+
+		value = std::strtol(str, &end, 10);
+		return end != str && *end == '\0' && value >= min && value <= max;
+	};
+	long value;
+
+	// J.83 Annex B は地域によって 6.5MHz 刻みからずれた周波数で送られるため、番号から計算せずに中心周波数 (kHz) を書く
+	// 範囲は ISDB-C と同じ VHF 1ch から UHF 62ch までの帯域で、TSMF を使わないため列はここで終わる
+	if (system == px4::SystemType::J83B) {
+		if (!*tail)
+			return false;
+		Split(head, tail, '\t');
+		if (!parse(*head, 90000, 770000, value) || *tail)
+			return false;
+		ch.freq = static_cast<std::uint32_t>(value);
+
+		return true;
+	}
+
+	// ISDB-C の物理チャンネル番号 (0〜112)
+	if (!*tail)
+		return false;
+	Split(head, tail, '\t');
+	if (!parse(*head, 0, 112, value))
+		return false;
+	ch.ptx_ch = static_cast<std::uint32_t>(value);
+
+	// TSMF のヘッダーに載っている有効な TS のうち、0 から数えて何番目か (TS0〜TS14)
+	if (!*tail)
+		return false;
+	Split(head, tail, '\t');
+	if (!parse(*head, 0, 14, value) || *tail)
+		return false;
+	ch.tsmf_stream = static_cast<std::uint8_t>(value);
+
+	return true;
 }
 
 } // namespace px4

@@ -55,6 +55,7 @@
 extern char **environ;
 
 // Pull in the shared command protocol (relative paths resolved by -I flags)
+#include "../../../driver/isdbc_channel.h"
 #include "command.hpp"      // px4::command::*
 #include "misc_posix.h"     // GUID, HANDLE stubs, wchar_t helpers
 
@@ -342,12 +343,12 @@ static bool open_session(int ctrl_fd, px4::SystemType sys_type, int tuner_idx,
 }
 
 static bool tune_session(int ctrl_fd, px4::SystemType sys_type, uint32_t freq_kHz,
-	bool is_c, int64_t modulation, int64_t tsmf, int64_t slot_offset, bool tlv,
+	bool is_c, int64_t tsmf,
 	const char *sys_str, int channel)
 {
 	// ---- SET_PARAMS --------------------------------------------------------
 	{
-		const uint32_t num = is_c ? (tsmf < 0 ? 3 : (tlv ? 7 : 6)) : 0;
+		const uint32_t num = is_c ? 1 : 0;
 		// params[1] の末尾を拡張し、送受信とも同じ長さを使う。T/S の固定長は維持する。
 		const std::size_t size = sizeof(px4::command::CtrlParamsCmd) +
 			(num > 1 ? (num - 1) * sizeof(px4::command::Parameter) : 0);
@@ -360,15 +361,8 @@ static bool tune_session(int ctrl_fd, px4::SystemType sys_type, uint32_t freq_kH
 			cmd->param_set.freq = freq_kHz;
 			cmd->param_set.num = num;
 			if (is_c) {
-				using P = px4::command::ParameterType;
-				const px4::command::Parameter params[] = {
-					{P::BANDWIDTH, 6}, {P::SYMBOL_RATE, 5274},
-					{P::MODULATION, static_cast<uint32_t>(modulation)},
-					{P::TSMF_MODE, 1}, {P::TSMF_RELATIVE_STREAM, static_cast<uint32_t>(tsmf)},
-					{P::TSMF_SLOT_OFFSET, static_cast<uint32_t>(slot_offset)},
-					{P::TSMF_OUTPUT_TLV, 1}
-				};
-				memcpy(cmd->param_set.params, params, num * sizeof(params[0]));
+				cmd->param_set.params[0].type = px4::command::ParameterType::TSMF_STREAM;
+				cmd->param_set.params[0].value = static_cast<uint32_t>(tsmf);
 			}
 			ok = send_all(ctrl_fd, cmd, size) && recv_all(ctrl_fd, cmd, size) &&
 				cmd->status == px4::command::CtrlStatusCode::SUCCEEDED;
@@ -439,9 +433,8 @@ static void usage()
 		"  S  ISDB-S transponder 0-11=BS, 12-23=CS110\n"
 		"  C  ISDB-C CATV channel 13-63 (experimental)\n"
 		"  C only: --freq-khz <1-4294967295> --freq-offset <signed kHz>\n"
-		"          --modulation <64|256> (default: automatic) --tsmf <0-14>\n"
-		"          --tsmf-slot-offset <signed n> (default: 0) --tlv\n"
-		"  --tsmf-slot-offset and --tlv require --tsmf; --tlv excludes --b25\n");
+		"          --tsmf <0-14> (default: TS0; ordinal among active TSMF streams)\n"
+		"  QAM and segmented TLV are detected automatically; --b25 is for MPEG-TS only.\n");
 }
 
 // 数値の欠落・桁あふれを選局前に検出し、誤った周波数で受信を開始しない。
@@ -467,33 +460,29 @@ int main(int argc, char *argv[])
 	int         channel    = -1;
 	const char *outfile    = "-";   // stdout
 
-	bool c_options = false, has_freq = false, has_slot = false, tlv = false;
-	int64_t direct_freq = 0, freq_offset = 0, modulation = 0, tsmf = -1, slot_offset = 0;
+	bool c_options = false, has_freq = false;
+	int64_t direct_freq = 0, freq_offset = 0, tsmf = 0;
 
 	// Parse arguments
 	for (int i = 1; i < argc; ++i) {
 		if (!strcmp(argv[i], "--help") || !strcmp(argv[i], "-h")) {
 			usage();
 			return 0;
-		} else if (!strcmp(argv[i], "--tlv")) {
-			c_options = tlv = true;
-		} else if (!strcmp(argv[i], "--freq-khz") || !strcmp(argv[i], "--freq-offset") ||
-			   !strcmp(argv[i], "--modulation") || !strcmp(argv[i], "--tsmf") ||
+		} else if (!strcmp(argv[i], "--tlv") || !strcmp(argv[i], "--modulation") ||
 			   !strcmp(argv[i], "--tsmf-slot-offset")) {
+			fprintf(stderr, "Error: %s belongs to the old experimental protocol; QAM/TLV are now automatic, and --tsmf selects TS0-TS14\n", argv[i]);
+			return 1;
+		} else if (!strcmp(argv[i], "--freq-khz") || !strcmp(argv[i], "--freq-offset") ||
+			   !strcmp(argv[i], "--tsmf")) {
 			const char *option = argv[i];
 			int64_t *value = &freq_offset, min = INT32_MIN, max = INT32_MAX;
 			c_options = true;
 			if (!strcmp(option, "--freq-khz")) {
 				value = &direct_freq; min = 1; max = UINT32_MAX; has_freq = true;
-			} else if (!strcmp(option, "--modulation")) {
-				value = &modulation; min = 64; max = 256;
 			} else if (!strcmp(option, "--tsmf")) {
 				value = &tsmf; min = 0; max = 14;
-			} else if (!strcmp(option, "--tsmf-slot-offset")) {
-				value = &slot_offset; has_slot = true;
 			}
-			if (i + 1 >= argc || !parse_number(argv[++i], min, max, *value) ||
-			    (value == &modulation && modulation != 64 && modulation != 256)) {
+			if (i + 1 >= argc || !parse_number(argv[++i], min, max, *value)) {
 				fprintf(stderr, "Error: invalid value for %s\n", option);
 				return 1;
 			}
@@ -527,8 +516,8 @@ int main(int argc, char *argv[])
 	}
 
 	bool is_c = (sys_str[0] == 'C' || sys_str[0] == 'c');
-	if ((c_options && !is_c) || ((has_slot || tlv) && tsmf < 0) || (tlv && use_b25)) {
-		fprintf(stderr, "Error: C options require C; slot offset/TLV require --tsmf; TLV excludes --b25\n");
+	if (c_options && !is_c) {
+		fprintf(stderr, "Error: CATV options require C\n");
 		return 1;
 	}
 	bool is_t = (sys_str[0] == 'T' || sys_str[0] == 't');
@@ -542,7 +531,7 @@ int main(int argc, char *argv[])
 		// ChSet の C13-C22 は物理3-12、C23-C63 は物理22-62に対応する。
 		int physical_ch = channel <= 22 ? channel - 10 : channel - 1;
 		int64_t center = has_freq ? direct_freq :
-			93000 + physical_ch * 6000 + (physical_ch == 12 ? 2000 : 0);
+			isdbc_channel_to_khz(physical_ch);
 		center += freq_offset;
 		if (center <= 0 || center > UINT32_MAX) {
 			fprintf(stderr, "Error: adjusted ISDB-C frequency is out of range\n");
@@ -615,46 +604,6 @@ int main(int argc, char *argv[])
 	}
 
 	int data_fd = -1;
-	if (is_c && modulation == 0) {
-		// Tune の自動判定は TSMF 選別前の入力パケット数を使うため、判定に TSMF/TLV は不要。
-		// 選局中の送信データは PURGE で境界を確定できないため、判定用接続ごと破棄する。
-		bool ok = open_session(ctrl_fd, sys_type, tuner_idx, sys_str, data_fd);
-		if (ok) {
-			ok = set_capture(ctrl_fd, true) &&
-				tune_session(ctrl_fd, sys_type, freq_kHz, true, 0, -1, 0, false,
-					sys_str, channel);
-			if (ok) {
-				px4::command::CtrlParamsCmd cmd{};
-				cmd.cmd = px4::command::CtrlCmdCode::GET_PARAMS;
-				cmd.status = px4::command::CtrlStatusCode::NONE;
-				cmd.param_set.num = 1;
-				cmd.param_set.params[0].type = px4::command::ParameterType::MODULATION;
-				ok = send_all(ctrl_fd, &cmd, sizeof(cmd)) &&
-					recv_all(ctrl_fd, &cmd, sizeof(cmd)) &&
-					cmd.status == px4::command::CtrlStatusCode::SUCCEEDED;
-				if (!ok) {
-					fprintf(stderr, "Error: GET_PARAMS failed\n");
-				} else {
-					modulation = cmd.param_set.params[0].value;
-					ok = modulation == 64 || modulation == 256;
-					if (!ok)
-						fprintf(stderr, "Error: invalid detected modulation: %lld\n",
-							static_cast<long long>(modulation));
-				}
-			}
-			bool closed = close_session(ctrl_fd, data_fd);
-			ok = ok && closed;
-		}
-		if (!ok) {
-			close(ctrl_fd);
-			if (outfd != STDOUT_FILENO) close(outfd);
-			return 1;
-		}
-		fprintf(stderr, "ISDB-C: detected modulation %lldQAM\n",
-			static_cast<long long>(modulation));
-	}
-	// CLOSE 応答前に受信機と data_id は解放される。ただし旧データ接続のスレッド回収とは同期されない。
-	// -i は両セッションで同じ値を使う。未指定時に受信機が変わっても変調方式はチャンネルの属性。
 	if (!open_session(ctrl_fd, sys_type, tuner_idx, sys_str, data_fd)) {
 		close(ctrl_fd);
 		if (outfd != STDOUT_FILENO) close(outfd);
@@ -734,10 +683,10 @@ int main(int argc, char *argv[])
 			return 1;
 		}
 
-		// PX-MLT5PE の実測で良好だった、選局・PURGE 後にキャプチャを始める順序を保つ。
-		// B25 初期化と読み出しバッファ確保は受信開始前に済ませる。
-		if (!tune_session(ctrl_fd, sys_type, freq_kHz, is_c, modulation,
-			tsmf, slot_offset, tlv, sys_str, channel)) {
+		// ISDB-C は受信したヘッダーで選局の成否を決めるため、TSMF の探索より前に入力を開始する。
+		// B25 初期化と読み出しバッファ確保は受信開始前に済ませ、地デジ・BS/CS の順序は維持する。
+		if ((is_c && !set_capture(ctrl_fd, true)) ||
+			!tune_session(ctrl_fd, sys_type, freq_kHz, is_c, tsmf, sys_str, channel)) {
 			free(rbuf);
 			if (b25) b25->release(b25);
 			if (bcas) bcas->release(bcas);
@@ -765,7 +714,7 @@ int main(int argc, char *argv[])
 			}
 		}
 
-		if (!set_capture(ctrl_fd, true)) {
+		if (!is_c && !set_capture(ctrl_fd, true)) {
 			free(rbuf);
 			if (b25) b25->release(b25);
 			if (bcas) bcas->release(bcas);

@@ -1,4 +1,6 @@
 > [!NOTE]
+
+> この文書は旧実験用実装の調査記録です。上流 `498beac` の統合後は、設定名・ChSet・選局方式が変更されています。現行版の導入には [上流統合時の移行事項](upstream-isdbc-integration.md) と [選局仕様](isdbc_tuning.md) を参照してください。
 > このドキュメントは [n0atl/px4_drv](https://github.com/n0atl/px4_drv) (feature/tsmf-tlv-v61) の README を、統合にあたって独立したドキュメントとして収録したものです。
 
 # ISDB-C (トランスモジュレーション) 対応 (実験的)

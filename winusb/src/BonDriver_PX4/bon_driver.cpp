@@ -4,7 +4,6 @@
 #include <cstring>
 #include <string>
 #include <map>
-#include <limits>
 #include <stdexcept>
 
 #include <windows.h>
@@ -20,6 +19,7 @@
 #include "command.hpp"
 #include "util.hpp"
 #include "msg.h"
+#include "../../../driver/isdbc_channel.h"
 
 namespace px4 {
 
@@ -33,11 +33,8 @@ BonDriver::BonDriver() noexcept
 	receivers_(),
 	lnb_power_(false),
 	lnb_power_state_(false),
-	isdbc_frequency_offset_khz_(0),
-	isdbc_modulation_(0),
 	pipe_timeout_(2000),
 	tune_timeout_(5000),
-	initial_channel_(-1),
 	ctrl_client_(nullptr),
 	data_pipe_(nullptr),
 	open_(FALSE),
@@ -98,8 +95,6 @@ bool BonDriver::Init()
 			if (!px4::util::ParseSystemStr(mode, systems_))
 				return false;
 
-			msg_info("Init: configured systems=0x%02x\n", static_cast<unsigned int>(systems_));
-
 			driver_host_path_ = bon_config.Get(L"DriverHostPath", dir_path + L"DriverHost_PX4.exe");
 			if (PathIsRelativeW(driver_host_path_.c_str()) && PathCanonicalizeW(path, (dir_path + driver_host_path_).c_str()))
 				driver_host_path_ = path;
@@ -147,34 +142,11 @@ bool BonDriver::Init()
 					display_error_message_ = true;
 				}
 			} catch (const std::out_of_range &) {}
-
-			try {
-				initial_channel_ = px4::util::wtoi(bon_config.Get(L"InitialChannel"));
-			} catch (const std::out_of_range &) {}
 		} else {
 			systems_ = px4::SystemType::ISDB_T;
 			driver_host_path_ = dir_path + L"DriverHost_PX4.exe";
 			name_ = L"PX4";
 		}
-
-		/* ISDB-C cable relays can be offset from the nominal 6 MHz channel
-		 * centre.  Keep this a user-visible signed correction so it can be
-		 * calibrated without editing every ChSet entry. */
-		try {
-			isdbc_frequency_offset_khz_ = px4::util::wtoi(
-				configs_.Get(L"BonDriver.ISDB-C").Get(L"FrequencyOffsetKHz"));
-			msg_info("Init: ISDB-C frequency offset=%d kHz\n", isdbc_frequency_offset_khz_);
-		} catch (const std::out_of_range &) {}
-		try {
-			const auto modulation = px4::util::wtoui32(
-				configs_.Get(L"BonDriver.ISDB-C").Get(L"Modulation"));
-			if (modulation == 64 || modulation == 256) {
-				isdbc_modulation_ = modulation;
-				msg_info("Init: ISDB-C modulation forced to %uQAM\n", isdbc_modulation_);
-			} else if (modulation != 0) {
-				msg_warn("Init: unsupported ISDB-C modulation=%u; using automatic selection\n", modulation);
-			}
-		} catch (const std::out_of_range &) {}
 
 		if ((systems_ & px4::SystemType::ISDB_T) == px4::SystemType::ISDB_T) {
 			px4::ChannelSet chset_t;
@@ -257,6 +229,31 @@ bool BonDriver::Init()
 				chset_.Merge(chset_c);
 		}
 
+		if ((systems_ & px4::SystemType::J83B) == px4::SystemType::J83B) {
+			px4::ChannelSet chset_j;
+			bool result;
+
+			try {
+				std::wstring chset_path = configs_.Get(L"BonDriver.J.83B").Get(L"ChSetPath");
+				WCHAR path[MAX_PATH];
+
+				if (PathIsRelativeW(chset_path.c_str()) && PathCanonicalizeW(path, (dir_path + chset_path).c_str()))
+					chset_path = path;
+
+				result = chset_j.Load(chset_path, px4::SystemType::J83B);
+			} catch (const std::out_of_range&) {
+				result = false;
+			}
+
+			if (!result) {
+				chset_j.Clear();
+				result = chset_j.Load(dir_path + L"BonDriver_PX4-J83B.ChSet.txt", px4::SystemType::J83B);
+			}
+
+			if (result)
+				chset_.Merge(chset_j);
+		}
+
 		receivers_.Load(configs_);
 
 		quit_event_ = CreateEventW(nullptr, TRUE, FALSE, nullptr);
@@ -288,7 +285,7 @@ void BonDriver::Term() noexcept
 const BOOL BonDriver::OpenTuner()
 {
 	BOOL ret = TRUE;
-	std::unique_lock<std::mutex> lock(mtx_);
+	std::lock_guard<std::mutex> lock(mtx_);
 
 	if (open_)
 		return TRUE;
@@ -386,15 +383,6 @@ const BOOL BonDriver::OpenTuner()
 		ioq_->Start();
 
 		open_ = TRUE;
-
-		if (initial_channel_ >= 0 && systems_ == px4::SystemType::ISDB_C) {
-			const DWORD initial_channel = static_cast<DWORD>(initial_channel_);
-
-			lock.unlock();
-			msg_info("OpenTuner: forcing initial ISDB-C channel=%lu\n", initial_channel);
-			SetChannel(0, initial_channel);
-			lock.lock();
-		}
 	} catch (const std::exception &e) {
 		ret = FALSE;
 		if (display_error_message_) MessageBoxA(nullptr, e.what(), "BonDriver_PX4 (BonDriver::OpenTuner)", MB_OK | MB_ICONERROR);
@@ -545,8 +533,6 @@ const BOOL BonDriver::IsTunerOpening(void)
 
 LPCTSTR BonDriver::EnumTuningSpace(const DWORD dwSpace)
 {
-	msg_info("EnumTuningSpace: space=%lu\n", dwSpace);
-
 	try {
 		return chset_.GetSpaceName(dwSpace).c_str();
 	} catch (const std::out_of_range&) {
@@ -556,8 +542,6 @@ LPCTSTR BonDriver::EnumTuningSpace(const DWORD dwSpace)
 
 LPCTSTR BonDriver::EnumChannelName(const DWORD dwSpace, const DWORD dwChannel)
 {
-	msg_info("EnumChannelName: space=%lu channel=%lu\n", dwSpace, dwChannel);
-
 	try {
 		return chset_.GetChannel(dwSpace, dwChannel).name.c_str();
 	} catch (const std::out_of_range&) {
@@ -567,24 +551,15 @@ LPCTSTR BonDriver::EnumChannelName(const DWORD dwSpace, const DWORD dwChannel)
 
 const BOOL BonDriver::SetChannel(const DWORD dwSpace, const DWORD dwChannel)
 {
-	msg_info("SetChannel: space=%lu channel=%lu open=%d\n", dwSpace, dwChannel, open_);
-
-	if (!open_) {
-		msg_warn("SetChannel: tuner is not open\n");
+	if (!open_)
 		return FALSE;
-	}
 
-	if (!chset_.ExistsChannel(dwSpace, dwChannel)) {
-		msg_warn("SetChannel: channel does not exist in the loaded ChannelSet\n");
+	if (!chset_.ExistsChannel(dwSpace, dwChannel))
 		return FALSE;
-	}
 
 	const px4::ChannelSet::ChannelInfo &channel = chset_.GetChannel(dwSpace, dwChannel);
 	px4::SystemType system = chset_.GetSpaceSystem(dwSpace);
 	std::uint32_t real_freq, num_param = 0;
-
-	msg_info("SetChannel: resolved system=0x%02x, ptx_ch=%u, tsid=%u, freq=%u kHz\n",
-		static_cast<unsigned int>(system), channel.ptx_ch, channel.tsid, channel.freq_khz);
 
 	switch (system) {
 	case px4::SystemType::ISDB_T:
@@ -621,40 +596,29 @@ const BOOL BonDriver::SetChannel(const DWORD dwSpace, const DWORD dwChannel)
 		break;
 
 	case px4::SystemType::ISDB_C:
-		if (channel.freq_khz) {
-			/* UHF and non-standard CATV relay frequencies are specified directly. */
-			real_freq = channel.freq_khz;
-		} else if ((channel.ptx_ch >= 3 && channel.ptx_ch <= 12) || (channel.ptx_ch >= 22 && channel.ptx_ch <= 62)) {
-			// J.83C transmodulation: the carrier is centred on the 6 MHz cable channel.
-			real_freq = 93000 + (channel.ptx_ch * 6000);
+	{
+		// 物理チャンネル番号から中心周波数への変換は、Linux 版と isdbc_channel.h で共有する
+		int khz = isdbc_channel_to_khz(static_cast<int>(channel.ptx_ch));
 
-			if (channel.ptx_ch == 12)
-				real_freq += 2000;
-		} else {
+		if (khz < 0) {
+			// unknown channel
 			return FALSE;
 		}
 
-		{
-			const std::int32_t frequency_offset = channel.has_isdbc_freq_offset ?
-				channel.isdbc_freq_offset_khz : isdbc_frequency_offset_khz_;
-			const std::int64_t adjusted_freq = static_cast<std::int64_t>(real_freq) +
-				frequency_offset;
+		real_freq = static_cast<std::uint32_t>(khz);
+		num_param = 1;
 
-			if (adjusted_freq <= 0 || adjusted_freq > (std::numeric_limits<std::uint32_t>::max)()) {
-				msg_warn("SetChannel: invalid ISDB-C frequency correction\n");
-				return FALSE;
-			}
-			real_freq = static_cast<std::uint32_t>(adjusted_freq);
-			msg_info("SetChannel: ISDB-C frequency offset=%d kHz%s\n", frequency_offset,
-				channel.has_isdbc_freq_offset ? " (ChSet override)" : "");
-		}
+		break;
+	}
 
-		num_param = channel.is_tsmf ? (channel.tsmf_output_tlv ? 7 : 6) : 3;
+	case px4::SystemType::J83B:
+		// J.83 Annex B (スカパー！プレミアムサービス光) は、ChSet に中心周波数 (kHz) を書く
+		real_freq = channel.freq;
+
 		break;
 
 	default:
 		// unknown system
-		msg_warn("SetChannel: unsupported system\n");
 		return FALSE;
 	}
 
@@ -674,42 +638,9 @@ const BOOL BonDriver::SetChannel(const DWORD dwSpace, const DWORD dwChannel)
 		param_set->params[0].value = channel.tsid;
 	}
 
-	if (system == px4::SystemType::ISDB_C && num_param) {
-		param_set->params[0].type = px4::command::ParameterType::BANDWIDTH;
-		param_set->params[0].value = 6;
-		param_set->params[1].type = px4::command::ParameterType::SYMBOL_RATE;
-		param_set->params[1].value = 5274;
-		param_set->params[2].type = px4::command::ParameterType::MODULATION;
-		/*
-		 * 0 means automatic ISDB-C constellation selection in DriverHost.
-		 * It tries the 64QAM profile first, then retries with 256QAM when
-		 * there is no TS lock.  This keeps ChSet independent of a CATV
-		 * operator's per-channel QAM choice, like BonDriver_BDA's
-		 * TransModulation channel generation.
-		 */
-		param_set->params[2].value = channel.isdbc_modulation ?
-			channel.isdbc_modulation : isdbc_modulation_;
-		msg_info("SetChannel: ISDB-C modulation=%uQAM%s\n",
-			param_set->params[2].value,
-			channel.isdbc_modulation ? " (ChSet override)" :
-			(isdbc_modulation_ ? " (INI override)" : " (automatic)"));
-		if (channel.is_tsmf) {
-			param_set->params[3].type = px4::command::ParameterType::TSMF_MODE;
-			param_set->params[3].value = 1;
-			param_set->params[4].type = px4::command::ParameterType::TSMF_RELATIVE_STREAM;
-			param_set->params[4].value = channel.tsmf_relative_stream;
-			param_set->params[5].type = px4::command::ParameterType::TSMF_SLOT_OFFSET;
-			param_set->params[5].value = static_cast<std::uint32_t>(channel.tsmf_slot_offset);
-			if (channel.tsmf_output_tlv) {
-				param_set->params[6].type = px4::command::ParameterType::TSMF_OUTPUT_TLV;
-				param_set->params[6].value = 1;
-			}
-			msg_info("SetChannel: TSMF relative stream=%u, slot offset=%d\n",
-				static_cast<unsigned int>(channel.tsmf_relative_stream),
-				channel.tsmf_slot_offset);
-			if (channel.tsmf_output_tlv)
-				msg_info("SetChannel: TSMF output=raw TLV (dantto4k input)\n");
-		}
+	if (system == px4::SystemType::ISDB_C) {
+		param_set->params[0].type = px4::command::ParameterType::TSMF_STREAM;
+		param_set->params[0].value = channel.tsmf_stream;
 	}
 
 	bool ret = true;
@@ -742,15 +673,15 @@ const BOOL BonDriver::SetChannel(const DWORD dwSpace, const DWORD dwChannel)
 
 	delete[] reinterpret_cast<std::uint8_t*>(param_set);
 
+	// TSMF で選んだ TS は毎秒数十 KB のことがあり、バッファーが埋まるまで待つと最初のデータまで数秒かかるため、ISDB-C だけ 200ms で途中まででも渡す
+	// 地デジや BS/CS は 192KB を 0.1 秒前後で埋めるので、従来どおり埋まるまで待つ
+	ioq_->SetReadFlushInterval(std::chrono::milliseconds((system == px4::SystemType::ISDB_C) ? 200 : 0));
 	PurgeTsStream();
 
 	if (ret) {
 		// succeeded
 		space_ = dwSpace;
 		ch_ = dwChannel;
-		msg_info("SetChannel: succeeded\n");
-	} else {
-		msg_warn("SetChannel: failed (DriverHost rejected the tune or lock timed out)\n");
 	}
 
 	return !!ret;
@@ -800,7 +731,6 @@ extern "C" IBonDriver* CreateBonDriver()
 			return nullptr;
 
 		if (!bon->Init()) {
-			msg_err("CreateBonDriver: Init failed\n");
 			delete bon;
 			return nullptr;
 		}
