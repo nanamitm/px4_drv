@@ -57,5 +57,22 @@ Rejected {Test-Px4ApplicationSignatures $wrong} 'Other publisher certificate acc
 Rejected {[Px4ApplicationVerifier]::Verify((Join-Path $source 'DriverHost_PX4.exe'),[byte[]]@(1,2,3))} 'PE verifier accepted a different signer.'
 Assert ((RunTrust $source Verify) -eq 0) 'Distribution Verify entry point failed.'
 Assert ((RunTrust $source Trust -WhatIf) -eq 0) 'Valid WhatIf trust entry point failed.'
+# helper の欠落やマニフェストの書き換えを、トップレベルの EXE と同じ基準で拒否する。
+$rtlSource=Join-Path (Resolve-Path -LiteralPath $DistributionPath).Path 'BonDriver_RTLSDR_64bit'
+$rtlMissing=Join-Path $area 'rtl-missing-helper'
+Copy-Item -LiteralPath $rtlSource -Destination $rtlMissing -Recurse
+Remove-Item -LiteralPath (Join-Path $rtlMissing 'rtlsdr\rtlsdr_frontend.exe')
+Rejected {Test-Px4ApplicationSignatures $rtlMissing} 'RTL-SDR helper omission accepted.'
+$rtlTampered=Join-Path $area 'rtl-tampered-helper'
+Copy-Item -LiteralPath $rtlSource -Destination $rtlTampered -Recurse
+$file=Join-Path $rtlTampered 'rtlsdr\rtlsdr_frontend.exe'
+$bytes=[IO.File]::ReadAllBytes($file);$pe=[BitConverter]::ToInt32($bytes,0x3c)
+$section=$pe+24+[BitConverter]::ToUInt16($bytes,$pe+20);$raw=[BitConverter]::ToInt32($bytes,$section+20)
+$bytes[$raw]=$bytes[$raw] -bxor 1;[IO.File]::WriteAllBytes($file,$bytes)
+$manifestPath=Join-Path $rtlTampered 'application-signatures.json'
+$manifest=Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
+$manifest.Files.'rtlsdr\rtlsdr_frontend.exe'=(Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash
+$manifest | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $manifestPath -Encoding ascii
+Rejected {Test-Px4ApplicationSignatures $rtlTampered} 'Modified RTL-SDR helper accepted after rewriting its manifest hash.'
 Assert ((Snapshot) -ceq $before) 'Tests changed certificate stores.'
 Write-Host "PASS: all signed folders, tampering, rewritten/omitted manifests, unsigned PE, pinned signer and unchanged stores. Evidence: $area"

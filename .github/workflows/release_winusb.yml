@@ -23,6 +23,16 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
       - uses: microsoft/setup-msbuild@v3
+      - name: Setup Rust for RTL-SDR helper
+        shell: pwsh
+        run: |
+          rustup toolchain install 1.95.0 --profile minimal
+          if ($LASTEXITCODE -ne 0) { throw 'Rust toolchain setup failed' }
+          rustup target add --toolchain 1.95.0 i686-pc-windows-msvc x86_64-pc-windows-msvc
+          if ($LASTEXITCODE -ne 0) { throw 'Rust target setup failed' }
+          rustup default 1.95.0
+          if ($LASTEXITCODE -ne 0) { throw 'Rust toolchain selection failed' }
+
       - name: Build both architectures and run offline tests
         shell: pwsh
         run: ./build.ps1

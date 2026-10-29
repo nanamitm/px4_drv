@@ -14,6 +14,8 @@ if($LASTEXITCODE -ne 0 -or $changes.Count){throw 'Commit source changes before p
 & (Join-Path $winusb 'pkg\signing-tools\verify.ps1') -DriverPath (Join-Path $dist 'Driver')
 & python (Join-Path $PSScriptRoot 'check_pxbcud_package.py') --dist $dist
 if($LASTEXITCODE -ne 0){throw 'PX-BCUD package check failed.'}
+& python (Join-Path $PSScriptRoot 'check_rtlsdr_package.py') --dist $dist
+if($LASTEXITCODE -ne 0){throw 'RTL-SDR package check failed.'}
 $release=Join-Path $winusb "build\release\$Version"
 New-Item -ItemType Directory -Path $release -Force | Out-Null
 [ordered]@{Version=$Version;SourceRevision=$revision;ApplicationPublisherSHA256='5B6288396CA6D34EFFE2B1DBFDA3B6EA8B861E08FBFDD7F83356AA1EC594A1EE'} |
@@ -54,6 +56,8 @@ Expand-Archive -LiteralPath $binaryZip -DestinationPath $verify
 & (Join-Path $winusb 'pkg\signing-tools\verify.ps1') -DriverPath (Join-Path $verify 'Driver')
 & python (Join-Path $PSScriptRoot 'check_pxbcud_package.py') --dist $verify
 if($LASTEXITCODE -ne 0){throw 'Extracted PX-BCUD package check failed.'}
+& python (Join-Path $PSScriptRoot 'check_rtlsdr_package.py') --dist $verify
+if($LASTEXITCODE -ne 0){throw 'Extracted RTL-SDR package check failed.'}
 $sourceVerify=Join-Path $release ('verify-source-'+[guid]::NewGuid().ToString('N'))
 Expand-Archive -LiteralPath $sourceZip -DestinationPath $sourceVerify
 & (Join-Path $winusb 'pkg\signing-tools\verify.ps1') -DriverPath (Join-Path $sourceVerify 'winusb\pkg\inf')

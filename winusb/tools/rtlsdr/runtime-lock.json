@@ -1,0 +1,21 @@
+{
+  "runtime": "rtlsdrblog/rtl-sdr-blog V1.4.0",
+  "url": "https://github.com/rtlsdrblog/rtl-sdr-blog/releases/download/V1.4.0/Release.zip",
+  "sha256": "7EF33F1304647F65E5E0FDE43637A73D54F076E91E651A3CECC4F55A17FD9815",
+  "source": "https://github.com/rtlsdrblog/rtl-sdr-blog/tree/V1.4.0",
+  "license": "https://github.com/rtlsdrblog/rtl-sdr-blog/blob/V1.4.0/COPYING",
+  "source_url": "https://github.com/rtlsdrblog/rtl-sdr-blog/archive/refs/tags/V1.4.0.zip",
+  "source_sha256": "EFAAC50D53EA2F12D9853167AC9470BF4F04DE944F17C5D52D2FD73A9EC24C18",
+  "libraries": {
+    "x86": {
+      "msvcr100.dll": "8227CA247EC6D9F75158DD8FECCD1075A41A21B6C675AE301BC4CBB741FC8505",
+      "pthreadVC2.dll": "BAC4472990C1DC2F037019791BD18888E78A3AE86605F3AAE86F812A4D7D4F60",
+      "rtlsdr.dll": "E14010C2A0DFDE1C85C13D761484509A600FEC4DE6CD2C026C0878DE11155A02"
+    },
+    "x64": {
+      "msvcr100.dll": "2B7AB898B2F64F4CD1AE651C93D7EB9556208FD8D8D40D425E856C83D86D2346",
+      "pthreadVC2.dll": "0E6AF724609EF6846982EF717013426C359C455FFF324E906D8D55C8BB88D16E",
+      "rtlsdr.dll": "0FA7F8BF4B7E07918A0A9E98228007CCCAC3109DBAAC7497E116E416135D58A5"
+    }
+  }
+}

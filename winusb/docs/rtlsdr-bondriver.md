@@ -1,5 +1,7 @@
 # RTL-SDR ワンセグの BonDriver 統合
 
+利用者向けの配置・ドライバー登録は[導入手順](../../docs/rtlsdr-install.md)を参照。
+
 ## 接続と既存機種への影響
 
 `BonDriver_RTLSDR.dll` は既存の BonDriver_PX4 を RTL-SDR 用設定で使用する配布名。
@@ -66,7 +68,7 @@ rustup target add i686-pc-windows-msvc x86_64-pc-windows-msvc
 
 `winusb/dist/BonDriver_RTLSDR_32bit` と `BonDriver_RTLSDR_64bit` に
 DLL・DriverHost・helper・ランタイム・設定・ドライバー導入ファイル・helper ソースが生成される。
-標準の `winusb/build.ps1` は既存機種向けのビルド経路を維持し、Rust の導入はこの専用スクリプトで必要となる。
+標準の `winusb/build.ps1` もこの専用スクリプトを呼び、RTL-SDRの両ビット数の配布を生成する。通常ビルドとCIにはRust/Cargoと両MSVCターゲットが必要。配布にはhelperの実行ファイル・依存DLL・ライセンスと、オフライン再ビルド用の依存ソースを含める。helperはアプリ署名の検証対象であり、外部DLLは固定した配布物のSHA-256で確認する。
 
 1. 未導入の場合は配布フォルダーの `Install-Driver.ps1` を管理者 PowerShell で実行する。
    自己署名証明書が未登録の場合は既存配布と同じ `Driver/cert-install.jse` の手順を使う。

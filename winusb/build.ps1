@@ -1,5 +1,17 @@
-param([string]$SigningPfxPath='', [string]$SigningPasswordEnvironment='', [string]$SigningPasswordFile='', [switch]$RequireSignedApplications)
+﻿param([string]$SigningPfxPath='', [string]$SigningPasswordEnvironment='', [string]$SigningPasswordFile='', [switch]$RequireSignedApplications)
 
+
+# helper は通常配布に必須のため、C++ ビルドより前に開発環境の不足を通知する。
+if (-not (Get-Command cargo -ErrorAction SilentlyContinue)) {
+    throw 'Rust/Cargo is required for the RTL-SDR distribution. Install Rust and run rustup target add i686-pc-windows-msvc x86_64-pc-windows-msvc.'
+}
+
+if (-not (Get-Command rustup -ErrorAction SilentlyContinue)) { throw 'rustup is required to prepare both Windows MSVC targets.' }
+$rust_targets = @(& rustup target list --installed)
+if ($LASTEXITCODE -ne 0) { throw 'Cannot query installed Rust targets.' }
+foreach ($rust_target in @('i686-pc-windows-msvc','x86_64-pc-windows-msvc')) {
+    if ($rust_target -notin $rust_targets) { throw "Missing Rust target: $rust_target. Run rustup target add $rust_target." }
+}
 
 # カレントディレクトリに移動
 if ($MyInvocation.MyCommand.Path -ne $null) {
@@ -332,6 +344,13 @@ python tools/check_pxbcud_package.py
 if ($LASTEXITCODE -ne 0) { throw 'PX-BCUD package check failed.' }
 python tests/pxbcud_package_test.py
 if ($LASTEXITCODE -ne 0) { throw 'PX-BCUD package validation regression failed.' }
+
+# 共通 DLL/EXE の生成後に helper・依存 DLL・対応ソースを32bit/64bit配布へ追加する。
+& (Join-Path $PSScriptRoot 'tools/rtlsdr/build-bondriver.ps1') -SkipNativeBuild
+& python (Join-Path $PSScriptRoot 'tools/check_rtlsdr_package.py')
+if ($LASTEXITCODE -ne 0) { throw 'RTL-SDR package validation failed.' }
+& python (Join-Path $PSScriptRoot 'tests/rtlsdr_package_test.py')
+if ($LASTEXITCODE -ne 0) { throw 'RTL-SDR package regression tests failed.' }
 
 # アプリ署名は CAT と別の公開証明書へ固定する。通常の開発ビルドは従来どおり
 # 署名キー不要とし、配布用途では検証に成功した成果物だけを渡す。
