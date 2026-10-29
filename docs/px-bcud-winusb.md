@@ -127,6 +127,13 @@ Visual Studio 2022 / v143 で `winusb/build.ps1` を実行すると、通常の�
 異常時に完了状態、最大8個の異常パケットStatus、直近32要求の投入・完了回収時刻を出力します。
 `iso_errors=0` は完了結果を正常に取得できた転送の集計であり、失敗した転送の正常性を保証しません。
 
+負荷時の調査では `timing start` のPID/TIDとETWのCSwitch・ReadyThread・DPC/ISRを照合できます。
+要求履歴の `wait_begin_us` / `wake_us` はアプリ側の待機開始と復帰、`framing_end_us` はTS同期処理の終了、
+`write_end_us` はPAT検査・バッファ書込・通知の終了、`submit_begin_us` は次の投入処理の開始です。
+`framing_cycles` / `write_cycles` は各区間で受信スレッドが消費したCPUサイクルで、待機時間そのものではありません。
+`timing maxima` は受信区間全体の最大値です。時刻取得・CPUサイクル計測の小さな負荷を含むため、
+実行待ちによる遅延か処理自体の負荷かはETWのスケジューリング記録も合わせて確認してください。
+
 実機ツールは別の DriverHost プロセスを起動せず、対象 PX-BCUD へ直接接続します。
 稼働中の DriverHost / TVTest を停止する必要はありませんが、同じ PX-BCUD を別のアプリと
 同時に使うと制御が競合するため、実機ツールを終了してから BonDriver を開いてください。

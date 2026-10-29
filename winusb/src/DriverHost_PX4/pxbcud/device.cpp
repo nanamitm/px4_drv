@@ -361,12 +361,18 @@ private:
         bool first=true;
         bool reported_recovery=false;
         const auto started=Clock::now();
+        msg_info("PX-BCUD: timing start pid=%lu tid=%lu priority=%d requests=5 microframes_per_request=64 nominal_queue_us=40000\n",
+            GetCurrentProcessId(),GetCurrentThreadId(),GetThreadPriority(GetCurrentThread()));
         std::uint64_t submitted=0, completed=0;
         struct Trace {
             std::uint64_t sequence=0, submitted_us=0, completed_us=0;
+            std::uint64_t submit_begin_us=0, wait_begin_us=0, wake_us=0;
+            std::uint64_t framing_end_us=0, write_end_us=0, requeue_gap_us=0;
+            std::uint64_t framing_cycles=0, write_cycles=0;
             unsigned index=0;
             DWORD error=0;
         };
+        std::uint64_t max_wait_us=0,max_framing_us=0,max_write_us=0,max_submit_us=0,max_requeue_gap_us=0;
         // 正常受信時は直近32要求の時刻だけを保持し、ディスクへは出力しない。
         std::array<Trace,32> trace{};
         auto elapsed_us=[&] {return static_cast<std::uint64_t>(
@@ -393,9 +399,13 @@ private:
             const auto count=(std::min)(submitted,static_cast<std::uint64_t>(trace.size()));
             for (std::uint64_t sequence=submitted-count;sequence<submitted;++sequence) {
                 const auto &entry=trace[sequence%trace.size()];
-                msg_err("PX-BCUD: USB history sequence=%llu read=%u submitted_us=%llu completed_us=%llu win32=%lu\n",
+                msg_err("PX-BCUD: USB history sequence=%llu read=%u submitted_us=%llu completed_us=%llu win32=%lu submit_begin_us=%llu wait_begin_us=%llu wake_us=%llu framing_end_us=%llu write_end_us=%llu requeue_gap_us=%llu framing_cycles=%llu write_cycles=%llu\n",
                     static_cast<unsigned long long>(entry.sequence),entry.index,
-                    static_cast<unsigned long long>(entry.submitted_us),static_cast<unsigned long long>(entry.completed_us),entry.error);
+                    static_cast<unsigned long long>(entry.submitted_us),static_cast<unsigned long long>(entry.completed_us),entry.error,
+                    static_cast<unsigned long long>(entry.submit_begin_us),static_cast<unsigned long long>(entry.wait_begin_us),
+                    static_cast<unsigned long long>(entry.wake_us),static_cast<unsigned long long>(entry.framing_end_us),
+                    static_cast<unsigned long long>(entry.write_end_us),static_cast<unsigned long long>(entry.requeue_gap_us),
+                    static_cast<unsigned long long>(entry.framing_cycles),static_cast<unsigned long long>(entry.write_cycles));
             }
             // 未完了要求のパケット配列はUSB側が更新中のため参照しない。
             const auto &failed=reads[index];
@@ -414,14 +424,23 @@ private:
             }
         };
         auto submit=[&](Read &r) {
+            const auto submit_begin=elapsed_us();
+            const auto previous_write=trace[r.trace_slot].write_end_us;
+            const auto requeue_gap=previous_write && !r.pending?submit_begin-previous_write:0;
             ResetEvent(r.operation.hEvent);
             r.packets={};
             BOOL ok=WinUsb_ReadIsochPipeAsap(r.buffer,0,static_cast<ULONG>(r.data.size()),
                 first?FALSE:TRUE,static_cast<ULONG>(r.packets.size()),r.packets.data(),&r.operation);
             const DWORD error=ok?ERROR_SUCCESS:GetLastError();
+            const auto submitted_at=elapsed_us();
+            max_submit_us=(std::max)(max_submit_us,submitted_at-submit_begin);
+            max_requeue_gap_us=(std::max)(max_requeue_gap_us,requeue_gap);
             if (!ok && error!=ERROR_IO_PENDING) {fail("submit",&r-reads.data(),error);return false;}
             r.trace_slot=static_cast<std::size_t>(submitted%trace.size());
-            trace[r.trace_slot]={submitted+1,elapsed_us(),0,static_cast<unsigned>(&r-reads.data()),ERROR_SUCCESS};
+            trace[r.trace_slot]={};
+            auto &entry=trace[r.trace_slot];
+            entry.sequence=submitted+1;entry.index=static_cast<unsigned>(&r-reads.data());
+            entry.submitted_us=submitted_at;entry.submit_begin_us=submit_begin;entry.requeue_gap_us=requeue_gap;
             ++submitted;
             first=false;r.pending=true; return true;
         };
@@ -444,14 +463,19 @@ private:
                 break;
             }
             Read &r=reads[next];
+            auto &entry=trace[r.trace_slot];
             HANDLE events[]={removed_,r.operation.hEvent};
+            if (!entry.wait_begin_us) entry.wait_begin_us=elapsed_us();
             const DWORD wait=WaitForMultipleObjects(2,events,FALSE,50);
+            const DWORD wait_error=wait==WAIT_FAILED?GetLastError():ERROR_GEN_FAILURE;
+            entry.wake_us=elapsed_us();
+            max_wait_us=(std::max)(max_wait_us,entry.wake_us-entry.wait_begin_us);
             if (wait==WAIT_OBJECT_0) {fail("device_removed",next,ERROR_DEVICE_NOT_CONNECTED);break;}
             if (wait==WAIT_TIMEOUT) {
                 if (Clock::now()-last_data>std::chrono::seconds(5)) fail("no_data",next,ERROR_TIMEOUT);
                 continue;
             }
-            if (wait!=WAIT_OBJECT_0+1) {fail("wait",next,GetLastError());break;}
+            if (wait!=WAIT_OBJECT_0+1) {fail("wait",next,wait_error);break;}
             ULONG size=0;
             if (!WinUsb_GetOverlappedResult(usb_,&r.operation,&size,FALSE)) {
                 const DWORD error=GetLastError();
@@ -463,6 +487,8 @@ private:
             r.pending=false;
             trace[r.trace_slot].completed_us=elapsed_us();
             ++completed;
+            ULONG64 frame_begin_cycles=0,frame_end_cycles=0,write_end_cycles=0;
+            QueryThreadCycleTime(GetCurrentThread(),&frame_begin_cycles);
             output.clear();
             for (const auto &packet:r.packets) {
                 if (packet.Status) {++iso_errors;framer.Gap();continue;}
@@ -475,6 +501,10 @@ private:
                 last_data=Clock::now();
                 framer.Feed(r.data.data()+packet.Offset,packet.Length,output);
             }
+            entry.framing_end_us=elapsed_us();
+            QueryThreadCycleTime(GetCurrentThread(),&frame_end_cycles);
+            if (frame_end_cycles>=frame_begin_cycles) entry.framing_cycles=frame_end_cycles-frame_begin_cycles;
+            max_framing_us=(std::max)(max_framing_us,entry.framing_end_us-entry.completed_us);
             if (worker_error_) break;
             if (!output.empty()) {
                 for (std::size_t offset=0;offset<output.size();offset+=188) {
@@ -492,6 +522,10 @@ private:
                 }
                 stream_buf_->NotifyWrite();
             }
+            entry.write_end_us=elapsed_us();
+            QueryThreadCycleTime(GetCurrentThread(),&write_end_cycles);
+            if (write_end_cycles>=frame_end_cycles) entry.write_cycles=write_end_cycles-frame_end_cycles;
+            max_write_us=(std::max)(max_write_us,entry.write_end_us-entry.framing_end_us);
             if (stop_ || !submit(r)) break;
             next=(next+1)%reads.size();
         }
@@ -508,6 +542,10 @@ private:
             static_cast<unsigned long long>(framer.discarded),worker_error_.load(),
             static_cast<unsigned long long>(iso_errors),static_cast<unsigned long long>(empty_packets),
             static_cast<unsigned long long>(startup_discarded));
+        msg_info("PX-BCUD: timing maxima tid=%lu wait_us=%llu framing_us=%llu write_us=%llu submit_us=%llu requeue_gap_us=%llu\n",
+            GetCurrentThreadId(),static_cast<unsigned long long>(max_wait_us),static_cast<unsigned long long>(max_framing_us),
+            static_cast<unsigned long long>(max_write_us),static_cast<unsigned long long>(max_submit_us),
+            static_cast<unsigned long long>(max_requeue_gap_us));
     }
     HANDLE file_; WINUSB_INTERFACE_HANDLE usb_; HANDLE removed_;
     UsbIo io_; Frontend frontend_;
