@@ -1,7 +1,7 @@
 ﻿# SPDX-License-Identifier: GPL-2.0-only
 # Windows PowerShell 5.1. Cryptographic verification without changing trust stores.
 # Adapted from BonDriver_CECHZD1J 52dd600; signature integrity is independent of
-# certificate-store trust. The publisher is separate from the existing PX4 CAT CA.
+# certificate-store trust. Applications use the same publisher and root as the WinUSB CAT.
 function Get-Px4ApplicationHash([string]$Path) {
     # Windows PowerShell の Get-FileHash はモジュール側の WhatIf に影響されるため、
     # 読み取り専用の .NET API で検証を必ず実行する。
@@ -12,8 +12,13 @@ function Get-Px4ApplicationHash([string]$Path) {
     }finally{if($file){$file.Dispose()};$algorithm.Dispose()}
 }
 function Get-Px4ApplicationPublisher([string]$CertificatePath) {
-    $expected='5B6288396CA6D34EFFE2B1DBFDA3B6EA8B861E08FBFDD7F83356AA1EC594A1EE'
+    $expected='42D31AA35DD4F1ED3D9FCCDAEB18A29F3BF255AF2004F519B22232C18B93937B'
     if((Get-Px4ApplicationHash $CertificatePath) -cne $expected){throw 'Unexpected application publisher certificate.'}
+    return [Security.Cryptography.X509Certificates.X509Certificate2]::new($CertificatePath)
+}
+function Get-Px4ApplicationRoot([string]$CertificatePath) {
+    $expected='80DCD1C9D67938EBEF2457229C24E71A82B3121A682E62BF2C98459AF64C365D'
+    if((Get-Px4ApplicationHash $CertificatePath) -cne $expected){throw 'Unexpected application root certificate.'}
     return [Security.Cryptography.X509Certificates.X509Certificate2]::new($CertificatePath)
 }
 function Get-Px4ApplicationFiles([string]$Directory) {
@@ -41,12 +46,14 @@ function Test-Px4ApplicationSignatures([string]$Directory,[string]$CertificatePa
     $directory=(Resolve-Path -LiteralPath $Directory).Path
     if(-not $CertificatePath){$CertificatePath=Join-Path $directory 'Publisher.cer'}
     $publisher=Get-Px4ApplicationPublisher $CertificatePath
+    $root=$null
     try {
+        $root=Get-Px4ApplicationRoot (Join-Path $directory 'Root.cer')
         Initialize-Px4ApplicationVerifier
         $manifest=Get-Content -LiteralPath (Join-Path $directory 'application-signatures.json') -Raw | ConvertFrom-Json
         $required=@(Get-Px4ApplicationFiles $directory)
         $names=@($manifest.Files.PSObject.Properties.Name)
-        if($manifest.Schema -ne 1 -or $manifest.CertificateSHA256 -cne (Get-Px4ApplicationHash $CertificatePath)){throw 'Unexpected application signature manifest identity.'}
+        if($manifest.Schema -ne 2 -or $manifest.CertificateSHA256 -cne (Get-Px4ApplicationHash $CertificatePath) -or $manifest.RootCertificateSHA256 -cne (Get-Px4ApplicationHash (Join-Path $directory 'Root.cer'))){throw 'Unexpected application signature manifest identity.'}
         if($names.Count -ne $required.Count -or @(Compare-Object $required $names).Count){throw 'Unexpected application signature manifest file set.'}
         foreach($name in $required){
             $file=Join-Path $directory $name
@@ -54,7 +61,7 @@ function Test-Px4ApplicationSignatures([string]$Directory,[string]$CertificatePa
             [Px4ApplicationVerifier]::Verify($file,$publisher.RawData)
         }
         Write-Host "PASS: application signatures, PE digests and pinned publisher: $directory"
-    }finally{$publisher.Dispose()}
+    }finally{if($root){$root.Dispose()};$publisher.Dispose()}
 }
 function Initialize-Px4ApplicationVerifier {
     if($null -ne ('Px4ApplicationVerifier' -as [type])) {return}

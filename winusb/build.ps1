@@ -1,5 +1,7 @@
-﻿param([string]$SigningPfxPath='', [string]$SigningPasswordEnvironment='', [string]$SigningPasswordFile='', [switch]$RequireSignedApplications)
+﻿param([string]$SigningPfxPath='', [string]$SigningPasswordEnvironment='', [string]$SigningPasswordFile='', [switch]$RequireSignedApplications, [switch]$UseDriverPublisher)
 
+
+if ($UseDriverPublisher -and ($SigningPfxPath -or $SigningPasswordEnvironment -or $SigningPasswordFile)) { throw 'UseDriverPublisher cannot be combined with external signing credentials.' }
 
 # helper は通常配布に必須のため、C++ ビルドより前に開発環境の不足を通知する。
 if (-not (Get-Command cargo -ErrorAction SilentlyContinue)) {
@@ -354,16 +356,17 @@ if ($LASTEXITCODE -ne 0) { throw 'RTL-SDR package validation failed.' }
 & python (Join-Path $PSScriptRoot 'tests/rtlsdr_package_test.py')
 if ($LASTEXITCODE -ne 0) { throw 'RTL-SDR package regression tests failed.' }
 
-# アプリ署名は CAT と別の公開証明書へ固定する。通常の開発ビルドは従来どおり
+# アプリ署名も CAT と同じ上流の署名者へ固定する。通常の開発ビルドは従来どおり
 # 署名キー不要とし、配布用途では検証に成功した成果物だけを渡す。
-if ($SigningPfxPath) {
-    $sign_arguments = @('-NoProfile','-ExecutionPolicy','Bypass','-File',(Join-Path $PSScriptRoot 'tools/sign-applications.ps1'),'-PfxPath',$SigningPfxPath)
+if ($SigningPfxPath -or $UseDriverPublisher) {
+    $sign_arguments = @('-NoProfile','-ExecutionPolicy','Bypass','-File',(Join-Path $PSScriptRoot 'tools/sign-applications.ps1'))
+    if ($UseDriverPublisher) { $sign_arguments += '-UseDriverPublisher' } else { $sign_arguments += @('-PfxPath',$SigningPfxPath) }
     if ($SigningPasswordEnvironment) { $sign_arguments += @('-PasswordEnvironment',$SigningPasswordEnvironment) }
     if ($SigningPasswordFile) { $sign_arguments += @('-PasswordFile',$SigningPasswordFile) }
     & powershell.exe @sign_arguments
     if ($LASTEXITCODE -ne 0) { throw 'Application signing failed.' }
 }
-if ($RequireSignedApplications -or $SigningPfxPath) {
+if ($RequireSignedApplications -or $SigningPfxPath -or $UseDriverPublisher) {
     & powershell.exe -NoProfile -ExecutionPolicy Bypass -File tools/verify-applications.ps1
     if ($LASTEXITCODE -ne 0) { throw 'Application signature verification failed.' }
 }

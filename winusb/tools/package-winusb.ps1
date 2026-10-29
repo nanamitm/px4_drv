@@ -18,7 +18,7 @@ if($LASTEXITCODE -ne 0){throw 'PX-BCUD package check failed.'}
 if($LASTEXITCODE -ne 0){throw 'RTL-SDR package check failed.'}
 $release=Join-Path $winusb "build\release\$Version"
 New-Item -ItemType Directory -Path $release -Force | Out-Null
-[ordered]@{Version=$Version;SourceRevision=$revision;ApplicationPublisherSHA256='5B6288396CA6D34EFFE2B1DBFDA3B6EA8B861E08FBFDD7F83356AA1EC594A1EE'} |
+[ordered]@{Version=$Version;SourceRevision=$revision;ApplicationPublisherSHA256=(Get-FileHash -LiteralPath (Join-Path $winusb 'pkg\application-signing\Publisher.cer') -Algorithm SHA256).Hash;ApplicationRootSHA256=(Get-FileHash -LiteralPath (Join-Path $winusb 'pkg\application-signing\Root.cer') -Algorithm SHA256).Hash} |
     ConvertTo-Json | Set-Content -LiteralPath (Join-Path $dist 'RELEASE.json') -Encoding ascii
 $binaryZip=Join-Path $release "px4_drv_winusb-$Version.zip"
 $sourceZip=Join-Path $release "px4_drv_winusb-$Version-source.zip"

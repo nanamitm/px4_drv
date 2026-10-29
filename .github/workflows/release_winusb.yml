@@ -37,21 +37,8 @@ jobs:
         shell: pwsh
         run: ./build.ps1
       - name: Sign application binaries and reject modified distributions
-        env:
-          PX4_APPLICATION_SIGNING_PFX_BASE64: ${{ secrets.PX4_APPLICATION_SIGNING_PFX_BASE64 }}
-          PX4_APPLICATION_SIGNING_PASSWORD: ${{ secrets.PX4_APPLICATION_SIGNING_PASSWORD }}
         run: |
-          $ErrorActionPreference='Stop'
-          $pfx=Join-Path $env:RUNNER_TEMP 'px4-application-signing.pfx'
-          try {
-            if(-not $env:PX4_APPLICATION_SIGNING_PFX_BASE64 -or -not $env:PX4_APPLICATION_SIGNING_PASSWORD){throw 'Configure PX4 application signing Secrets in this repository before creating signed releases.'}
-            [IO.File]::WriteAllBytes($pfx,[Convert]::FromBase64String($env:PX4_APPLICATION_SIGNING_PFX_BASE64))
-            ./tools/sign-applications.ps1 -PfxPath $pfx -PasswordEnvironment PX4_APPLICATION_SIGNING_PASSWORD
-          } finally {
-            if(Test-Path -LiteralPath $pfx){Remove-Item -LiteralPath $pfx -Force}
-            $env:PX4_APPLICATION_SIGNING_PFX_BASE64=$null
-            $env:PX4_APPLICATION_SIGNING_PASSWORD=$null
-          }
+          ./tools/sign-applications.ps1 -UseDriverPublisher
           ./tests/application_signature_test.ps1
       - name: Package matching committed source and verify extracted ZIP
         env:

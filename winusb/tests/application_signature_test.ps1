@@ -54,6 +54,16 @@ $manifest.Files.PSObject.Properties.Remove('BonDriver_Torne.dll');$manifest | Co
 Rejected {Test-Px4ApplicationSignatures $omitted} 'Unsigned manifest could omit a real BonDriver.'
 $wrong=Fixture 'wrong-publisher';Copy-Item -LiteralPath (Join-Path $winusb 'pkg\inf\px4_drv_winusb.cer') -Destination (Join-Path $wrong 'Publisher.cer') -Force
 Rejected {Test-Px4ApplicationSignatures $wrong} 'Other publisher certificate accepted.'
+$missingRoot=Fixture 'missing-root';Remove-Item -LiteralPath (Join-Path $missingRoot 'Root.cer')
+Rejected {Test-Px4ApplicationSignatures $missingRoot} 'Missing root certificate accepted.'
+$wrongRoot=Fixture 'wrong-root';Copy-Item -LiteralPath (Join-Path $winusb 'pkg\application-signing\Publisher.cer') -Destination (Join-Path $wrongRoot 'Root.cer') -Force
+Rejected {Test-Px4ApplicationSignatures $wrongRoot} 'Publisher certificate accepted as a root.'
+$wrongRootManifest=Fixture 'wrong-root-manifest';$file=Join-Path $wrongRootManifest 'application-signatures.json'
+$manifest=Get-Content -LiteralPath $file -Raw | ConvertFrom-Json
+$manifest.RootCertificateSHA256='0'*64
+$manifest | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $file -Encoding ascii
+Rejected {Test-Px4ApplicationSignatures $wrongRootManifest} 'Wrong root hash accepted in manifest.'
+
 Rejected {[Px4ApplicationVerifier]::Verify((Join-Path $source 'DriverHost_PX4.exe'),[byte[]]@(1,2,3))} 'PE verifier accepted a different signer.'
 Assert ((RunTrust $source Verify) -eq 0) 'Distribution Verify entry point failed.'
 Assert ((RunTrust $source Trust -WhatIf) -eq 0) 'Valid WhatIf trust entry point failed.'

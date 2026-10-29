@@ -12,18 +12,22 @@ $certificatePath=Join-Path $directory 'Publisher.cer'
 if($Action -ne 'Untrust'){Test-Px4ApplicationSignatures $directory $certificatePath}
 if($Action -eq 'Verify'){return}
 $publisher=Get-Px4ApplicationPublisher $certificatePath
+$root=$null
 try {
-    foreach($name in @('Root','TrustedPublisher')){
-        $storePath="Cert:\$Scope\$name"
+    $rootPath=Join-Path $directory 'Root.cer'
+    $root=Get-Px4ApplicationRoot $rootPath
+    # CAT と同じ証明書階層を使い、ルートと署名者をそれぞれ対応するストアへ登録する。
+    foreach($entry in @(@{Name='Root';Path=$rootPath;Certificate=$root},@{Name='TrustedPublisher';Path=$certificatePath;Certificate=$publisher})) {
+        $storePath="Cert:\$Scope\$($entry.Name)"
         if($Action -eq 'Trust'){
-            if($PSCmdlet.ShouldProcess($storePath,"Trust application publisher $($publisher.Thumbprint)")){
-                Import-Certificate -FilePath $certificatePath -CertStoreLocation $storePath | Out-Null
+            if($PSCmdlet.ShouldProcess($storePath,"Trust px4_drv certificate $($entry.Certificate.Thumbprint)")){
+                Import-Certificate -FilePath $entry.Path -CertStoreLocation $storePath | Out-Null
             }
         }else{
-            $entry=Join-Path $storePath $publisher.Thumbprint
-            if((Test-Path -LiteralPath $entry) -and $PSCmdlet.ShouldProcess($entry,'Remove application publisher trust')){
-                Remove-Item -LiteralPath $entry
+            $storeEntry=Join-Path $storePath $entry.Certificate.Thumbprint
+            if((Test-Path -LiteralPath $storeEntry) -and $PSCmdlet.ShouldProcess($storeEntry,'Remove shared px4_drv certificate trust')){
+                Remove-Item -LiteralPath $storeEntry
             }
         }
     }
-}finally{$publisher.Dispose()}
+}finally{if($root){$root.Dispose()};$publisher.Dispose()}
