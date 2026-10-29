@@ -12,6 +12,7 @@
 #include <shlwapi.h>
 
 #include "bon_driver.hpp"
+#include "ipc_names.hpp"
 #include "config.hpp"
 #include "chset.hpp"
 #include "security_attributes.hpp"
@@ -302,7 +303,7 @@ const BOOL BonDriver::OpenTuner()
 
 		{
 			SecurityAttributes sa(EVENT_ALL_ACCESS);
-			startup_event = CreateEventW(sa.Get(), TRUE, FALSE, L"Global\\DriverHost_PX4_StartupEvent");
+			startup_event = CreateEventW(sa.Get(), TRUE, FALSE, px4::ipc::Startup);
 		}
 
 		if (!startup_event) {
@@ -337,7 +338,7 @@ const BOOL BonDriver::OpenTuner()
 		ctrl_pipe_config.stream_read = false;
 		ctrl_pipe_config.timeout = pipe_timeout_;
 
-		if (!ctrl_pipe->Connect(L"px4_ctrl_pipe", ctrl_pipe_config, nullptr))
+		if (!ctrl_pipe->Connect(px4::ipc::Control, ctrl_pipe_config, nullptr))
 			throw BonDriverError("BonDriver::OpenTuner: control pipe: cannot connect.");
 
 		ctrl_client_.SetPipe(ctrl_pipe);
@@ -367,7 +368,7 @@ const BOOL BonDriver::OpenTuner()
 
 		data_pipe_.reset(new px4::PipeClient());
 
-		if (!data_pipe_->Connect(L"px4_data_pipe", data_pipe_config, nullptr))
+		if (!data_pipe_->Connect(px4::ipc::Data, data_pipe_config, nullptr))
 			throw BonDriverError("BonDriver::OpenTuner: data pipe: cannot connect.");
 
 		px4::command::DataCmd data_cmd;

@@ -14,6 +14,7 @@
 #include "isdbt2071_device.hpp"
 #include "torne/experimental_device.hpp"
 #include "pxbcud/device.hpp"
+#include "rtlsdr/device.hpp"
 
 namespace px4 {
 
@@ -61,6 +62,8 @@ DeviceManager::DeviceManager(const px4::DeviceDefinitionSet &device_defs, px4::R
 			type = DeviceType::CECHZD1J;
 		else if (it->first == L"PXBCUD")
 			type = DeviceType::PXBCUD;
+		else if (it->first == L"RTLSDR")
+			type = DeviceType::RTLSDR;
 
 		if (type == DeviceType::UNKNOWN)
 			continue;
@@ -140,6 +143,14 @@ void DeviceManager::Add(const std::wstring &path, const std::pair<DeviceType, px
 
 	/* 機種追加時に型と DeviceType の対応をこの場で確認できるよう生成分岐を明示する */
 	switch (def.first) {
+	case px4::DeviceType::RTLSDR:
+	{
+		auto dev = std::make_shared<px4::rtlsdr::Device>(path, def.second, ++index_, receiver_manager_);
+		const int ret = dev->Init();
+		if (!ret) devices_.emplace(path, std::move(dev));
+		else msg_err("RTL-SDR: device initialization failed ret=%d\n", ret);
+		break;
+	}
 	case px4::DeviceType::PXBCUD:
 	{
 		auto dev = std::make_shared<px4::pxbcud::Device>(path, def.second, ++index_, receiver_manager_);

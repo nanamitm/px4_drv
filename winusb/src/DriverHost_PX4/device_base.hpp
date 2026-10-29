@@ -27,6 +27,7 @@ namespace px4 {
 class DeviceBase : public CardDevice {
 public:
 	explicit DeviceBase(const std::wstring &path, const px4::DeviceDefinition &device_def, std::uintptr_t index, px4::ReceiverManager &receiver_manager);
+	DeviceBase(const std::wstring &path, const px4::DeviceDefinition &device_def, std::uintptr_t index, px4::ReceiverManager &receiver_manager, bool short_serial_request);
 	virtual ~DeviceBase();
 
 	// cannot copy

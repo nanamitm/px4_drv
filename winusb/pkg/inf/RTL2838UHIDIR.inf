@@ -1,0 +1,32 @@
+; RTL-SDR receive interface only. The composite parent and IR interface keep their drivers.
+[Version]
+Signature="$Windows NT$"
+Class=USBDevice
+ClassGuid={88BAE032-5A81-49f0-BC3D-A4FF138216D6}
+Provider=%ProviderName%
+DriverVer=10/28/2026,26.10.28.0
+CatalogFile=px4_drv_winusb.cat
+
+[Manufacturer]
+%ProviderName%=RTLSDR,NTx86,NTamd64,NTarm64
+[RTLSDR.NTx86]
+%DeviceDesc%=RTLSDR.Install,USB\VID_0BDA&PID_2838&MI_00
+[RTLSDR.NTamd64]
+%DeviceDesc%=RTLSDR.Install,USB\VID_0BDA&PID_2838&MI_00
+[RTLSDR.NTarm64]
+%DeviceDesc%=RTLSDR.Install,USB\VID_0BDA&PID_2838&MI_00
+
+[RTLSDR.Install]
+Include=winusb.inf
+Needs=WINUSB.NT
+[RTLSDR.Install.Services]
+Include=winusb.inf
+Needs=WINUSB.NT.Services
+[RTLSDR.Install.HW]
+AddReg=RTLSDR.Interface
+[RTLSDR.Interface]
+HKR,,DeviceInterfaceGUIDs,0x00010000,"{2778e440-2c39-4e64-a6ed-293014842f62}"
+
+[Strings]
+ProviderName="px4_drv contributors"
+DeviceDesc="RTL2838UHIDIR RTL-SDR Receive Interface (WinUSB)"

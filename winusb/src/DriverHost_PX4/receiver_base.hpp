@@ -154,6 +154,9 @@ public:
 	virtual int ReadStat(px4::command::StatType type, std::int32_t &value) = 0;
 
 protected:
+	/* ソフト復調では選局要求の受付とTSロックを分けられる。
+	 * 既存機種は従来どおりCheckLockの結果を選局完了条件にする。 */
+	virtual int CheckTuneComplete(bool &complete) { return CheckLock(complete); }
 	/* 機種固有の正規化を自動 QAM 判定より先に行う。既存機種は変更なし。 */
 	virtual int PrepareTune() { return 0; }
 	virtual int SetFrequency() = 0;

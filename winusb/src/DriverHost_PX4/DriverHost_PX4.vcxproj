@@ -247,6 +247,13 @@
       <AdditionalDependencies>kernel32.lib;user32.lib;gdi32.lib;winspool.lib;comdlg32.lib;advapi32.lib;shell32.lib;ole32.lib;oleaut32.lib;uuid.lib;odbc32.lib;odbccp32.lib;winusb.lib;setupapi.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
   </ItemDefinitionGroup>
+  <PropertyGroup Condition="'$(RtlSdrIsolatedTest)'=='true'">
+    <OutDir>$(SolutionDir)build\$(PlatformTarget)\rtlsdr-test\</OutDir>
+    <IntDir>build\$(PlatformTarget)\rtlsdr-test\</IntDir>
+  </PropertyGroup>
+  <ItemDefinitionGroup Condition="'$(RtlSdrIsolatedTest)'=='true'">
+    <ClCompile><PreprocessorDefinitions>PX4_ISOLATED_TEST_HOST;%(PreprocessorDefinitions)</PreprocessorDefinitions></ClCompile>
+  </ItemDefinitionGroup>
   <ItemGroup>
     <ClCompile Include="..\..\..\driver\cxd2856er.c" />
     <ClCompile Include="..\..\..\driver\cxd2858er.c" />
@@ -265,6 +272,7 @@
     <ClCompile Include="device_definition_set.cpp" />
     <ClCompile Include="device_manager.cpp" />
     <ClCompile Include="pxbcud\device.cpp" />
+    <ClCompile Include="rtlsdr\rtl_device.cpp" />
     <ClCompile Include="pxbcud\frontend.cpp" />
     <ClCompile Include="torne\experimental_device.cpp" />
     <ClCompile Include="torne\frontend_native_client.cpp" />
@@ -316,6 +324,8 @@
     <ClInclude Include="device_definition_set.hpp" />
     <ClInclude Include="device_manager.hpp" />
     <ClInclude Include="pxbcud\device.hpp" />
+    <ClInclude Include="rtlsdr\device.hpp" />
+    <ClInclude Include="rtlsdr\protocol.hpp" />
     <ClInclude Include="pxbcud\frontend.hpp" />
     <ClInclude Include="pxbcud\plain_framer.hpp" />
     <ClInclude Include="pxbcud\pat_gate.hpp" />

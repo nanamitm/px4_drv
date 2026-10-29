@@ -298,6 +298,13 @@
   <ItemGroup>
     <ResourceCompile Include="BonDriver_PX4.rc" />
   </ItemGroup>
+  <PropertyGroup Condition="'$(RtlSdrIsolatedTest)'=='true'">
+    <OutDir>$(SolutionDir)build\$(PlatformTarget)\rtlsdr-test\</OutDir>
+    <IntDir>build\$(PlatformTarget)\rtlsdr-test\</IntDir>
+  </PropertyGroup>
+  <ItemDefinitionGroup Condition="'$(RtlSdrIsolatedTest)'=='true'">
+    <ClCompile><PreprocessorDefinitions>PX4_ISOLATED_TEST_HOST;%(PreprocessorDefinitions)</PreprocessorDefinitions></ClCompile>
+  </ItemDefinitionGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">
   </ImportGroup>

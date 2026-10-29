@@ -1,0 +1,26 @@
+#include <windows.h>
+#include "../../src/common/version.h"
+VS_VERSION_INFO VERSIONINFO
+FILEVERSION VER_FILE
+PRODUCTVERSION VER_PRODUCT
+FILEFLAGSMASK VS_FFI_FILEFLAGSMASK
+FILEFLAGS 0
+FILEOS VOS_NT_WINDOWS32
+FILETYPE VFT_APP
+BEGIN
+ BLOCK "StringFileInfo"
+ BEGIN
+  BLOCK "000004b0"
+  BEGIN
+   VALUE "FileDescription", "RTL-SDR one-seg streaming frontend"
+   VALUE "FileVersion", VER_FILE_STR
+   VALUE "ProductName", "px4_drv RTL-SDR frontend"
+   VALUE "ProductVersion", VER_PRODUCT_STR
+   VALUE "OriginalFilename", "rtlsdr_frontend.exe"
+  END
+ END
+ BLOCK "VarFileInfo"
+ BEGIN
+  VALUE "Translation", 0x0000, 1200
+ END
+END

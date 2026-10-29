@@ -195,7 +195,7 @@ bool ReceiverBase::Tune(std::uint32_t timeout)
 
 		auto begin = std::chrono::steady_clock::now();
 		for (lock_checks = 0; true; lock_checks++) {
-			ret = CheckLock(locked);
+			ret = CheckTuneComplete(locked);
 			if ((!ret && locked) || ret == -ECANCELED)
 				break;
 
