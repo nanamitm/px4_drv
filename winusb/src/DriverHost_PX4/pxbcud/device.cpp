@@ -15,6 +15,16 @@
 namespace px4::pxbcud {
 namespace {
 using Clock=std::chrono::steady_clock;
+// isoch 要求数の既定と範囲。1要求は 64マイクロフレーム = 8ms のため、
+// 要求数がそのまま受信スレッドの遅れを吸収できる時間になる。
+// Linux em28xx と同じ5要求 (40ms) では、完了待ちの実測が 33.2ms・39.4ms・41.9ms と
+// 余裕と同じ桁に並び、超えた時点で isoch が枯れていた。カーネルは完了コールバックで
+// 再投入するため5で足りるが、ユーザー空間のスレッドが再投入するこちらでは足りない。
+// 10要求 (80ms) は実測の停滞 30〜42ms に対して倍以上の余裕があり、
+// 追加で確保するバッファは 60,160バイト x 5 = 約300KB。
+constexpr unsigned PXBCUD_DEFAULT_REQUESTS=10;
+constexpr unsigned PXBCUD_MIN_REQUESTS=2;
+constexpr unsigned PXBCUD_MAX_REQUESTS=32;
 class UsbIo final : public Io {
 public:
     UsbIo(HANDLE file, WINUSB_INTERFACE_HANDLE usb, HANDLE removed)
@@ -78,9 +88,10 @@ private:
 
 class Receiver final : public ReceiverBase {
 public:
-    Receiver(HANDLE file,WINUSB_INTERFACE_HANDLE usb,HANDLE removed,bool auto_recovery)
+    Receiver(HANDLE file,WINUSB_INTERFACE_HANDLE usb,HANDLE removed,bool auto_recovery,std::size_t requests)
         : ReceiverBase(RECEIVER_SAT_SET_STREAM_ID_AFTER_TUNE),
-          file_(file),usb_(usb),removed_(removed),io_(file,usb,removed),frontend_(io_),auto_recovery_(auto_recovery) {}
+          file_(file),usb_(usb),removed_(removed),io_(file,usb,removed),frontend_(io_),
+          auto_recovery_(auto_recovery),requests_(requests) {}
     ~Receiver() override
     {
         // ReceiverManager は生ポインターを貸し出すため、既存機種と同様 Close を待つ。
@@ -376,7 +387,11 @@ private:
                 if (operation.hEvent) CloseHandle(operation.hEvent);
             }
         };
-        std::array<Read,5> reads;
+        // 要求数は実測で決める。5要求 (40ms) では、優先度引き上げと書込みまとめの後も
+        // 完了待ちの最大が40msへ張り付いて isoch が枯れたため、設定で増やせるようにする。
+        const std::size_t request_count=requests_;
+        const auto reads_storage=std::make_unique<Read[]>(request_count);
+        Read *const reads=reads_storage.get();
         PlainFramer framer;
         PatGate gate(frontend_.SelectedStream());
         std::uint64_t startup_discarded=0;
@@ -385,8 +400,9 @@ private:
         bool first=true;
         bool reported_recovery=false;
         const auto started=Clock::now();
-        msg_info("PX-BCUD: timing start pid=%lu tid=%lu priority=%d requests=5 microframes_per_request=64 nominal_queue_us=40000\n",
-            GetCurrentProcessId(),GetCurrentThreadId(),GetThreadPriority(GetCurrentThread()));
+        msg_info("PX-BCUD: timing start pid=%lu tid=%lu priority=%d requests=%u microframes_per_request=64 nominal_queue_us=%u\n",
+            GetCurrentProcessId(),GetCurrentThreadId(),GetThreadPriority(GetCurrentThread()),
+            static_cast<unsigned>(request_count),static_cast<unsigned>(request_count*64*125));
         std::uint64_t submitted=0, completed=0;
         struct Trace {
             std::uint64_t sequence=0, submitted_us=0, completed_us=0;
@@ -407,12 +423,12 @@ private:
             failure_time_=Clock::now();
             worker_error_=error;
             unsigned pending=0;
-            for (const auto &read:reads) if (read.pending) ++pending;
+            for (std::size_t i=0;i<request_count;++i) if (reads[i].pending) ++pending;
             msg_err("PX-BCUD: USB stream failure stage=%s read=%u win32=%lu elapsed_ms=%llu submitted=%llu completed=%llu pending=%u continue_stream=%u\n",
                 stage,static_cast<unsigned>(index),error,
                 static_cast<unsigned long long>(std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now()-started).count()),
                 static_cast<unsigned long long>(submitted),static_cast<unsigned long long>(completed),pending,first?0u:1u);
-            for (std::size_t i=0;i<reads.size();++i) {
+            for (std::size_t i=0;i<request_count;++i) {
                 const auto &read=reads[i];
                 msg_err("PX-BCUD: USB request read=%u pending=%u internal=0x%llx internal_high=%llu offset=%lu offset_high=%lu event_set=%u\n",
                     static_cast<unsigned>(i),read.pending?1u:0u,
@@ -459,21 +475,22 @@ private:
             const auto submitted_at=elapsed_us();
             max_submit_us=(std::max)(max_submit_us,submitted_at-submit_begin);
             max_requeue_gap_us=(std::max)(max_requeue_gap_us,requeue_gap);
-            if (!ok && error!=ERROR_IO_PENDING) {fail("submit",&r-reads.data(),error);return false;}
+            if (!ok && error!=ERROR_IO_PENDING) {fail("submit",&r-reads,error);return false;}
             r.trace_slot=static_cast<std::size_t>(submitted%trace.size());
             trace[r.trace_slot]={};
             auto &entry=trace[r.trace_slot];
-            entry.sequence=submitted+1;entry.index=static_cast<unsigned>(&r-reads.data());
+            entry.sequence=submitted+1;entry.index=static_cast<unsigned>(&r-reads);
             entry.submitted_us=submitted_at;entry.submit_begin_us=submit_begin;entry.requeue_gap_us=requeue_gap;
             ++submitted;
             first=false;r.pending=true; return true;
         };
-        for (auto &r:reads) {
+        for (std::size_t i=0;i<request_count;++i) {
+            auto &r=reads[i];
             r.file=file_; r.usb=usb_;
             r.operation.hEvent=CreateEventW(nullptr,TRUE,FALSE,nullptr);
-            if (!r.operation.hEvent) {fail("create_event",&r-reads.data(),GetLastError());break;}
+            if (!r.operation.hEvent) {fail("create_event",&r-reads,GetLastError());break;}
             if (!WinUsb_RegisterIsochBuffer(usb_,0x84,r.data.data(),static_cast<ULONG>(r.data.size()),&r.buffer)) {
-                fail("register_buffer",&r-reads.data(),GetLastError());break;
+                fail("register_buffer",&r-reads,GetLastError());break;
             }
             if (stop_ || !submit(r)) break;
         }
@@ -562,9 +579,10 @@ private:
             if (write_end_cycles>=frame_end_cycles) entry.write_cycles=write_end_cycles-frame_end_cycles;
             max_write_us=(std::max)(max_write_us,entry.write_end_us-entry.framing_end_us);
             if (stop_ || !submit(r)) break;
-            next=(next+1)%reads.size();
+            next=(next+1)%request_count;
         }
-        for (auto &r:reads) {
+        for (std::size_t i=0;i<request_count;++i) {
+            auto &r=reads[i];
             if (r.pending) {
                 CancelIoEx(file_,&r.operation);
                 ULONG ignored=0;
@@ -585,6 +603,7 @@ private:
     HANDLE file_; WINUSB_INTERFACE_HANDLE usb_; HANDLE removed_;
     UsbIo io_; Frontend frontend_;
     const bool auto_recovery_;
+    const std::size_t requests_;
     std::uint64_t recovery_count_=0;
     Clock::time_point failure_time_{};
     std::atomic_bool recovering_{false};
@@ -609,7 +628,20 @@ int Device::Init()
     if (receiver_) return -EALREADY;
     if (usb_dev_.descriptor.idVendor!=0x3275 || usb_dev_.descriptor.idProduct!=0x0085) return -ENODEV;
     if (device_def_.receivers.size()!=1 || device_def_.receivers[0].systems!=SystemType::ISDB_S) return -EINVAL;
-    receiver_=std::make_unique<Receiver>(usb_dev_.dev,usb_dev_.winusb,removed_,auto_recovery_);
+    // isoch のキュー深度。1要求 64マイクロフレーム = 8ms のため、要求数がそのまま
+    // 受信スレッドが遅れても欠落しない時間になる。既定の5は Linux em28xx と同じだが、
+    // 完了コールバックで再投入するカーネルと違い、ここはユーザー空間のスレッドが
+    // 再投入するため余裕が要る。他機種と同じ名前で設定できるようにする。
+    std::size_t requests=PXBCUD_DEFAULT_REQUESTS;
+    if (device_def_.configs.Exists(L"MaxUrbs")) {
+        const auto value=px4::util::wtoui(device_def_.configs.Get(L"MaxUrbs"));
+        if (value<PXBCUD_MIN_REQUESTS || value>PXBCUD_MAX_REQUESTS)
+            msg_warn("PX-BCUD: MaxUrbs=%u is out of range %u-%u; using %u\n",
+                value,PXBCUD_MIN_REQUESTS,PXBCUD_MAX_REQUESTS,static_cast<unsigned>(requests));
+        else
+            requests=value;
+    }
+    receiver_=std::make_unique<Receiver>(usb_dev_.dev,usb_dev_.winusb,removed_,auto_recovery_,requests);
     const auto &definition=device_def_.receivers[0];
     command::ReceiverInfo info{};
     wcscpy_s(info.device_name,device_def_.name.c_str()); info.device_guid=device_def_.guid;
