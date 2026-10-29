@@ -152,16 +152,54 @@ void TestPatGate()
 }
 void TestRecoveryBudget()
 {
-    px4::pxbcud::RecoveryBudget budget;
-    const auto start=px4::pxbcud::RecoveryBudget::Clock::time_point{};
-    CHECK(budget.Take(start));
-    CHECK(budget.Take(start+std::chrono::seconds(1)));
-    CHECK(budget.Take(start+std::chrono::seconds(2)));
-    CHECK(!budget.Take(start+std::chrono::seconds(59)));
-    CHECK(budget.Take(start+std::chrono::seconds(60)));
-    CHECK(!budget.Take(start+std::chrono::seconds(60)));
-    CHECK(budget.Take(start+std::chrono::seconds(61)));
-    CHECK(budget.Take(start+std::chrono::seconds(122)));
-    std::puts("Recovery budget: rolling-window limit and expiration passed");
+    using Budget=px4::pxbcud::RecoveryBudget;
+    const auto immediate=std::chrono::milliseconds(300);
+    const auto healthy=Budget::HealthyRun+std::chrono::seconds(1);
+
+    // 復旧しても受信が続かない状態は、連続 Limit 回で諦める。
+    Budget failing;
+    for (std::size_t i=0;i<Budget::Limit;++i) {
+        failing.NoteStream(immediate);
+        CHECK(failing.Take());
+    }
+    failing.NoteStream(immediate);
+    CHECK(!failing.Take());
+
+    // 待機は1回目が0で、以降は BackoffStep 刻みに広がり BackoffMax で頭打ちになる。
+    Budget backoff;
+    backoff.NoteStream(immediate);CHECK(backoff.Take());
+    CHECK(backoff.Backoff()==std::chrono::milliseconds::zero());
+    backoff.NoteStream(immediate);CHECK(backoff.Take());
+    CHECK(backoff.Backoff()==Budget::BackoffStep);
+    backoff.NoteStream(immediate);CHECK(backoff.Take());
+    CHECK(backoff.Backoff()==Budget::BackoffStep*2);
+    while (backoff.Consecutive()<Budget::Limit) {backoff.NoteStream(immediate);CHECK(backoff.Take());}
+    CHECK(backoff.Backoff()<=Budget::BackoffMax);
+
+    // 高負荷による一過性の失敗は、復旧後に受信が続くため何度でも復旧できる。
+    Budget intermittent;
+    for (std::size_t i=0;i<Budget::Limit*4;++i) {
+        intermittent.NoteStream(healthy);
+        CHECK(intermittent.Take());
+        CHECK(intermittent.Consecutive()==1);
+        CHECK(intermittent.Backoff()==std::chrono::milliseconds::zero());
+    }
+
+    // 連続失敗の途中でも、受信が続けばそれまでの回数を忘れる。
+    Budget mixed;
+    for (std::size_t i=0;i+1<Budget::Limit;++i) {mixed.NoteStream(immediate);CHECK(mixed.Take());}
+    mixed.NoteStream(healthy);
+    CHECK(mixed.Take());
+    CHECK(mixed.Consecutive()==1);
+
+    // HealthyRun ちょうどは健全として扱い、1ms 足りなければ連続失敗のまま数える。
+    Budget boundary;
+    boundary.NoteStream(immediate);CHECK(boundary.Take());
+    boundary.NoteStream(Budget::HealthyRun);
+    CHECK(boundary.Take());CHECK(boundary.Consecutive()==1);
+    boundary.NoteStream(Budget::HealthyRun-std::chrono::milliseconds(1));
+    CHECK(boundary.Take());CHECK(boundary.Consecutive()==2);
+
+    std::puts("Recovery budget: consecutive limit, backoff growth and healthy-run reset passed");
 }
 int main() {TestFrontend();TestFramer();TestPatGate();TestRecoveryBudget();return 0;}
