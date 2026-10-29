@@ -30,7 +30,7 @@ function Get-Px4ApplicationFiles([string]$Directory) {
         if (-not (Test-Path -LiteralPath (Join-Path $Directory $helper) -PathType Leaf)) { throw "Missing required binary: $helper" }
         # 外部 DLL は固定ランタイムのハッシュ検査で確認し、自前の helper はアプリ署名でも検証する。
         $runtime=Join-Path $Directory 'rtlsdr'
-        $expected=@('rtlsdr_frontend.exe','rtlsdr.dll','pthreadVC2.dll','msvcr100.dll')
+        $expected=@('rtlsdr_frontend.exe','rtlsdr.dll','pthreadVC2.dll','msvcr100.dll','vcruntime140.dll')
         $actual=@(Get-ChildItem -LiteralPath $runtime -File | Where-Object {$_.Extension -in '.exe','.dll'} | ForEach-Object {$_.Name})
         if (@(Compare-Object $expected $actual).Count) { throw 'Unexpected or missing RTL-SDR runtime binary.' }
         $required += $helper

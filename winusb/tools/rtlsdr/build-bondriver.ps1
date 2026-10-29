@@ -12,7 +12,7 @@ function Invoke-Cargo([string[]]$CargoArguments) {
     $previousPreference=$ErrorActionPreference
     try {
         $ErrorActionPreference='Continue'
-        & cargo @CargoArguments 2>&1 | ForEach-Object { $_.ToString() }
+        & cargo --config (Join-Path $frontend 'cargo-config.toml') @CargoArguments 2>&1 | ForEach-Object { $_.ToString() }
         $cargoExit=$LASTEXITCODE
     } finally { $ErrorActionPreference=$previousPreference }
     if ($cargoExit -ne 0) { throw "Cargo failed (exit $cargoExit): $($CargoArguments -join ' ')" }
@@ -63,7 +63,7 @@ foreach($arch in $Architecture){
         }
         $runtime=Join-Path $destination 'rtlsdr'
         New-Item -ItemType Directory -Force -Path $runtime | Out-Null
-        foreach($file in @('rtlsdr_frontend.exe','rtlsdr.dll','pthreadVC2.dll','msvcr100.dll','runtime.json','COPYING.librtlsdr')){
+        foreach($file in @('rtlsdr_frontend.exe','rtlsdr.dll','pthreadVC2.dll','msvcr100.dll','vcruntime140.dll','runtime.json','COPYING.librtlsdr')){
             Copy-Item -LiteralPath (Join-Path $native "rtlsdr\$file") -Destination $runtime -Force
         }
         Copy-Item -LiteralPath (Join-Path $frontend 'LICENSE') -Destination (Join-Path $runtime 'COPYING.frontend') -Force
@@ -87,13 +87,14 @@ foreach($arch in $Architecture){
         Copy-Item -LiteralPath (Join-Path $winusbRoot 'build\rtlsdr-runtime\rtl-sdr-blog-V1.4.0-source.zip') -Destination (Join-Path $sources 'rtl-sdr-blog-V1.4.0.zip') -Force
         $sourceFrontend=Join-Path $sources 'winusb\tools\rtlsdr_frontend'
         New-Item -ItemType Directory -Force -Path $sourceFrontend,(Join-Path $sources 'winusb\src\common'),(Join-Path $sources '.cargo') | Out-Null
-        foreach($file in @('Cargo.toml','Cargo.lock','build.rs','frontend.rc','LICENSE','src','vendor')){
+        foreach($file in @('Cargo.toml','Cargo.lock','cargo-config.toml','build.rs','frontend.rc','LICENSE','src','vendor')){
             Copy-Item -LiteralPath (Join-Path $frontend $file) -Destination $sourceFrontend -Recurse -Force
         }
         Copy-Item -LiteralPath (Join-Path $winusbRoot 'src\common\version.h') -Destination (Join-Path $sources 'winusb\src\common') -Force
         Invoke-Cargo -CargoArguments @('vendor','--quiet','--locked','--manifest-path',(Join-Path $frontend 'Cargo.toml'),'--versioned-dirs',(Join-Path $sources 'vendor'))
         # --quiet は設定例も抑制するため、配布先を基準とする設定を明示して保存する。
         $configText = "[source.crates-io]`nreplace-with = `"vendored-sources`"`n`n[source.vendored-sources]`ndirectory = `"vendor`"`n"
+        $configText += Get-Content -LiteralPath (Join-Path $frontend 'cargo-config.toml') -Raw -Encoding UTF8
         [IO.File]::WriteAllText((Join-Path $sources '.cargo\config.toml'),$configText,[Text.UTF8Encoding]::new($false))
         Write-Host "RTL-SDR BonDriver package: $destination"
     }

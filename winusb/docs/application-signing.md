@@ -67,4 +67,4 @@ Secrets 不足時は署名済みリリースの作成が失敗します。
 PR の開発ビルドは秘密鍵を使用せず、成果物名で未署名と識別できます。
 別リポジトリの Secrets は自動で共有されないため、利用先リポジトリでの登録が必要です。
 
-RTL-SDR 配布では `rtlsdr/rtlsdr_frontend.exe` もアプリ署名とマニフェストの対象です。外部ランタイム DLL は配布元のファイルを維持し、通常ビルドと ZIP 作成前・展開後の配布検査で `runtime-lock.json` の固定ハッシュと照合します。
+RTL-SDR 配布では `rtlsdr/rtlsdr_frontend.exe` もアプリ署名とマニフェストの対象です。外部ランタイム DLL は配布元のファイルを維持し、通常ビルドと ZIP 作成前・展開後の配布検査で `runtime-lock.json` の固定ハッシュと照合します。追加する `vcruntime140.dll` は Visual Studio の再頒布用ディレクトリから取得し、Microsoft の署名を検証してハッシュを記録します。配布検査ではこのハッシュと、helper・依存 DLL のインポート先がOS標準DLLまたは同梱DLLであることも確認します。

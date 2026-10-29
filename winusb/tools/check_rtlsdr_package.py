@@ -26,13 +26,52 @@ def check_pe(path, machine):
     require(struct.unpack_from("<H", pe, 4)[0] == machine, f"Incorrect architecture: {path}")
 
 
+def imported_dlls(path):
+    image = path.read_bytes()
+    pe = struct.unpack_from("<I", image, 0x3C)[0]
+    optional = pe + 24
+    magic = struct.unpack_from("<H", image, optional)[0]
+    require(magic in (0x10B, 0x20B), f"Unsupported PE format: {path}")
+    directories = optional + (112 if magic == 0x20B else 96)
+    rva, size = struct.unpack_from("<II", image, directories + 8)
+    table = optional + struct.unpack_from("<H", image, pe + 20)[0]
+    sections = struct.unpack_from("<H", image, pe + 6)[0]
+
+    def offset(address):
+        for index in range(sections):
+            virtual_size, virtual, raw_size, raw = struct.unpack_from("<IIII", image, table + index * 40 + 8)
+            if virtual <= address < virtual + min(virtual_size, raw_size):
+                value = raw + address - virtual
+                require(value < len(image), f"Invalid import RVA: {path}")
+                return value
+        raise ValueError(f"Unmapped import RVA: {path}")
+
+    require(rva and size >= 20, f"Missing PE import directory: {path}")
+    result = set()
+    for index in range(size // 20):
+        descriptor = offset(rva + index * 20)
+        fields = struct.unpack_from("<IIIII", image, descriptor)
+        if not any(fields):
+            return result
+        start = offset(fields[3])
+        end = image.find(b"\0", start, start + 260)
+        require(end >= start, f"Invalid imported DLL name: {path}")
+        result.add(image[start:end].decode("ascii").lower())
+    raise ValueError(f"Unterminated PE import directory: {path}")
+
+
 def check_package(folder, bits):
     arch, machine = ("x86", 0x14C) if bits == 32 else ("x64", 0x8664)
     binaries = ("BonDriver_RTLSDR.dll", "DriverHost_PX4.exe", "WinSCard.dll", "rtlsdr/rtlsdr_frontend.exe")
     for name in binaries:
         check_pe(folder / name, machine)
     runtime = folder / "rtlsdr"
-    libraries = LOCK["libraries"][arch]
+    libraries = dict(LOCK["libraries"][arch])
+    metadata = json.loads((runtime / "runtime.json").read_text(encoding="utf-8-sig"))
+    redist = metadata["redist"]
+    require(redist["name"] == "vcruntime140.dll" and re.fullmatch(r"14\.\d+\.\d+", redist["version"]), "Incorrect Microsoft runtime metadata")
+    require(re.fullmatch(r"[0-9A-F]{64}", redist["sha256"]), "Invalid Microsoft runtime hash")
+    libraries["vcruntime140.dll"] = redist["sha256"]
     expected = {"rtlsdr_frontend.exe", *libraries}
     actual = {p.name for p in runtime.iterdir() if p.suffix.lower() in (".exe", ".dll")}
     require(actual == expected, f"Unexpected or missing runtime binaries: {folder}: {actual ^ expected}")
@@ -40,7 +79,12 @@ def check_package(folder, bits):
         file = runtime / name
         check_pe(file, machine)
         require(digest(file) == expected_hash, f"RTL-SDR dependency hash mismatch: {file}")
-    metadata = json.loads((runtime / "runtime.json").read_text(encoding="utf-8-sig"))
+    system_dlls = {"kernel32.dll", "kernelbase.dll", "ntdll.dll", "advapi32.dll", "bcrypt.dll",
+                   "bcryptprimitives.dll", "userenv.dll", "ws2_32.dll", "synchronization.dll"}
+    for name in expected:
+        for dll in imported_dlls(runtime / name):
+            system = dll in system_dlls or dll.startswith(("api-ms-win-", "ext-ms-win-"))
+            require(system or dll in {library.lower() for library in libraries}, f"Unbundled runtime dependency: {name} -> {dll}")
     for key in ("runtime", "url", "sha256", "source", "license"):
         require(metadata[key] == LOCK[key], f"Incorrect runtime metadata: {key}")
     require(metadata["architecture"] == arch, f"Incorrect runtime metadata architecture: {folder}")
@@ -66,7 +110,7 @@ def check_package(folder, bits):
     sources = folder / "Sources"
     require(digest(sources / "rtl-sdr-blog-V1.4.0.zip") == LOCK["source_sha256"], "Incorrect runtime source archive")
     frontend = sources / "winusb/tools/rtlsdr_frontend"
-    for name in ("Cargo.toml", "Cargo.lock", "build.rs", "frontend.rc", "LICENSE", "src/main.rs", "src/pat.rs",
+    for name in ("Cargo.toml", "Cargo.lock", "cargo-config.toml", "build.rs", "frontend.rc", "LICENSE", "src/main.rs", "src/pat.rs",
                  "vendor/README.md", "vendor/isdbt-dsp/Cargo.toml", "vendor/isdbt-dsp/src/lib.rs"):
         require((frontend / name).read_bytes() == (WINUSB / "tools/rtlsdr_frontend" / name).read_bytes(),
                 f"Frontend source differs from build source: {name}")
@@ -79,6 +123,7 @@ def check_package(folder, bits):
                 require((frontend / name).read_bytes() == file.read_bytes(), f"Frontend source mismatch: {name}")
     config = (sources / ".cargo/config.toml").read_text(encoding="utf-8")
     require('directory = "vendor"' in config and 'replace-with = "vendored-sources"' in config, "Missing offline Cargo source configuration")
+    require("target-feature=+crt-static" in config, "Missing static CRT configuration")
     lock = (frontend / "Cargo.lock").read_text(encoding="utf-8")
     for package in re.split(r"(?m)^\[\[package\]\]", lock):
         if 'source = "registry+' not in package:

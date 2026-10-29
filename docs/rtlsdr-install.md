@@ -38,4 +38,4 @@ rustup target add i686-pc-windows-msvc x86_64-pc-windows-msvc
 .\winusb\build.ps1
 ```
 
-通常ビルドで両ビット数のRTL-SDR配布も生成します。helperとDSPの自動試験、依存DLLの固定ハッシュ、必要ファイル・対応ソースの検査も実行します。配布は `winusb/dist/` に生成されます。利用者が導入後にRustをインストールする必要はありません。
+通常ビルドで両ビット数のRTL-SDR配布も生成します。helperとDSPの自動試験、依存DLLの固定ハッシュ、必要ファイル・対応ソースの検査も実行します。配布は `winusb/dist/` に生成されます。helperのCランタイムは静的リンクし、`rtlsdr.dll` が必要とするVisual C++ランタイムは同じフォルダーへ同梱するため、利用者が導入後にRustやVisual C++再頒布ランタイムを追加する必要はありません。

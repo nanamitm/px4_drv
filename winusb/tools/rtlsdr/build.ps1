@@ -41,8 +41,20 @@ foreach ($arch in $Architecture) {
             throw "RTL-SDR dependency hash mismatch: $arch/$($property.Name)"
         }
     }
+    # 配布元の rtlsdr.dll 自体も vcruntime140.dll を必要とするため、VS の再頒布用 DLL を同じ場所へ置く。
+    $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+    $visualStudio = & $vswhere -latest -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath | Select-Object -First 1
+    $redist = Get-ChildItem -LiteralPath (Join-Path $visualStudio 'VC\Redist\MSVC') -Directory |
+        Where-Object { $_.Name -match '^14\.\d+\.\d+$' -and (Test-Path -LiteralPath (Join-Path $_.FullName "$arch\Microsoft.VC143.CRT\vcruntime140.dll")) } |
+        Sort-Object { [version]$_.Name } -Descending | Select-Object -First 1
+    if (-not $redist) { throw "Visual C++ v143 redistributable files not found: $arch" }
+    $crt = Join-Path $redist.FullName "$arch\Microsoft.VC143.CRT\vcruntime140.dll"
+    $signature = Get-AuthenticodeSignature -LiteralPath $crt
+    if ($signature.Status -ne 'Valid' -or $signature.SignerCertificate.Subject -notmatch 'O=Microsoft Corporation') { throw "Invalid Microsoft runtime signature: $crt" }
+    Copy-Item -LiteralPath $crt -Destination (Join-Path $destination 'vcruntime140.dll') -Force
     [ordered]@{
         runtime = $lock.runtime; url = $lock.url; sha256 = $lock.sha256
         source = $lock.source; license = $lock.license; architecture = $arch
+        redist = [ordered]@{version=$redist.Name; name='vcruntime140.dll'; sha256=(Get-FileHash -LiteralPath $crt -Algorithm SHA256).Hash}
     } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $destination 'runtime.json') -Encoding UTF8
 }

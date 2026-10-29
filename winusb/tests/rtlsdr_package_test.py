@@ -24,6 +24,10 @@ class PackageTests(unittest.TestCase):
     def test_complete_package(self):
         check_package(self.folder, 64)
 
+    def test_missing_vc_runtime(self):
+        (self.folder / "rtlsdr/vcruntime140.dll").unlink()
+        self.rejected()
+
     def test_missing_helper(self):
         (self.folder / "rtlsdr/rtlsdr_frontend.exe").unlink()
         self.rejected()
@@ -33,6 +37,13 @@ class PackageTests(unittest.TestCase):
         data = bytearray(path.read_bytes())
         struct.pack_into("<H", data, struct.unpack_from("<I", data, 0x3C)[0] + 4, 0x14C)
         path.write_bytes(data)
+        self.rejected()
+
+    def test_unbundled_helper_dependency(self):
+        path = self.folder / "rtlsdr/rtlsdr_frontend.exe"
+        data = path.read_bytes()
+        self.assertIn(b"KERNEL32.dll\0", data)
+        path.write_bytes(data.replace(b"KERNEL32.dll\0", b"missing.dll\0\0"))
         self.rejected()
 
     def test_corrupt_dependency(self):
