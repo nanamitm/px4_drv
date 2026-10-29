@@ -235,4 +235,13 @@
       <Filter>リソース ファイル</Filter>
     </ResourceCompile>
   </ItemGroup>
+  <ItemGroup>
+    <ClCompile Include="siano\device.cpp"><Filter>ソース ファイル</Filter></ClCompile>
+    <ClCompile Include="siano\frontend.cpp"><Filter>ソース ファイル</Filter></ClCompile>
+    <ClCompile Include="siano\protocol.c"><Filter>ソース ファイル</Filter></ClCompile>
+    <ClInclude Include="siano\device.hpp"><Filter>ヘッダー ファイル</Filter></ClInclude>
+    <ClInclude Include="siano\frontend.hpp"><Filter>ヘッダー ファイル</Filter></ClInclude>
+    <ClInclude Include="siano\protocol.h"><Filter>ヘッダー ファイル</Filter></ClInclude>
+    <ClInclude Include="siano\capture_gate.hpp"><Filter>ヘッダー ファイル</Filter></ClInclude>
+  </ItemGroup>
 </Project>
