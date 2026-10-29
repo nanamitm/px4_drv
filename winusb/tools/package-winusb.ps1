@@ -22,7 +22,8 @@ New-Item -ItemType Directory -Path $release -Force | Out-Null
     ConvertTo-Json | Set-Content -LiteralPath (Join-Path $dist 'RELEASE.json') -Encoding ascii
 $binaryZip=Join-Path $release "px4_drv_winusb-$Version.zip"
 $sourceZip=Join-Path $release "px4_drv_winusb-$Version-source.zip"
-Compress-Archive -Path (Join-Path $dist '*') -DestinationPath $binaryZip -Force
+. (Join-Path $PSScriptRoot 'New-Px4DistributionArchive.ps1')
+New-Px4DistributionArchive -SourceDirectory $dist -DestinationPath $binaryZip
 & git -C $root archive --format=zip "--output=$sourceZip" HEAD
 if($LASTEXITCODE -ne 0){throw 'Corresponding source archive failed.'}
 Add-Type -AssemblyName System.IO.Compression.FileSystem

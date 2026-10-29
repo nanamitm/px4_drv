@@ -345,6 +345,8 @@ if ($LASTEXITCODE -ne 0) { throw 'PX-BCUD package check failed.' }
 python tests/pxbcud_package_test.py
 if ($LASTEXITCODE -ne 0) { throw 'PX-BCUD package validation regression failed.' }
 
+& (Join-Path $PSScriptRoot 'tests/distribution_archive_test.ps1')
+
 # 共通 DLL/EXE の生成後に helper・依存 DLL・対応ソースを32bit/64bit配布へ追加する。
 & (Join-Path $PSScriptRoot 'tools/rtlsdr/build-bondriver.ps1') -SkipNativeBuild
 & python (Join-Path $PSScriptRoot 'tools/check_rtlsdr_package.py')
