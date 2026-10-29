@@ -1,11 +1,15 @@
 // SPDX-License-Identifier: GPL-2.0-only
 #include "siano/frontend.hpp"
 #include "siano/capture_gate.hpp"
+#include "siano/firmware_path.hpp"
 #include "pxbcud/plain_framer.hpp"
 #include <algorithm>
 #include <cerrno>
 #include <cstdio>
 #include <cstdlib>
+#include <chrono>
+#include <fstream>
+#include <string>
 
 using namespace px4::siano;
 namespace {
@@ -116,5 +120,43 @@ void Generations()
     out.clear();current=gate.Ticket();gate.SetEnabled(false);
     Require(gate.Feed(current,packet.data(),packet.size(),write) && out.empty(),"stop prevents late output");
 }
+void FirmwarePaths()
+{
+    namespace fs=std::filesystem;
+    const auto original=fs::current_path();
+    const auto build=(original/L"build").lexically_normal();fs::create_directories(build);
+    const auto root=build/(L"siano-firmware-path-test-"+std::to_wstring(std::chrono::steady_clock::now().time_since_epoch().count()));
+    Require(fs::create_directory(root),"new firmware test directory");
+    const auto host=root/L"host 日本語";fs::create_directories(host/L"firmware");
+    const auto flat=host/L"isdbt_rio.inp",sub=host/L"firmware"/L"isdbt_rio.inp";
+    const auto custom=root/L"custom.inp";
+    auto touch=[](const fs::path& p) {std::ofstream f(p,std::ios::binary);f<<"test";Require(static_cast<bool>(f),"create firmware fixture");};
+    touch(flat);
+    Require(ResolveFirmwarePath(host,{})==flat,"EXE directory firmware found");
+    touch(sub);
+    Require(ResolveFirmwarePath(host,{})==flat,"EXE directory preferred over default subfolder");
+    Require(ResolveFirmwarePath(host,L"firmware/isdbt_rio.inp")==sub,"explicit relative path keeps priority");
+    touch(custom);
+    Require(ResolveFirmwarePath(host,custom)==custom,"explicit absolute path keeps priority");
+    Require(ResolveFirmwarePath(host,L"missing.inp")==flat,"missing configured path falls back to EXE directory");
+    auto candidates=FirmwareCandidates(host,L"./firmware/isdbt_rio.inp");
+    Require(candidates.size()==2 && candidates[0]==sub && candidates[1]==flat,"duplicate paths removed");
+    fs::remove(flat);
+    Require(ResolveFirmwarePath(host,{})==sub,"existing distribution subfolder remains supported");
+    Require(ResolveFirmwarePath(host,L"firmware/isdbt_rio.inp")==sub,"configured distribution path remains supported");
+    fs::create_directory(flat);
+    Require(ResolveFirmwarePath(host,{})==sub,"same-name directory is skipped");
+    fs::remove(flat);touch(flat);
+    fs::create_directory(root/L"other cwd");fs::current_path(root/L"other cwd");
+    Require(ResolveFirmwarePath(host,{})==flat,"current directory cannot redirect firmware search");
+    fs::current_path(original);
+    fs::remove(flat);fs::remove(sub);
+    Require(ResolveFirmwarePath(host,L"missing.inp")==host/L"missing.inp","missing firmware preserves diagnostic candidate");
+    touch(flat);
+    Require(ResolveFirmwarePath(host,{})==flat,"files added after initialization are found on re-open");
+    Require(ResolveFirmwarePath(host,L"firmware/isdbt_rio.inp")==flat,"default INI works with firmware placed beside EXE");
+    Require(root.parent_path()==build && root.filename().wstring().find(L"siano-firmware-path-test-")==0,"cleanup is confined to test directory");
+    fs::remove_all(root);
 }
-int main() {Download();TuneAndStats();Frames();Generations();std::puts("PASS: Siano boot/reload, warm mode, tune, PID, errors, stats, split frames and capture generations");}
+}
+int main() {Download();TuneAndStats();Frames();Generations();FirmwarePaths();std::puts("PASS: Siano boot/reload, warm mode, tune, PID, errors, stats, split frames, capture generations and firmware paths");}

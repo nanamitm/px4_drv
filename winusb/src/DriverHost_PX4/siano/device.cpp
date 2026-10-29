@@ -2,6 +2,7 @@
 #include "device.hpp"
 #include "frontend.hpp"
 #include "capture_gate.hpp"
+#include "firmware_path.hpp"
 #include "msg.h"
 #include <array>
 #include <chrono>
@@ -32,9 +33,9 @@ std::filesystem::path HostDirectory()
 class Receiver final : public ReceiverBase, private Io {
 public:
     Receiver(HANDLE file,WINUSB_INTERFACE_HANDLE usb,HANDLE removed,UCHAR in,std::size_t alignment,
-             const std::filesystem::path& firmware)
+             const std::filesystem::path& directory,const std::filesystem::path& firmware)
         : ReceiverBase(0),file_(file),usb_(usb),removed_(removed),in_(in),alignment_(alignment),
-          firmware_(firmware),frontend_(*this) {}
+          host_directory_(directory),firmware_(firmware),frontend_(*this) {}
     ~Receiver() override
     {
         // ReceiverManager が貸し出した生ポインターの Close 完了まで寿命を保持する。
@@ -52,18 +53,24 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         if (open_) return -EBUSY;
         if (Removed()) return -ECANCELED;
+        // 配置変更後の再オープンでも、INI 指定先・EXE 直下・配布用サブフォルダーを再探索する。
+        const auto firmware_path=ResolveFirmwarePath(host_directory_,firmware_);
         std::vector<std::uint8_t> firmware;
-        std::ifstream f(firmware_,std::ios::binary|std::ios::ate);
+        std::ifstream f(firmware_path,std::ios::binary|std::ios::ate);
         if (f) {
             auto n=f.tellg();
             if (n<=0 || n>4*1024*1024) return -EBADMSG;
             firmware.resize(static_cast<std::size_t>(n)); f.seekg(0);
             if (!f.read(reinterpret_cast<char*>(firmware.data()),n)) return -EIO;
-        } else msg_warn("PX-S1UD: firmware not found: %ls; only an already initialized device can open\n",firmware_.c_str());
+        } else {
+            for (const auto& candidate:FirmwareCandidates(host_directory_,firmware_))
+                msg_warn("PX-S1UD: firmware candidate: %ls\n",candidate.c_str());
+            msg_warn("PX-S1UD: firmware not found; only an already initialized device can open\n");
+        }
         int ret=StartWorker();
         if (!ret) ret=frontend_.Initialize(firmware);
         if (ret) {
-            msg_err("PX-S1UD: initialization failed ret=%d firmware=%ls\n",ret,firmware_.c_str());
+            msg_err("PX-S1UD: initialization failed ret=%d firmware=%ls\n",ret,firmware_path.c_str());
             StopWorker(); return ret;
         }
         open_=true; tuned_=false; capture_=false; locked_=false; cnr_=0;
@@ -332,7 +339,7 @@ private:
             static_cast<unsigned long long>(framer.discarded),static_cast<unsigned long long>(malformed),error_.load());
     }
     HANDLE file_; WINUSB_INTERFACE_HANDLE usb_; HANDLE removed_; UCHAR in_; std::size_t alignment_;
-    std::filesystem::path firmware_; Frontend frontend_;
+    std::filesystem::path host_directory_,firmware_; Frontend frontend_;
     std::mutex mutex_,response_mutex_; std::condition_variable closed_,responses_changed_;
     bool open_=false,capture_=false,tuned_=false,locked_=false;
     std::int32_t cnr_=0; Clock::time_point last_stats_{};
@@ -368,12 +375,9 @@ int Device::Init()
     BOOL disabled=FALSE;
     if (!WinUsb_SetPipePolicy(usb_dev_.winusb,in,RAW_IO,sizeof(disabled),&disabled) ||
         !WinUsb_SetPipePolicy(usb_dev_.winusb,in,IGNORE_SHORT_PACKETS,sizeof(disabled),&disabled)) return -EIO;
-    auto firmware=HostDirectory()/L"firmware"/L"isdbt_rio.inp";
-    if (device_def_.configs.Exists(L"FirmwarePath")) {
-        firmware=device_def_.configs.Get(L"FirmwarePath");
-        if (firmware.is_relative()) firmware=HostDirectory()/firmware;
-    }
-    receiver_=std::make_unique<Receiver>(usb_dev_.dev,usb_dev_.winusb,removed_,in,packet-SMS_HEADER_SIZE,firmware);
+    const auto directory=HostDirectory();
+    const std::filesystem::path firmware=device_def_.configs.Get(L"FirmwarePath",L"");
+    receiver_=std::make_unique<Receiver>(usb_dev_.dev,usb_dev_.winusb,removed_,in,packet-SMS_HEADER_SIZE,directory,firmware);
     const auto& def=device_def_.receivers[0];command::ReceiverInfo info{};
     wcscpy_s(info.device_name,device_def_.name.c_str());info.device_guid=device_def_.guid;
     wcscpy_s(info.receiver_name,def.name.c_str());info.receiver_guid=def.guid;

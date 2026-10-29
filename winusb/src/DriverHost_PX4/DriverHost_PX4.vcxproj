@@ -336,6 +336,7 @@
     <ClInclude Include="rtlsdr\device.hpp" />
     <ClInclude Include="siano\device.hpp" />
     <ClInclude Include="siano\capture_gate.hpp" />
+    <ClInclude Include="siano\firmware_path.hpp" />
     <ClInclude Include="siano\frontend.hpp" />
     <ClInclude Include="siano\protocol.h" />
     <ClInclude Include="rtlsdr\protocol.hpp" />

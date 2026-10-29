@@ -243,5 +243,6 @@
     <ClInclude Include="siano\frontend.hpp"><Filter>ヘッダー ファイル</Filter></ClInclude>
     <ClInclude Include="siano\protocol.h"><Filter>ヘッダー ファイル</Filter></ClInclude>
     <ClInclude Include="siano\capture_gate.hpp"><Filter>ヘッダー ファイル</Filter></ClInclude>
+    <ClInclude Include="siano\firmware_path.hpp"><Filter>ヘッダー ファイル</Filter></ClInclude>
   </ItemGroup>
 </Project>

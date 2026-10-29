@@ -15,9 +15,16 @@ sianod の起動は不要です。Linux カーネル版と macOS 版への対応
    `firmware`、`licenses` を含む構成を維持して配置します。
 3. TVTest などで `BonDriver_PX-S1UD.dll` を選択し、地デジのチャンネルスキャンを行います。
 
-`firmware/isdbt_rio.inp` は同梱済みです。検索基準はカレントディレクトリーではなく
-DriverHost_PX4.exe の配置先です。`DriverHost_PX4.ini` の SIANO 定義の
-`FirmwarePath` で別のパスも指定でき、相対パスはホストの配置先を基準に解決されます。
+`firmware/isdbt_rio.inp` は同梱済みです。DriverHost は、存在するファイルを次の順序で検索します。
+
+1. `DriverHost_PX4.ini` の SIANO 定義で指定した `FirmwarePath`
+2. `DriverHost_PX4.exe` と同じフォルダーの `isdbt_rio.inp`
+3. `DriverHost_PX4.exe` の配置先にある `firmware/isdbt_rio.inp`
+
+`FirmwarePath` の相対パスはホスト EXE の配置先が基準です。指定先が存在しない場合は
+後続の候補を探すため、既定の INI を変更せず EXE と同じフォルダーへ置く方法も使えます。
+カレントディレクトリーは検索対象外です。選択したファイルの内容が不正な場合は、
+別ファイルへ切り替えず読み込みエラーとなります。
 コールド起動でファイルが不足・不正の場合は初期化に失敗します。
 
 PX-S1UD に内蔵カードリーダーはありません。スクランブル解除を行う構成では
