@@ -124,6 +124,11 @@ foreach ($build_platform in $build_platforms) {
         if ($LASTEXITCODE -ne 0) { throw "Torne test failed: $torne_test ($build_platform)" }
     }
 
+    msbuild tests/ts_continuity_test.vcxproj /p:"Configuration=Release-static;Platform=$build_platform;PlatformToolset=v143"
+    if ($LASTEXITCODE -ne 0) { throw "TS diagnostic test build failed: $build_platform" }
+    & "build/$build_platform/Release-static/ts_continuity_test.exe"
+    if ($LASTEXITCODE -ne 0) { throw "TS diagnostic test failed: $build_platform" }
+
     msbuild tests/siano_frontend_test.vcxproj /p:"Configuration=Release-static;Platform=$build_platform;PlatformToolset=v143"
     if ($LASTEXITCODE -ne 0) { throw "Siano frontend test build failed: $build_platform" }
     & "build/$build_platform/Release-static/siano_frontend_test.exe"

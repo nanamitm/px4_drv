@@ -307,4 +307,8 @@
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">
   </ImportGroup>
+  <ItemGroup>
+    <ClInclude Include="..\common\ts_continuity.hpp" />
+    <ClInclude Include="..\common\ts_diagnostic_log.hpp" />
+  </ItemGroup>
 </Project>

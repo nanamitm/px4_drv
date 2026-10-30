@@ -89,9 +89,11 @@ bool BonDriver::Init()
 					log_path = path;
 
 				if (msg_open_file(log_path.c_str()))
-					msg_set_mode(MSG_MODE_LOG_FILE);
+					msg_set_mode(static_cast<msg_mode>(MSG_MODE_LOG_FILE | MSG_MODE_TIMESTAMP));
 			}
 
+			ts_diagnostics_enabled_=(msg_get_mode() & MSG_MODE_LOG_FILE) != 0;
+			ts_diagnostics_.Enable(ts_diagnostics_enabled_);
 			if (!px4::util::ParseSystemStr(mode, systems_))
 				return false;
 
@@ -426,6 +428,10 @@ void BonDriver::CloseTuner()
 	ctrl_client_.Close();
 	ctrl_client_.ClearPipe();
 
+	if (ts_diagnostics_enabled_) {
+		std::lock_guard<std::mutex> diagnostic_lock(diagnostic_mtx_);
+		ts_diagnostics_.Reset();
+	}
 	space_ = 0;
 	ch_ = 0;
 
@@ -490,9 +496,14 @@ const BOOL BonDriver::GetTsStream(BYTE **ppDst, DWORD *pdwSize, DWORD *pdwRemain
 		return FALSE;
 
 	std::size_t size, remain;
+	std::uint32_t epoch=0;
 
-	if (!ioq_->ReadBuffer(reinterpret_cast<void **>(ppDst), size, remain, false))
+	if (!ioq_->ReadBuffer(reinterpret_cast<void **>(ppDst), size, remain, false, &epoch))
 		return FALSE;
+	if (ts_diagnostics_enabled_) {
+		std::lock_guard<std::mutex> diagnostic_lock(diagnostic_mtx_);
+		ts_diagnostics_.Feed(*ppDst,size,epoch);
+	}
 
 	*pdwSize = static_cast<::DWORD>(size);
 	if (pdwRemain)
@@ -513,6 +524,10 @@ void BonDriver::PurgeTsStream(void)
 	}
 
 	ioq_->PurgeDataBuffer();
+	if (ts_diagnostics_enabled_) {
+		std::lock_guard<std::mutex> diagnostic_lock(diagnostic_mtx_);
+		ts_diagnostics_.Reset();
+	}
 	return;
 }
 

@@ -56,7 +56,7 @@ public:
 	void SetReadFlushInterval(std::chrono::milliseconds interval) noexcept;
 
 	bool Read(void *buf, std::size_t &size, std::size_t &remain_count, bool blocking);
-	bool ReadBuffer(void **buf, std::size_t &size, std::size_t &remain_count, bool blocking);
+	bool ReadBuffer(void **buf, std::size_t &size, std::size_t &remain_count, bool blocking, std::uint32_t *epoch = nullptr);
 	bool HaveReadingBuffer();
 	bool Write(void *buf, std::size_t &size, bool blocking);
 
