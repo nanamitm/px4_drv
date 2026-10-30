@@ -109,7 +109,8 @@ TSMF の TS1 以降と J.83 Annex B は、拡張 ioctl を次の順に呼び出�
 2. `PTXT_TUNE` で選局する。ロックしない場合は `EAGAIN` 、指定した番号の TS がない場合は `ENODATA` で失敗する
 3. `PTX_START_STREAMING` の後、`read()` で TS を読み出す
 
-`struct ptxt_params` は、32 ビットと 64 ビットのプロセスで配置が変わらないよう、追加パラメーターの配列 (`struct ptxt_additional_param`) のアドレスを `__u64` の `prop` で渡し、`reserved` は `0` にします。
+`struct ptxt_params` は、カーネルの ioctl の構造体の慣例に従い、追加パラメーターの配列 (`struct ptxt_additional_param`) のアドレスをポインタの大きさによらない `__u64` の `prop` で渡し、`reserved` は `0` にします。  
+64 ビットのカーネルでは、拡張 ioctl を含む受信機の ioctl を 64 ビットのプロセスから呼び出してください (32 ビットのプロセス向けの `compat_ioctl` は実装していません)。
 
 | 追加パラメーター | 値 |
 |---|---|
@@ -119,11 +120,8 @@ TSMF の TS1 以降と J.83 Annex B は、拡張 ioctl を次の順に呼び出�
 TSMF で選んだ TS は毎秒数 KB のこともあるため、ISDB-C の `read()` は、200 ミリ秒たっても要求した量がそろわなければ、それまでに読めた分を返します。
 
 受信中の C/N は `PTX_GET_CNR` で読み出せます。  
-地デジや BS/CS と同じく復調器の生値 (C/N 推定用の `IREG_SNR_ESTIMATE`) を返すため、ISDB-C と J.83 Annex B では、Sony の `sony_demod_isdbc_monitor_SNR()` と同じ次の式で dB へ換算してください。
-
-```
-C/N (dB) = -9.50 × ln(max(生値, 126)) + 95.941 (生値が 0 のときは信号なし)
-```
+ISDB-C と J.83 Annex B でも、PX-MLT 系の地デジと同じく PT1/PT3 互換の値を返すため、recpt1 と同じ地デジの式で dB へ換算できます。  
+px4_drv は、復調器の C/N 推定用の生値 (`IREG_SNR_ESTIMATE`) を Sony の `sony_demod_isdbc_monitor_SNR()` の式で dB にした値を、10〜50dB の範囲で 0.1dB 刻みに PT1/PT3 互換の値へ換算しています。
 
 ISDB-C か J.83 Annex B を選局したデバイスファイルを閉じると、放送方式の指定は未指定へ戻ります。  
 地デジと同じチャンネル番号を使うため、次に放送方式を指定せずに選局する受信ソフトウェアが ISDB-C を選局しないようにしています。
