@@ -3,6 +3,7 @@
 #include "frontend.hpp"
 #include "capture_gate.hpp"
 #include "firmware_path.hpp"
+#include "ts_diagnostic_log.hpp"
 #include "msg.h"
 #include <array>
 #include <chrono>
@@ -74,6 +75,7 @@ public:
             StopWorker(); return ret;
         }
         open_=true; tuned_=false; capture_=false; locked_=false; cnr_=0;
+        signal_log_=(msg_get_mode() & (MSG_MODE_LOG_FILE | MSG_MODE_CONSOLE))!=0; signal_={}; signal_base_={};
         msg_info("PX-S1UD: opened firmware=%u.%u\n",frontend_.Version()>>8,frontend_.Version()&255);
         return 0;
     }
@@ -120,6 +122,7 @@ public:
                 msg_err("PX-S1UD: statistics failed ret=%d\n",ret);
                 return ret;
             }
+            if (signal_log_) LogSignal(p);
             last_stats_=Clock::now();
         }
         locked=locked_;
@@ -155,12 +158,64 @@ protected:
             error_=ret;stream_buf_->StopRequest();
             return ret;
         }
-        tuned_=true; last_stats_=Clock::time_point{};
+        tuned_=true; last_stats_=Clock::time_point{}; signal_={}; signal_base_={};
         return 0;
     }
     int SetStreamId() override { return 0; }
 private:
     bool Removed() const { return WaitForSingleObject(removed_,0)==WAIT_OBJECT_0; }
+    // 受信品質を TS 異常と同じ時刻軸で照合する。統計はアプリの信号レベル取得で送る既存要求を流用し、
+    // TS と同じ bulk IN を使う制御転送を増やさない。誤り・ロック外れの応答は即時に、
+    // それ以外は約10秒ごとに集計する。解釈できない応答でも受信は止めない。
+    // 実機の err・total・tmcc はロック時に0へ戻る累積値のため、前回応答からの増分で判定・集計する。
+    void LogSignal(const std::vector<std::uint8_t>& p)
+    {
+        SignalStats s{};
+        if (const int ret=frontend_.DecodeSignal(p,s)) {
+            if (!signal_.decode_warned) msg_warn("PX-S1UD: signal stats unavailable bytes=%zu ret=%d\n",p.size(),ret);
+            signal_.decode_warned=true;
+            return;
+        }
+        const auto now=Clock::now();
+        if (!signal_.polls) {signal_.window=now;signal_.min_snr=signal_.max_snr=s.snr;}
+        ++signal_.polls; if (!s.demod_locked) ++signal_.unlocked;
+        signal_.min_snr=(std::min)(signal_.min_snr,s.snr); signal_.max_snr=(std::max)(signal_.max_snr,s.snr);
+        signal_.frequency=s.frequency; signal_.layers=s.layers;
+        // 初回は基準だけを取り、値が減った場合はロックし直しによる0からの再計数とみなす。
+        const auto delta=[this](std::uint32_t current,std::uint32_t& previous) {
+            const auto d=!signal_base_.valid ? 0U : current>=previous ? current-previous : current;
+            previous=current; return d;
+        };
+        bool bad=!s.demod_locked;
+        char detail[384]={}; std::size_t used=0;
+        for (std::size_t i=0;i<3;++i) {
+            const auto& l=s.layer[i];
+            if (l.segments>13) continue;
+            const auto err=delta(l.error_ts,signal_base_.error_ts[i]);
+            const auto total=delta(l.total_ts,signal_base_.total_ts[i]);
+            const auto tmcc=delta(l.tmcc_errors,signal_base_.tmcc[i]);
+            signal_.error_ts[i]+=err; signal_.total_ts[i]+=total; signal_.tmcc[i]+=tmcc;
+            bad=bad || err || tmcc;
+            const int n=sprintf_s(detail+used,sizeof(detail)-used," %c:seg=%u err=+%u(%u) total=+%u(%u) ber=%lld tmcc=+%u(%u)",
+                static_cast<char>('A'+i),l.segments,err,l.error_ts,total,l.total_ts,
+                l.ber==0xffffffff ? -1LL : static_cast<long long>(l.ber),tmcc,l.tmcc_errors);
+            if (n>0) used+=static_cast<std::size_t>(n);
+        }
+        signal_base_.valid=true;
+        if (bad) msg_warn("PX-S1UD: signal errors rf_locked=%d demod_locked=%d snr=%d rssi=%d%s\n",
+            s.rf_locked,s.demod_locked,s.snr,s.rssi,detail);
+        if (now-signal_.window<std::chrono::seconds(10)) return;
+        char summary[256]={}; used=0;
+        for (std::size_t i=0;i<3;++i) {
+            if (!signal_.total_ts[i] && !signal_.error_ts[i] && !signal_.tmcc[i]) continue;
+            const int n=sprintf_s(summary+used,sizeof(summary)-used," %c:err=%llu total=%llu tmcc=%llu",
+                static_cast<char>('A'+i),signal_.error_ts[i],signal_.total_ts[i],signal_.tmcc[i]);
+            if (n>0) used+=static_cast<std::size_t>(n);
+        }
+        msg_info("PX-S1UD: signal summary polls=%u unlocked=%u snr_min=%d snr_max=%d frequency=%u layers=%u%s\n",
+            signal_.polls,signal_.unlocked,signal_.min_snr,signal_.max_snr,signal_.frequency,signal_.layers,summary);
+        const bool warned=signal_.decode_warned; signal_={}; signal_.decode_warned=warned;
+    }
     void DisableOutput()
     {
         // Feed/Write と同じロックで閉じ、呼び出しから戻った後の旧 TS 書込みを防ぐ。
@@ -263,6 +318,19 @@ private:
                 }
             }
         } cleanup{*this,*reads};
+        TsDiagnosticLog diagnostics("siano_usb_input");
+        const bool diagnostic_enabled=(msg_get_mode() & (MSG_MODE_LOG_FILE | MSG_MODE_CONSOLE))!=0;
+        diagnostics.Enable(diagnostic_enabled);
+        diagnostics.SetReadyProbe([](void* context) noexcept {
+            const auto& requests=*static_cast<std::array<Read,TransferCount>*>(context);
+            int ready=0;
+            for (const auto& request:requests)
+                if (request.pending && WaitForSingleObject(request.op.hEvent,0)==WAIT_OBJECT_0) ++ready;
+            return ready;
+        },reads.get());
+        TsTransferTracer tracer;
+        auto last_submit=Clock::now();
+        std::uint64_t last_gap_us=0;
         auto submit=[&](Read& r) {
             if (stop_ || Removed()) return false;
             ResetEvent(r.op.hEvent); r.generation=gate_.Ticket();
@@ -271,6 +339,11 @@ private:
                 const auto e=GetLastError();error_=UsbError(e);
                 msg_err("PX-S1UD: USB read submission failed endpoint=0x%02x win32=%lu\n",in_,e);
                 return false;
+            }
+            if (diagnostic_enabled) {
+                const auto now=Clock::now();
+                last_gap_us=static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(now-last_submit).count());
+                last_submit=now;
             }
             r.pending=true;return true;
         };
@@ -302,6 +375,14 @@ private:
                 break;
             }
             r.pending=false;
+            // 異常の前後で転送単位の欠落・入替えを判別するため、完了順にメタデータを残す。
+            TsTransferTrace* trace=nullptr;
+            const auto anomalies=diagnostics.AnomalyCount();
+            if (diagnostic_enabled) {
+                TsTransferTrace t{};FILETIME ft{};GetSystemTimePreciseAsFileTime(&ft);
+                t.completed_at=(static_cast<std::uint64_t>(ft.dwHighDateTime)<<32)|ft.dwLowDateTime;
+                t.slot=static_cast<unsigned>(next);t.bytes=n;trace=&tracer.Begin(t);
+            }
             if (n) {
                 sms_frame frame{};
                 const auto parse=sms_frame_message(r.data.data(),n,alignment_,&frame);
@@ -310,9 +391,24 @@ private:
                     msg_err("PX-S1UD: invalid USB frame bytes=%lu alignment=%zu ret=%d\n",n,alignment_,parse);
                     break;
                 }
+                if (trace) {trace->frame_type=frame.type;trace->frame_length=frame.length;trace->frame_flags=frame.flags;}
                 const auto* p=r.data.data()+frame.payload_offset;
                 if (frame.type==MSG_SMS_DVBT_BDA_DATA) {
-                    if (!gate_.Feed(r.generation,p,frame.payload_length,[this](const std::uint8_t* data,std::size_t size) {
+                    if (!gate_.Feed(r.generation,p,frame.payload_length,[this,&diagnostics,&r,&last_submit,&last_gap_us,diagnostic_enabled,trace](const std::uint8_t* data,std::size_t size) {
+                        // 異常検出とメタデータだけを記録し、TS 本体と転送条件には触れない。
+                        if (diagnostic_enabled) {
+                            const auto elapsed=static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(Clock::now()-last_submit).count());
+                            diagnostics.Context((std::max)(elapsed,last_gap_us));
+                            // framer の再同期で捨てたバイトは TS に残らないため、CC 異常と並べて記録する。
+                            diagnostics.Source(gate_.DiagnosticsInWrite().discarded);
+                            diagnostics.Feed(data,size,r.generation);
+                            if (trace && size>=188) {
+                                const auto* last=data+(size/188-1)*188;
+                                trace->packets=static_cast<unsigned>(size/188);
+                                trace->first_pid=((data[1]&31)<<8)|data[2];trace->first_cc=data[3]&15;
+                                trace->last_pid=((last[1]&31)<<8)|last[2];trace->last_cc=last[3]&15;
+                            }
+                        }
                         std::size_t bytes=size;
                         const bool written=stream_buf_->Write(data,bytes);
                         stream_buf_->NotifyWrite();
@@ -330,9 +426,11 @@ private:
                     }
                 }
             }
+            if (trace) tracer.End(diagnostics,diagnostics.AnomalyCount()!=anomalies,GetTickCount64());
             if (!submit(r)) break;
             next=(next+1)%TransferCount;
         }
+        diagnostics.Reset();
         const auto& framer=gate_.Diagnostics();
         msg_info("PX-S1UD: RX stopped packets=%llu tei=%llu discarded=%llu malformed=%llu ret=%d\n",
             static_cast<unsigned long long>(framer.packets),static_cast<unsigned long long>(framer.tei),
@@ -343,6 +441,13 @@ private:
     std::mutex mutex_,response_mutex_; std::condition_variable closed_,responses_changed_;
     bool open_=false,capture_=false,tuned_=false,locked_=false;
     std::int32_t cnr_=0; Clock::time_point last_stats_{};
+    struct SignalLog {
+        Clock::time_point window{}; unsigned polls=0,unlocked=0; std::int32_t min_snr=0,max_snr=0;
+        std::uint32_t frequency=0,layers=0; std::array<unsigned long long,3> error_ts{},total_ts{},tmcc{};
+        bool decode_warned=false;
+    } signal_;
+    struct SignalBase {bool valid=false; std::array<std::uint32_t,3> error_ts{},total_ts{},tmcc{};} signal_base_;
+    bool signal_log_=false;
     std::atomic_bool stop_{true},output_{false}; std::atomic_int error_{0};
     CaptureGate gate_;
     std::uint16_t expected_=0; bool received_=false; std::vector<std::uint8_t> response_;

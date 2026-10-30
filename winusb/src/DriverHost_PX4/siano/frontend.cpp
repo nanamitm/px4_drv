@@ -105,4 +105,22 @@ int Frontend::DecodeStats(const std::vector<std::uint8_t>& p, bool& locked, std:
     if (locked && snr>=0 && snr<=100) cnr=snr*1000;
     return 0;
 }
+int Frontend::DecodeSignal(const std::vector<std::uint8_t>& p, SignalStats& s) const
+{
+    s=SignalStats{};
+    // Linux smsdvb の sms_isdbt_stats_ex。共通部の後に segment_number と tune_bw があり、
+    // layer_info[3] は 76 バイト目から 48 バイトずつ並ぶ。旧形式は階層の位置が異なるため扱わない。
+    constexpr std::size_t base=4, layers=base+76, stride=48;
+    if (version_<0x800) return -ENOSYS;
+    if (p.size()<layers+stride*3 || sms_get_le32(p.data())!=0) return -EBADMSG;
+    const auto u=[&](std::size_t offset) {return sms_get_le32(p.data()+offset);};
+    s.rf_locked=u(base+8)!=0; s.demod_locked=u(base+12)!=0;
+    s.snr=static_cast<std::int32_t>(u(base+20)); s.rssi=static_cast<std::int32_t>(u(base+24));
+    s.frequency=u(base+36); s.layers=u(base+64);
+    for (std::size_t i=0;i<3;++i) {
+        const auto o=layers+i*stride; auto& l=s.layer[i];
+        l.ber=u(o+8); l.error_ts=u(o+28); l.total_ts=u(o+32); l.segments=u(o+40); l.tmcc_errors=u(o+44);
+    }
+    return 0;
+}
 }

@@ -83,9 +83,25 @@ void TuneAndStats()
     Require(f.DecodeStats(p,locked,cnr)==0 && locked && cnr==31000,"statistics offsets and milli-dB");
     sms_put_le32(p.data()+16,0);Require(f.DecodeStats(p,locked,cnr)==0 && !locked && !cnr,"lock loss clears CNR");
     p.resize(27);Require(f.DecodeStats(p,locked,cnr)==-EBADMSG,"short stats");
+    px4::siano::SignalStats s{};p.assign(4+76+48*3,0);
+    Require(f.DecodeSignal(std::vector<std::uint8_t>(p.begin(),p.end()-1),s)==-EBADMSG,"short signal stats rejected");
+    sms_put_le32(p.data()+4+12,1);sms_put_le32(p.data()+4+20,static_cast<std::uint32_t>(-3));
+    sms_put_le32(p.data()+4+24,static_cast<std::uint32_t>(-62));sms_put_le32(p.data()+4+36,557142857);sms_put_le32(p.data()+4+64,2);
+    const auto layer=[&](unsigned i,std::uint32_t seg,std::uint32_t ber,std::uint32_t err,std::uint32_t total,std::uint32_t tmcc) {
+        auto* o=p.data()+4+76+48*i;sms_put_le32(o+8,ber);sms_put_le32(o+28,err);sms_put_le32(o+32,total);
+        sms_put_le32(o+40,seg);sms_put_le32(o+44,tmcc);
+    };
+    layer(0,1,0xffffffff,0,100,0);layer(1,12,25,7,4000,1);layer(2,255,0,0,0,0);
+    Require(f.DecodeSignal(p,s)==0 && s.demod_locked && !s.rf_locked && s.snr==-3 && s.rssi==-62 &&
+        s.frequency==557142857 && s.layers==2,"signal common fields");
+    Require(s.layer[0].segments==1 && s.layer[0].ber==0xffffffff && s.layer[0].total_ts==100 &&
+        s.layer[1].segments==12 && s.layer[1].ber==25 && s.layer[1].error_ts==7 && s.layer[1].total_ts==4000 &&
+        s.layer[1].tmcc_errors==1 && s.layer[2].segments==255,"per-layer stats offsets");
+    sms_put_le32(p.data(),1);Require(f.DecodeSignal(p,s)==-EBADMSG,"failed EX result rejected");
     Mock old;old.mode=6;old.version=0x700;Frontend o(old);Require(o.Initialize({})==0,"legacy warm");
     p.assign(24,0);sms_put_le32(p.data()+12,1);sms_put_le32(p.data()+20,99);
     Require(o.DecodeStats(p,locked,cnr)==0 && locked && !cnr,"legacy unknown signal field is not CNR");
+    Require(o.DecodeSignal(p,s)==-ENOSYS,"legacy layout is not decoded as EX");
 }
 void Frames()
 {

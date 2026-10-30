@@ -28,6 +28,8 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         return {framer_.packets,framer_.tei,framer_.discarded};
     }
+    // Feed の write コールバック内専用。mutex_ を保持した同じスレッドから読むため再ロックしない。
+    Counters DiagnosticsInWrite() const noexcept {return {framer_.packets,framer_.tei,framer_.discarded};}
 private:
     std::mutex mutex_;
     std::atomic_uint64_t generation_{1};
