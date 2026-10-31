@@ -19,6 +19,7 @@ enum msg_mode {
 extern "C" {
 #endif
 void msg_set_mode(enum msg_mode new_mode);
+enum msg_mode msg_get_mode(void);
 bool msg_open_file(const wchar_t *path);
 void msg_close_file();
 int msg_printf(const char *format, ...);

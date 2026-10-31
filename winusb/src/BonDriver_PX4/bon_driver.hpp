@@ -20,6 +20,7 @@
 #include "cmd_client.hpp"
 #include "io_queue.hpp"
 #include "stream_frame.hpp"
+#include "ts_diagnostic_log.hpp"
 
 namespace px4 {
 
@@ -100,6 +101,9 @@ private:
 	ReadProvider iorp_;
 	std::size_t current_ofs_;
 	HANDLE quit_event_;
+	std::mutex diagnostic_mtx_;
+	TsDiagnosticLog ts_diagnostics_{"bondriver_output"};
+	bool ts_diagnostics_enabled_=false;
 };
 
 class BonDriverError : public std::runtime_error {

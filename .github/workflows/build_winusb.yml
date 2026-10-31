@@ -247,13 +247,17 @@ jobs:
           python tools/check_pxbcud_package.py
           if ($LASTEXITCODE -ne 0) { throw 'PX-BCUD package check failed' }
 
+          python tools/check_siano_package.py
+          if ($LASTEXITCODE -ne 0) { throw 'PX-S1UD package check failed' }
+
           $driver_artifact_file_paths = @(
               'dist/Driver/px4_drv_winusb.cat',
               'dist/Driver/px4_drv_winusb.cer',
               'dist/Driver/cert-install.jse',
               'dist/Driver/cert-uninstall.jse'
               'dist/Driver/CECH-ZD1J.inf',
-              'dist/Driver/PX-BCUD.inf'
+              'dist/Driver/PX-BCUD.inf',
+              'dist/Driver/PX-S1UD.inf'
           )
 
           foreach ($driver_artifact_file_path in $driver_artifact_file_paths) {

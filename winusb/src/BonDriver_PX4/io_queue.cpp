@@ -211,7 +211,7 @@ bool IoQueue::Read(void *buf, std::size_t &size, std::size_t &remain_count, bool
 	return ret;
 }
 
-bool IoQueue::ReadBuffer(void **buf, std::size_t &size, std::size_t &remain_count, bool blocking)
+bool IoQueue::ReadBuffer(void **buf, std::size_t &size, std::size_t &remain_count, bool blocking, std::uint32_t *epoch)
 {
 	if (io_op_ != IoOperation::READ)
 		return false;
@@ -232,6 +232,7 @@ bool IoQueue::ReadBuffer(void **buf, std::size_t &size, std::size_t &remain_coun
 	}
 
 	*buf = current_buf_->buf.get() + current_ofs_;
+	if (epoch) *epoch = current_buf_->epoch;
 	size = current_buf_->actual_length - current_ofs_;
 	current_ofs_ = current_buf_->actual_length;
 	remain_count = GetDataBufferCount();

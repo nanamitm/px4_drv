@@ -275,6 +275,13 @@
     <ClCompile Include="pxbcud\device.cpp" />
     <ClCompile Include="rtlsdr\rtl_device.cpp" />
     <ClCompile Include="pxbcud\frontend.cpp" />
+    <ClCompile Include="siano\device.cpp">
+      <ObjectFileName>$(IntDir)siano_device.obj</ObjectFileName>
+    </ClCompile>
+    <ClCompile Include="siano\frontend.cpp">
+      <ObjectFileName>$(IntDir)siano_frontend.obj</ObjectFileName>
+    </ClCompile>
+    <ClCompile Include="siano\protocol.c" />
     <ClCompile Include="torne\experimental_device.cpp" />
     <ClCompile Include="torne\frontend_native_client.cpp" />
     <ClCompile Include="torne\dib8096_native.cpp" />
@@ -327,6 +334,11 @@
     <ClInclude Include="device_manager.hpp" />
     <ClInclude Include="pxbcud\device.hpp" />
     <ClInclude Include="rtlsdr\device.hpp" />
+    <ClInclude Include="siano\device.hpp" />
+    <ClInclude Include="siano\capture_gate.hpp" />
+    <ClInclude Include="siano\firmware_path.hpp" />
+    <ClInclude Include="siano\frontend.hpp" />
+    <ClInclude Include="siano\protocol.h" />
     <ClInclude Include="rtlsdr\protocol.hpp" />
     <ClInclude Include="pxbcud\frontend.hpp" />
     <ClInclude Include="pxbcud\plain_framer.hpp" />
@@ -359,4 +371,8 @@
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">
   </ImportGroup>
+  <ItemGroup>
+    <ClInclude Include="..\common\ts_continuity.hpp" />
+    <ClInclude Include="..\common\ts_diagnostic_log.hpp" />
+  </ItemGroup>
 </Project>

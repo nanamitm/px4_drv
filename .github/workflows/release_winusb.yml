@@ -2,7 +2,7 @@ name: Build signed WinUSB release
 
 on:
   push:
-    branches: ['feature/torne-native-integration']
+    branches: ['feature/torne-native-integration', 'feature/px-s1ud-winusb']
     tags: ['v*']
   workflow_dispatch:
 

@@ -18,6 +18,11 @@ void msg_set_mode(enum msg_mode new_mode)
 	mode = new_mode;
 }
 
+enum msg_mode msg_get_mode(void)
+{
+	return mode;
+}
+
 bool msg_open_file(const wchar_t *path)
 {
 	if (file_handle != INVALID_HANDLE_VALUE)

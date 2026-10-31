@@ -95,13 +95,14 @@ static void QueueTests(){
     Provider source;px4::IoQueue queue(px4::IoQueue::IoOperation::READ,source,8,8,2,0);
     Check(queue.Start(),"queue start");source.Push(1,8);Until([&]{return queue.GetDataBufferCount()==1;});
     void* current=nullptr;std::size_t size=0,remain=0;
-    Check(queue.ReadBuffer(&current,size,remain,false)&&size==8,"first buffer");
+    std::uint32_t delivered_epoch=0;
+    Check(queue.ReadBuffer(&current,size,remain,false,&delivered_epoch)&&size==8 && delivered_epoch==1,"first buffer epoch is attached to delivered bytes");
     auto* held=static_cast<std::uint8_t*>(current);
     source.Push(1,8);source.Push(1,4);source.Push(2,4);source.Push(2,4);
     Until([&]{return source.calls>=6;});
     for(unsigned i=0;i<8;++i)Check(held[i]==1,"returned pointer reused by recovery worker");
     Check(queue.GetDataBufferCount()==1,"old queued buffer retained");
-    Check(queue.ReadBuffer(&current,size,remain,false)&&size==8,"new epoch buffer");
+    Check(queue.ReadBuffer(&current,size,remain,false,&delivered_epoch)&&size==8 && delivered_epoch==2,"new epoch buffer reports its own epoch");
     for(unsigned i=0;i<8;++i)Check(static_cast<std::uint8_t*>(current)[i]==2,"mixed epochs in queue");
     source.End();queue.Stop();
 }
