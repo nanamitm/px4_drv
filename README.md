@@ -1,6 +1,6 @@
-# px4_drv - Unofficial Linux / Windows (WinUSB) driver for PLEX PX4/PX5/PX-MLT series / e-Better DTV series ISDB-T/S receivers
+# px4_drv - Unofficial Linux / Windows (WinUSB) driver for PLEX PX4/PX5/PX-MLT series / e-Better DTV series ISDB-T/S/C receivers
 
-PLEX や e-Better から発売された各種 ISDB-T/S チューナー向けの chardev 版非公式 Linux ドライバ / Windows (WinUSB) ドライバです。  
+PLEX や e-Better から発売された各種 ISDB-T/S/C チューナー向けの chardev 版非公式 Linux ドライバ / Windows (WinUSB) ドライバです。  
 PLEX 社の [Webサイト](http://plex-net.co.jp) にて配布されている公式ドライバとは**別物**です。
 
 ## このフォークについて
@@ -22,7 +22,7 @@ PX-BCUDの長時間録画・スリープ復帰と、torneの現行統合版で�
 #### 新デバイス対応・機能追加
 
 - PX-Q3PE5 に対応し、inf ファイルを追加
-- [hendecarows 氏のフォーク](https://github.com/hendecarows/px4_drv) での更新を取り込み、DTV02A-1T1S-U / DTV03A-1TU / PX-M1UR / PX-S1UR に対応
+- [hendecarows 氏のフォーク](https://github.com/hendecarows/px4_drv) での更新を取り込み、DTV02A-1T1S-U (ロット番号 2309 以降を含む) / DTV03A-1TU / PX-M1UR / PX-S1UR に対応 (v0.5.0 以降 / DTV03A-1TU のみ v0.5.2 以降)
 - PX-MLT5PE のリブランド品である DTV02A-5TS-P (USB Product ID: 0x924e) に対応し、inf ファイルを追加 (v0.6.1 以降)
 - 各機種の内蔵 B-CAS カードリーダーを利用するためのドライバを追加 (v0.6.0 以降)
   - 同梱の `WinSCard.dll` を利用するアプリケーションの実行ファイルと同じフォルダに配置すると、内蔵カードリーダーを優先して利用できるようになる
@@ -42,25 +42,35 @@ PX-BCUDの長時間録画・スリープ復帰と、torneの現行統合版で�
 - inf ファイルを ARM 版 Windows でもインストールできるようにする
   - 実機がないので試せていないけど、おそらくインストールできるはず
   - ref: https://mevius.5ch.net/test/read.cgi/avi/1625673548/762
-- inf ファイルを改善し、チューナーをタスクトレイの「ハードウェアの安全な取り外し」に表示しないようにする
-  - ref: https://mevius.5ch.net/test/read.cgi/avi/1666581918/207
 - 地上波の ChSet に物理 53ch ～ 62ch の定義を追加
   - 物理 53ch ～ 62ch は地上波の割り当て周波数から削除されているが、現在も ”イッツコムch10” など、一部ケーブルテレビの自主放送の割り当て周波数として使われている
 - BS/CS の ChSet に2022年3月開局の BS 新チャンネル（BS松竹東急・BSJapanext・BSよしもと）の定義を追加
-- BS/CS の ChSet に2024年10月～2025年1月に行われた BS トランスポンダ再編後の物理チャンネル情報を反映
+- BS/CS の ChSet で、BS23/TS1 と BS23/TS3 の TSID が入れ替わっていたのを修正
+- `BonDriver_PX-MLT.ini` に、LNB 給電を有効にするための `LNBPower` の設定を追記
+- inf ファイルを改善し、チューナーをタスクトレイの「ハードウェアの安全な取り外し」に表示しないようにする (v0.4.3 以降)
+  - ref: https://mevius.5ch.net/test/read.cgi/avi/1666581918/207
+- BS/CS の ChSet に2024年10月～2025年1月に行われた BS トランスポンダ再編後の物理チャンネル情報を反映 (v0.5.2 以降)
 
 #### ドライバの品質改善
 
-- エラー発生時の MessageBox を表示しない設定を追加 
+- エラー発生時の MessageBox を表示しない設定を追加
   - BonDriver の ini 内の `DisplayErrorMessage` を 1 に設定すると今まで通り MessageBox が表示される
 - バージョン情報が DLL のプロパティに表示されないのを修正
+- https://github.com/tsukumijima/px4_drv/pull/2 をマージし、PX4 系チューナーで地上波の受信機を開く順番によってドロップが発生することがある問題を修正
+- PX4 系チューナーを複数台接続したとき、使っていない方のチューナーの基板にも電源が入ったままになる問題を修正 (v0.6.0 以降)
+  - ref: https://github.com/tsukumijima/px4_drv/issues/36
+- 受信機の割り当て処理の不具合により、空いている受信機があっても `no receivers available` のエラーで選局できなくなることがある問題を修正 (v0.6.0 以降)
+  - ref: https://github.com/tsukumijima/px4_drv/issues/38
 - チャンネル切り替え、USB の切断・再接続、内蔵カードリーダーとの同時利用に関する安定性を改善 (v0.6.0 以降)
+- BonDriver の ini の節に `=` を含まない行があると、設定の読み込みが無限ループに陥る問題を修正 (v0.7.0 以降)
+- コピー型の `GetTsStream()` で、呼び出し元のバッファを越えて TS を書き込むことがある問題を修正 (v0.7.0 以降)
+- DriverHost_PX4 のログファイルの末尾に、前回起動時のログが残る問題を修正 (v0.7.0 以降)
 
 #### ビルド・ドキュメント
 
 - ビルドとパッケージングを全自動で行うスクリプトを追加
   - Visual Studio 2022（C++ 開発環境・v143）と Python 3・Rust/Cargo を用意し、`winusb/build.cmd` または `build.ps1` でビルドとパッケージングを行う。通常ビルドに Go は不要で、開発用の比較試験と移植ソースの再生成にのみ必要。
-- fwtool: PX-W3PE5 / PX-Q3PE4 / PX-Q3PE5 / PX-W3U4 / PX-Q3U4 / PX-MLT5PE / PX-MLT8PE の2021年版公式 Windows ドライバからのファームウェア抽出に対応
+- fwtool: PX-W3PE5 / PX-Q3PE4 / PX-Q3PE5 / PX-W3U4 / PX-Q3U4 / PX-MLT5PE / PX-MLT8PE の2021年版公式 Windows ドライバからのファームウェア抽出に対応 (v0.6.0 以降)
   - 既定の抽出済みファームウェアで問題なく動作することが知られているため、特段実用性はない
 - README（このページ）に WinUSB 版のインストール方法などを追記
 
@@ -77,9 +87,10 @@ PLEX PX-S1UD（USB ID `3275:0080`）向けに、WinUSB を直接使う地デジ1
 #### 新デバイス対応・機能追加
 
 - [techmadot 氏のフォーク](https://github.com/techmadot/px4_drv) の更新を取り込み、PX-M1UR / PX-S1UR に対応
-- [hendecarows 氏のフォーク](https://github.com/hendecarows/px4_drv) での更新を取り込み、DTV03A-1TU に対応
-- チップ構成が一部変更された、ロット番号 2309 (2023年9月) 以降の DTV02A-1T1S-U に対応
-- PX-MLT5PE のリブランド品である DTV02A-5TS-P (USB Product ID: 0x924e) に対応 (v0.6.1 以降)
+- [otya 氏のフォーク](https://github.com/otya128/px4_drv) での更新を取り込み、BS/CS の選局で相対 TS 番号に加えて TSID も指定できるように
+- [hendecarows 氏のフォーク](https://github.com/hendecarows/px4_drv) での更新を取り込み、DTV03A-1TU に対応 (v0.5.4 以降)
+- チップ構成が一部変更された、ロット番号 2309 (2023年9月) 以降の DTV02A-1T1S-U に対応 (v0.4.5 以降)
+- PX-MLT5PE のリブランド品である DTV02A-5TS-P (USB Product ID: 0x924e) に対応 (v0.6.0 以降)
 - 各機種の内蔵 B-CAS カードリーダーを利用するためのドライバを追加 (v0.7.0 以降)
   - 別途 `px4-drv-pcsc` ドライバをインストールすることで、pcscd から内蔵カードリーダーを認識・利用できるようになる
   - pcscd が既定で認識している外付けカードリーダーも引き続き利用できる
@@ -89,12 +100,23 @@ PLEX PX-S1UD（USB ID `3275:0080`）向けに、WinUSB を直接使う地デジ1
 #### ドライバの品質改善
 
 - [otya 氏のフォーク](https://github.com/otya128/px4_drv) での更新を取り込み、安定性と互換性を改善
-- https://github.com/tsukumijima/px4_drv/pull/3 をマージし、`ctrl_timeout` をモジュールパラメーターに追加
 - [kznrluk 氏のフォーク](https://github.com/kznrluk/px4_drv) の更新を取り込み、Linux カーネル 6.4 系以降の API 変更に対応
-- https://github.com/tsukumijima/px4_drv/pull/6 をマージし、Linux カーネル 6.8 系以降の API 変更に対応
-- https://github.com/tsukumijima/px4_drv/pull/33 をマージし、IBT (Indirect Branch Tracking) 対応に伴う `objtool` の検査強化により、Linux 6.15 系などでモジュールをビルド・ロードできない問題に対応 (v0.6.0 以降)
+- https://github.com/tsukumijima/px4_drv/pull/3 をマージし、`ctrl_timeout` をモジュールパラメーターに追加 (v0.4.1 以降)
+- https://github.com/tsukumijima/px4_drv/pull/6 をマージし、Linux カーネル 6.8 系以降の API 変更に対応 (v0.4.4 以降)
+- DTV02A-4TS-P / PX-M1UR / PX-S1UR のデバイスファイルのパーミッションが 644 になっていたのを、他の機種と同じ 664 に修正 (v0.4.5 以降)
+- ロット番号 2309 以降の DTV02A-1T1S-U で、復調器 (TC90522) の初期化と終了の処理が抜けていたのを修正 (v0.5.0 以降)
+- Digibest 製チューナーに常に USB 電源を供給するようにし、USB の省電力機能によってチューナーの動作が不安定になる問題を改善 (v0.5.1 以降)
+- https://github.com/tsukumijima/px4_drv/pull/20 をマージし、UBSAN を有効にしたカーネルで、dmesg に誤検知の警告が出る問題を修正 (v0.5.3 以降)
+- 新しい GCC を使う Oracle Linux 9 などでビルドできない問題を修正 (v0.5.4 以降)
+- https://github.com/tsukumijima/px4_drv/pull/33 をマージし、IBT (Indirect Branch Tracking) 対応に伴う `objtool` の検査強化により、Linux 6.15 系などでモジュールをビルド・ロードできない問題に対応 (v0.5.5 以降)
   - 当初は保守的に Linux 6.15.4 以降でのみ `module_init()` と `module_exit()` を使っていたが、これらは古いカーネルでも利用できるため、v0.6.0 以降ではカーネル版による分岐を削除して統一した
+- https://github.com/tsukumijima/px4_drv/pull/37 をマージし、Linux カーネル 6.19 系以降でビルドできない問題に対応 (v0.5.6 以降)
+- https://github.com/tsukumijima/px4_drv/pull/40 をマージし、モジュールパラメーター `multi_device_power_control_mode` の値の範囲の検査が誤っていたのを修正 (v0.6.0 以降)
+- PX4 系チューナーを複数台接続したとき、使っていない方のチューナーの基板にも電源が入ったままになる問題を修正 (v0.6.0 以降)
+  - ref: https://github.com/tsukumijima/px4_drv/issues/36
 - チャンネル切り替え、USB の切断・再接続に関する安定性を改善 (v0.6.0 以降)
+- IT930x の GPIO の設定の書き込みに一度失敗すると、USB を抜き差しするまで同じ設定をやり直せなくなる問題を修正 (v0.7.0 以降)
+- PX-S1UR / DTV03A-1TU で、チューナーを開く処理が途中で失敗したときに、基板の電源が入ったまま残る問題を修正 (v0.7.0 以降)
 - Linux 4.15 (Ubuntu 18.04 の初期カーネル) 以降でビルドできるように修正 (v0.7.0 以降)
 - WinUSB 版と同じく、PX-S1UR を ISDB2056 系の共通処理に統合し、設計の異なる DTV03A-1TU (ISDBT2071) を単独の実装に分離 (v0.7.0 以降)
 
@@ -103,6 +125,8 @@ PLEX PX-S1UD（USB ID `3275:0080`）向けに、WinUSB を直接使う地デジ1
 - Debian パッケージ (.deb) の作成とインストールに対応
 - DKMS でのインストール時にファームウェアを自動でインストールするように変更
 - README (このページ) に Debian パッケージからのインストール方法などを追記
+- https://github.com/tsukumijima/px4_drv/pull/27 をマージし、新しいカーネルをインストールしたときに、DKMS の後処理が使用中のドライバをアンロードしてしまう問題を修正 (v0.5.3 以降)
+- https://github.com/tsukumijima/px4_drv/pull/29 をマージし、Ubuntu 24.04 で DKMS の後処理が `99-px4video.rules` と `it930x-firmware.bin` を削除してしまう問題を修正 (v0.5.4 以降)
 
 ## 対応デバイス
 
@@ -265,17 +289,17 @@ px4_drv は、Linux 4.15 (Ubuntu 18.04 の初期カーネル) 以降のカーネ
 Debian パッケージを使用してインストールすると依存パッケージも自動インストールされるほか、DKMS のソースコード管理も透過的に行われます。  
 Ubuntu / Debian 環境では Debian パッケージを使用してインストールすることを強く推奨します。
 
-	$ wget https://github.com/tsukumijima/px4_drv/releases/download/v0.6.1/px4-drv-dkms_0.6.1_all.deb
-	$ sudo apt install -y ./px4-drv-dkms_0.6.1_all.deb
+	$ wget https://github.com/tsukumijima/px4_drv/releases/download/v0.7.0/px4-drv-dkms_0.7.0_all.deb
+	$ sudo apt install -y ./px4-drv-dkms_0.7.0_all.deb
 
 上記コマンドで、px4_drv の Debian パッケージをインストールできます。
 
 > [!TIP]
 手動で Debian パッケージを生成することもできます。  
-> `./build_deb.sh` を実行すると、`./build_deb.sh` の一つ上層のディレクトリに `px4-drv-dkms_0.6.1_all.deb` という名前の Debian パッケージが生成されます。  
+> `./build_deb.sh` を実行すると、`./build_deb.sh` の一つ上層のディレクトリに `px4-drv-dkms_0.7.0_all.deb` という名前の Debian パッケージが生成されます。  
 > ```
 > $ ./build_deb.sh
-> $ sudo apt install -y ../px4-drv-dkms_0.6.1_all.deb
+> $ sudo apt install -y ../px4-drv-dkms_0.7.0_all.deb
 > ```
 > 上記コマンドで、生成した px4_drv の Debian パッケージをインストールできます。
 
@@ -283,9 +307,9 @@ Ubuntu / Debian 環境では Debian パッケージを使用してインスト�
 
 gcc, make, カーネルソース/ヘッダ, dkms がインストールされている必要があります。
 
-	$ sudo cp -a ./ /usr/src/px4_drv-0.6.1
-	$ sudo dkms add px4_drv/0.6.1
-	$ sudo dkms install px4_drv/0.6.1
+	$ sudo cp -a ./ /usr/src/px4_drv-0.7.0
+	$ sudo dkms add px4_drv/0.7.0
+	$ sudo dkms install px4_drv/0.7.0
 
 #### DKMS を使用せずにインストールする
 
@@ -412,8 +436,8 @@ gcc, make, カーネルソース/ヘッダ, dkms がインストールされて�
 Releases から、CPU アーキテクチャに合った Debian パッケージ (amd64 か arm64) をダウンロードし、pcscd と一緒にインストールします。  
 Ubuntu 20.04 以降と、同じ世代以降の Debian 系ディストリビューションで動作します。
 
-	$ wget https://github.com/tsukumijima/px4_drv/releases/download/v0.6.1/px4-drv-pcsc_0.6.1_amd64.deb
-	$ sudo apt install -y ./px4-drv-pcsc_0.6.1_amd64.deb pcscd
+	$ wget https://github.com/tsukumijima/px4_drv/releases/download/v0.7.0/px4-drv-pcsc_0.7.0_amd64.deb
+	$ sudo apt install -y ./px4-drv-pcsc_0.7.0_amd64.deb pcscd
 	$ sudo udevadm trigger --subsystem-match=px4card
 	$ sudo udevadm settle
 	$ sudo systemctl restart pcscd
@@ -519,8 +543,8 @@ Mirakurun の公式イメージには pcscd 用ドライバが入っていない
 ```dockerfile
 # arm64 環境では "amd64" を "arm64" に変更してください
 FROM chinachu/mirakurun:latest
-ADD https://github.com/tsukumijima/px4_drv/releases/download/v0.6.1/px4-drv-pcsc_0.6.1_amd64.deb /tmp/
-RUN dpkg -i /tmp/px4-drv-pcsc_0.6.1_amd64.deb && rm /tmp/px4-drv-pcsc_0.6.1_amd64.deb
+ADD https://github.com/tsukumijima/px4_drv/releases/download/v0.7.0/px4-drv-pcsc_0.7.0_amd64.deb /tmp/
+RUN dpkg -i /tmp/px4-drv-pcsc_0.7.0_amd64.deb && rm /tmp/px4-drv-pcsc_0.7.0_amd64.deb
 ```
 
 完了したら、ホストの pcscd を停止します。
@@ -565,8 +589,8 @@ Mirakurun の場合は、環境変数 `DISABLE_PCSCD=1` を設定した上で、
 
 #### DKMS を使用してインストールした場合
 
-	$ sudo dkms remove px4_drv/0.6.1 --all
-	$ sudo rm -rf /usr/src/px4_drv-0.6.1
+	$ sudo dkms remove px4_drv/0.7.0 --all
+	$ sudo rm -rf /usr/src/px4_drv-0.7.0
 
 #### DKMS を使用せずにインストールした場合
 
@@ -738,18 +762,19 @@ PX-Q3U4/Q3PE4 は、PX-W3U4/W3PE4 相当のデバイスが USB ハブを介し�
 	- Terrestrial Tuner: RafaelMicro R850 (x4)
 	- Satellite Tuner: RafaelMicro RT710 (x4)
 
+Demodulator として CXD2856ER が搭載されたデバイスは、ISDB-T/S だけでなく、ISDB-C / J.83 Annex B の受信にも対応しています。  
 PX-MLT8PE は、同一基板上に PX-MLT5PE 相当のデバイスと、3チャンネル分のチューナーを持つデバイスが実装されている構造となっています。
 
 - PX-MLT5PE/MLT8PE5 / DTV02A-5TS-P
 
 	- USB Bridge: ITE IT9305E
-	- ISDB-T/S Demodulator: Sony CXD2856ER (x5)
+	- ISDB-T/S/C Demodulator: Sony CXD2856ER (x5)
 	- Terrestrial/Satellite Tuner: Sony CXD2858ER (x5)
 
 - PX-MLT8PE3
 
 	- USB Bridge: ITE IT9305E
-	- ISDB-T/S Demodulator: Sony CXD2856ER (x3)
+	- ISDB-T/S/C Demodulator: Sony CXD2856ER (x3)
 	- Terrestrial/Satellite Tuner: Sony CXD2858ER (x3)
 
 DTV02-1T1S-U/DTV02A-1T1S-U は、ISDB-T 側の TS シリアル出力を ISDB-S 側と共有しています。そのため、同時に受信できるチャンネル数は1チャンネルのみです。
@@ -776,7 +801,7 @@ DTV02A-4TS-P は、PX-MLT5PE から1チャンネル分のチューナーを削�
 - DTV02A-4TS-P (Digibest ISDB6014)
 
 	- USB Bridge: ITE IT9305E
-	- ISDB-T/S Demodulator: Sony CXD2856ER (x4)
+	- ISDB-T/S/C Demodulator: Sony CXD2856ER (x4)
 	- Terrestrial/Satellite Tuner: Sony CXD2858ER (x4)
 
 ### TS Aggregation の設定
