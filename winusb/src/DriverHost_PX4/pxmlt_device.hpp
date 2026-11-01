@@ -12,6 +12,7 @@
 #include "device_definition_set.hpp"
 #include "device_base.hpp"
 #include "receiver_base.hpp"
+#include "hardware_pid_filter.hpp"
 #include "receiver_manager.hpp"
 #include "ringbuffer.hpp"
 
@@ -132,6 +133,7 @@ private:
 		int CheckLock(bool &locked) override;
 		int SetLnbVoltage(std::int32_t voltage) override;
 		int SetCapture(bool capture) override;
+		int SetPidFilter(const px4::command::PidFilter& filter) override;
 		int ReadStat(px4::command::StatType type, std::int32_t &value) override;
 
 	protected:
@@ -152,6 +154,8 @@ private:
 		PxMltDevice &parent_;
 		std::uintptr_t index_;
 
+		int ApplyPidFilter(const px4::command::PidFilter& filter);
+		bool custom_pid_filter_ = false;
 		std::mutex lock_;
 		std::atomic_bool open_;
 		std::condition_variable close_cond_;
@@ -197,6 +201,7 @@ private:
 	std::mutex tuner_lock_[2];
 	int receiver_num_;
 	std::unique_ptr<PxMltReceiver> receivers_[5];
+	HardwarePidFilter pid_filter_;
 	it930x_bridge it930x_;
 	StreamContext stream_ctx_;
 };

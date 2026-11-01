@@ -12,6 +12,7 @@
 #include "device_definition_set.hpp"
 #include "device_base.hpp"
 #include "receiver_base.hpp"
+#include "hardware_pid_filter.hpp"
 #include "receiver_manager.hpp"
 #include "ringbuffer.hpp"
 
@@ -160,6 +161,7 @@ private:
 		int CheckLock(bool &locked) override;
 		int SetLnbVoltage(std::int32_t voltage) override;
 		int SetCapture(bool capture) override;
+		int SetPidFilter(const px4::command::PidFilter& filter) override;
 		int ReadStat(px4::command::StatType type, std::int32_t &value) override;
 
 		int InitPrimary();
@@ -176,6 +178,8 @@ private:
 
 		int SetTsPins(bool enabled);
 
+		int ApplyPidFilter(const px4::command::PidFilter& filter);
+		bool custom_pid_filter_ = false;
 		Px4Device &parent_;
 		std::uintptr_t index_;
 
@@ -221,6 +225,7 @@ private:
 	unsigned int lnb_power_count_;
 	unsigned int streaming_count_;
 	std::unique_ptr<Px4Receiver> receivers_[4];
+	HardwarePidFilter pid_filter_;
 	it930x_bridge it930x_;
 	StreamContext stream_ctx_;
 };

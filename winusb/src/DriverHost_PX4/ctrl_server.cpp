@@ -1,6 +1,7 @@
 // ctrl_server.cpp
 
 #include "ctrl_server.hpp"
+#include <cerrno>
 #include "ipc_names.hpp"
 
 namespace px4 {
@@ -50,6 +51,9 @@ bool CtrlServer::CtrlConnection::CheckCommandLength(const std::uint8_t *buf,
 	};
 
 	switch (cmd) {
+	case px4::command::CtrlCmdCode::SET_PID_FILTER:
+		return length == sizeof(px4::command::CtrlPidFilterCmd);
+
 	case px4::command::CtrlCmdCode::GET_VERSION:
 		return length >= sizeof(px4::command::CtrlVersionCmd);
 
@@ -122,6 +126,15 @@ void CtrlServer::CtrlConnection::Worker() noexcept
 		}
 
 		switch (hdr->cmd) {
+		case px4::command::CtrlCmdCode::SET_PID_FILTER:
+		{
+			auto* request = reinterpret_cast<px4::command::CtrlPidFilterCmd*>(buf.get());
+			request->result = -EINVAL;
+			if (px4::command::ValidPidFilter(request->filter))
+				request->result = receiver ? receiver->SetPidFilter(request->filter) : -ENODEV;
+			hdr->status = request->result ? px4::command::CtrlStatusCode::FAILED : px4::command::CtrlStatusCode::SUCCEEDED;
+			break;
+		}
 		case px4::command::CtrlCmdCode::GET_VERSION:
 		{
 			px4::command::CtrlVersionCmd *version = reinterpret_cast<px4::command::CtrlVersionCmd *>(buf.get());

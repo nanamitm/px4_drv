@@ -13,7 +13,7 @@ namespace px4 {
 #pragma pack(push, 8)
 
 namespace command {
-	static const std::uint32_t VERSION = 0x00040004U;
+	static const std::uint32_t VERSION = 0x00040005U;
 
 	enum class CtrlCmdCode : std::uint32_t {
 		UNDEFINED = 0,
@@ -29,6 +29,7 @@ namespace command {
 		CHECK_LOCK,
 		SET_LNB_VOLTAGE = 24,
 		READ_STATS = 32,
+		SET_PID_FILTER = 40,
 	};
 
 	enum class CtrlStatusCode : std::uint32_t {
@@ -131,6 +132,27 @@ namespace command {
 	struct CtrlStatsCmd : CtrlCmdHeader {
 		StatSet stat_set;
 	};
+
+	// 既存コマンドの配置を保つ追加コマンド。ポインターを含まない固定長のwire形式。
+	enum class PidFilterMode : std::uint32_t { Restore = 0, Pass = 1, Block = 2 };
+	struct PidFilter {
+		PidFilterMode mode;
+		std::uint32_t count;
+		std::uint16_t pids[64];
+	};
+	inline bool ValidPidFilter(const PidFilter& filter) noexcept {
+		if (filter.count > 64) return false;
+		if (filter.mode == PidFilterMode::Restore) return filter.count == 0;
+		if (filter.mode != PidFilterMode::Pass && filter.mode != PidFilterMode::Block) return false;
+		if (filter.mode == PidFilterMode::Pass && !filter.count) return false;
+		for (std::uint32_t i=0; i<filter.count; ++i) if (filter.pids[i] > 0x1fff) return false;
+		return true;
+	}
+	struct CtrlPidFilterCmd : CtrlCmdHeader {
+		PidFilter filter;
+		std::int32_t result; // 0、または負のerrno。未対応とI/O失敗を区別する。
+	};
+	static_assert(sizeof(CtrlPidFilterCmd) == 148, "PID filter IPC layout");
 
 	enum class DataCmdCode : std::uint32_t {
 		UNDEFINED = 0,

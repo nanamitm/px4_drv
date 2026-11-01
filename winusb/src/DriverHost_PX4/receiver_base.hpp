@@ -3,6 +3,7 @@
 #pragma once
 
 #include <atomic>
+#include <cerrno>
 #include <cstdint>
 #include <cstddef>
 #include <memory>
@@ -108,6 +109,8 @@ public:
 	bool Tune(std::uint32_t timeout);
 	bool ReadStats(px4::command::StatSet &stat_set);
 	std::shared_ptr<StreamBuffer> GetStreamBuffer() noexcept { return stream_buf_; }
+
+	virtual int SetPidFilter(const px4::command::PidFilter&) { return -ENOSYS; }
 
 	virtual int Open() = 0;
 	virtual void Close() = 0;

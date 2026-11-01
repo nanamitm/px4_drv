@@ -32,6 +32,7 @@ public:
 	bool Close() noexcept;
 	bool GetInfo(px4::command::ReceiverInfo &receiver_info) noexcept;
 	bool SetCapture(bool capture) noexcept;
+	bool SetPidFilter(const px4::command::PidFilter& filter, std::int32_t& result) noexcept;
 	bool GetParams(px4::command::ParameterSet &param_set) noexcept;
 	bool SetParams(const px4::command::ParameterSet &param_set) noexcept;
 	bool ClearParams() noexcept;

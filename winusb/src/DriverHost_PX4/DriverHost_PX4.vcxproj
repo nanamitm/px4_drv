@@ -354,6 +354,7 @@
     <ClInclude Include="px4_device.hpp" />
     <ClInclude Include="pxmlt_device.hpp" />
     <ClInclude Include="receiver_base.hpp" />
+    <ClInclude Include="hardware_pid_filter.hpp" />
     <ClInclude Include="receiver_manager.hpp" />
     <ClInclude Include="resource.h" />
     <ClInclude Include="ringbuffer.hpp" />

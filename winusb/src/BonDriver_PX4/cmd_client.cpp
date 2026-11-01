@@ -63,6 +63,19 @@ bool CtrlCmdClient::GetInfo(px4::command::ReceiverInfo &receiver_info) noexcept
 	return ret;
 }
 
+bool CtrlCmdClient::SetPidFilter(const px4::command::PidFilter& filter, std::int32_t& result) noexcept
+{
+	result = -1;
+	if (!pipe_ || !px4::command::ValidPidFilter(filter)) return false;
+	px4::command::CtrlPidFilterCmd request{};
+	request.cmd = px4::command::CtrlCmdCode::SET_PID_FILTER;
+	request.filter = filter;
+	request.result = -1;
+	if (!pipe_->Call(&request, sizeof(request))) return false;
+	result = request.result;
+	return request.status == px4::command::CtrlStatusCode::SUCCEEDED && !result;
+}
+
 bool CtrlCmdClient::SetCapture(bool capture) noexcept
 {
 	px4::command::CtrlCaptureCmd capture_cmd;

@@ -180,6 +180,8 @@ int PxMltDevice::Init()
 	if (ret)
 		goto fail_device;
 
+	for (unsigned port = 0; port < 5; ++port) pid_filter_.Invalidate(port);
+
 	/* GPIO */
 	ret = it930x_set_gpio_mode(&it930x_, 7, IT930X_GPIO_OUT, true);
 	if (ret)
@@ -826,6 +828,13 @@ int PxMltDevice::PxMltReceiver::Open()
 
 	current_system_ = px4::SystemType::UNSPECIFIED;
 
+	// 前のCloseでI/O失敗があっても、別の利用者へ古いPID制限を引き継がない。
+	if (custom_pid_filter_) {
+		px4::command::PidFilter restore{};
+		ret = ApplyPidFilter(restore);
+		if (ret) goto fail_backend;
+	}
+
 	parent_.open_count_++;
 	open_ = true;
 
@@ -862,6 +871,12 @@ void PxMltDevice::PxMltReceiver::Close()
 	std::unique_lock<std::mutex> lock(lock_);
 	std::lock_guard<std::recursive_mutex> dev_lock(parent_.lock_);
 
+	if (custom_pid_filter_ && parent_.available_) {
+		px4::command::PidFilter restore{};
+		const int result = ApplyPidFilter(restore);
+		if (result) dev_err(&parent_.dev_, "PID filter restore on Close failed: %d\n", result);
+	}
+
 	assert(parent_.open_count_ > 0);
 
 	{
@@ -893,6 +908,12 @@ int PxMltDevice::PxMltReceiver::SetFrequency()
 	int ret = 0;
 	cxd2856er_system_params demod_params = { 0 };
 	std::unique_lock<std::mutex> lock(lock_);
+
+	if (custom_pid_filter_) {
+		px4::command::PidFilter restore{};
+		ret = ApplyPidFilter(restore);
+		if (ret) return ret;
+	}
 
 	current_system_ = px4::SystemType::UNSPECIFIED;
 
@@ -1106,6 +1127,7 @@ int PxMltDevice::PxMltReceiver::SetNullPacketFilter(bool enable)
 	filter.num = 1;
 	filter.pid[0] = 0x1fff;
 
+	parent_.pid_filter_.Invalidate(parent_.it930x_.config.input[index_].port_number);
 	ret = it930x_set_pid_filter(&parent_.it930x_, static_cast<int>(index_), (enable) ? &filter : nullptr);
 	if (ret) {
 		dev_err(&parent_.dev_, "px4::PxMltDevice::PxMltReceiver::SetNullPacketFilter(%u): it930x_set_pid_filter() failed. (ret: %d)\n", index_, ret);
@@ -1137,6 +1159,41 @@ int PxMltDevice::PxMltReceiver::SetLnbVoltage(std::int32_t voltage)
 		lnb_power_ = !!voltage;
 
 	return ret;
+}
+
+int PxMltDevice::PxMltReceiver::SetPidFilter(const px4::command::PidFilter& filter)
+{
+	std::lock_guard<std::mutex> lock(lock_);
+	if (!open_) return -EINVAL;
+	return ApplyPidFilter(filter);
+}
+
+int PxMltDevice::PxMltReceiver::ApplyPidFilter(const px4::command::PidFilter& filter)
+{
+	if (!px4::command::ValidPidFilter(filter)) return -EINVAL;
+	std::lock_guard<std::recursive_mutex> dev_lock(parent_.lock_);
+	if (!parent_.available_) return -ENODEV;
+	// TSMFは全パケットの位置を使うため、内側のPIDによるブリッジ選別と両立しない。
+	if (filter.mode != px4::command::PidFilterMode::Restore && (params_.system == px4::SystemType::ISDB_C || tsmf_)) return -ENOSYS;
+	if (filter.mode == px4::command::PidFilterMode::Restore && !custom_pid_filter_) return 0;
+	auto mode = filter.mode == px4::command::PidFilterMode::Pass ? HardwarePidFilter::Mode::Pass : HardwarePidFilter::Mode::Block;
+	const std::uint16_t null_pid = 0x1fff;
+	const std::uint16_t* pids = filter.pids;
+	std::size_t count = filter.count;
+	if (filter.mode == px4::command::PidFilterMode::Restore) {
+		count = (parent_.config_.device.discard_null_packets && !tsmf_) ? 1 : 0;
+		pids = &null_pid;
+		mode = count ? HardwarePidFilter::Mode::Block : HardwarePidFilter::Mode::Off;
+	}
+	// 失敗した途中設定もClose/次の選局で復元する対象に含める。
+	custom_pid_filter_ = true;
+	const int result = parent_.pid_filter_.Apply(static_cast<unsigned>(parent_.it930x_.config.input[index_].port_number), mode, pids, count,
+		[this](std::uint32_t reg, const std::uint8_t* data, std::size_t length) {
+			return it930x_write_regs(&parent_.it930x_, reg, const_cast<std::uint8_t*>(data), static_cast<std::uint8_t>(length));
+		});
+	if (!result) custom_pid_filter_ = filter.mode != px4::command::PidFilterMode::Restore;
+	dev_info(&parent_.dev_, "PID filter input=%u mode=%u count=%u result=%d\n", index_, static_cast<unsigned>(filter.mode), static_cast<unsigned>(count), result);
+	return result;
 }
 
 int PxMltDevice::PxMltReceiver::SetCapture(bool capture)
