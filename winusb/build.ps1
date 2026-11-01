@@ -1,4 +1,4 @@
-﻿param([string]$SigningPfxPath='', [string]$SigningPasswordEnvironment='', [string]$SigningPasswordFile='', [switch]$RequireSignedApplications, [switch]$UseDriverPublisher)
+param([string]$SigningPfxPath='', [string]$SigningPasswordEnvironment='', [string]$SigningPasswordFile='', [switch]$RequireSignedApplications, [switch]$UseDriverPublisher)
 
 
 if ($UseDriverPublisher -and ($SigningPfxPath -or $SigningPasswordEnvironment -or $SigningPasswordFile)) { throw 'UseDriverPublisher cannot be combined with external signing credentials.' }
@@ -54,6 +54,13 @@ if ((Get-Command msbuild -ErrorAction SilentlyContinue) -eq $null) {
 # MSBuild を使用してソリューションをビルド
 $build_platforms = @('x86', 'x64')
 foreach ($build_platform in $build_platforms) {
+    foreach ($pid_project in @('tests/hardware_pid_filter_test.vcxproj','tools/pid_filter_probe/pid_filter_probe.vcxproj')) {
+        msbuild $pid_project /p:"Configuration=Release-static;Platform=$build_platform;PlatformToolset=v143"
+        if ($LASTEXITCODE -ne 0) { throw "PID filter build failed: $pid_project ($build_platform)" }
+    }
+    & "build/$build_platform/Release-static/hardware_pid_filter_test.exe"
+    if ($LASTEXITCODE -ne 0) { throw "PID filter test failed ($build_platform)" }
+
     # PX-BCUD の USB 分割境界・I2C 故障注入は実機接続なしで検証する。
     foreach ($bcud_test in @('pxbcud_frontend_test', 'pxbcud_usb_probe', 'pxbcud_live_test', 'pxbcud_usb_diagnostic', 'channel_switch_stress')) {
         msbuild "tests/$bcud_test.vcxproj" /p:"Configuration=Release-static;Platform=$build_platform;PlatformToolset=v143"
