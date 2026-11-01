@@ -65,6 +65,7 @@ PX-BCUDの長時間録画・スリープ復帰と、torneの現行統合版で�
 - BonDriver の ini の節に `=` を含まない行があると、設定の読み込みが無限ループに陥る問題を修正 (v0.7.0 以降)
 - コピー型の `GetTsStream()` で、呼び出し元のバッファを越えて TS を書き込むことがある問題を修正 (v0.7.0 以降)
 - DriverHost_PX4 のログファイルの末尾に、前回起動時のログが残る問題を修正 (v0.7.0 以降)
+- 少なくとも PX-M1UR で、内蔵カードリーダーの利用中にチューナー本体へ給電され、同じ PC に接続した別のチューナーの受信品質が下がることがある問題を修正 (v0.7.1 以降)
 
 #### ビルド・ドキュメント
 
@@ -119,6 +120,10 @@ PLEX PX-S1UD（USB ID `3275:0080`）向けに、WinUSB を直接使う地デジ1
 - PX-S1UR / DTV03A-1TU で、チューナーを開く処理が途中で失敗したときに、基板の電源が入ったまま残る問題を修正 (v0.7.0 以降)
 - Linux 4.15 (Ubuntu 18.04 の初期カーネル) 以降でビルドできるように修正 (v0.7.0 以降)
 - WinUSB 版と同じく、PX-S1UR を ISDB2056 系の共通処理に統合し、設計の異なる DTV03A-1TU (ISDBT2071) を単独の実装に分離 (v0.7.0 以降)
+- 少なくとも PX-W3U4 で、チューナーを使っていない間にカードを抜いても、挿入済みのまま検出され続ける問題を修正 (v0.7.1 以降)
+- 少なくとも PX-M1UR で、内蔵カードリーダーの利用中にチューナー本体へ給電され、同じ PC に接続した別のチューナーの受信品質が下がることがある問題を修正 (v0.7.1 以降)
+- 内蔵カードリーダーのカード検出が一時的に失敗すると、録画中の復号がその録画の終わりまで再開しなくなることがある問題を修正 (v0.7.1 以降)
+- pcscd の起動時や USB の接続直後に、内蔵カードリーダーが認識されないことがある問題を修正 (v0.7.1 以降)
 
 #### ビルド・ドキュメント
 
@@ -154,7 +159,7 @@ PLEX PX-S1UD（USB ID `3275:0080`）向けに、WinUSB を直接使う地デジ1
 	- DTV03A-1TU (実験的)
 	  - チップ構成が大幅に変更された、ロット番号 2021-11 以降の個体のみ対応しています。
 
-> [!NOTE]
+> [!NOTE]  
 > 2021 年以降メンテナンスされていない [nns779/px4_drv](https://github.com/nns779/px4_drv) と異なり、新規に下記チューナーのサポートを追加しています。
 > 
 > - PLEX PX-M1UR
@@ -164,7 +169,7 @@ PLEX PX-S1UD（USB ID `3275:0080`）向けに、WinUSB を直接使う地デジ1
 > - e-Better DTV02A-1T1S-U (ロット番号 2309 以降) / Digibest ISDB2056N
 > - e-Better DTV03A-1TU / Digibest ISDBT2071 (ロット番号 2021-11 以降)
 
-> [!WARNING]
+> [!WARNING]  
 > PX-M1UR または DTV02(A)-1T1S-U で CATV（周波数変換パススルー）の ISDB-T C13ch ~ C24ch を受信するには、[専用の recpt1 フォーク (hendecarows/recpt1)](https://github.com/hendecarows/recpt1) が必要となります。  
 > [stz2012/recpt1](https://github.com/stz2012/recpt1) や [recisdb](https://github.com/kazuki0824/recisdb-rs) では、当該機種にて C13ch ~ C62ch を正常に選局できないことが報告されています（[詳細はこちら](https://github.com/tsukumijima/px4_drv/issues/16)）。  
 > ただし、C13ch ~ C24ch 以外のチャンネルであれば、stz2012/recpt1 や recisdb でも問題なく選局・受信が可能です。
@@ -229,11 +234,11 @@ IT930xを使用する機種では、同梱の `it930x-firmware.bin` も必要で
 
 機種別の BonDriver フォルダに同梱されている `WinSCard.dll` を、TVTest や EDCB など、B-CAS カードを利用するアプリケーションの実行ファイルと同じフォルダにコピーしてください。
 
-> [!NOTE]
+> [!NOTE]  
 > **Windows が認識している外付けカードリーダーと内蔵カードリーダーは併用できます。**  
 > カードリーダーの一覧には内蔵カードリーダー、外付けカードリーダーの順で表示されます。  
 
-> [!NOTE]
+> [!NOTE]  
 > **リモートデスクトップ接続中に、チューナーを接続した PC 側の外付けカードリーダーが見つからなくなる場合があります。**  
 > RDP のスマートカードリダイレクトが有効なセッションでは、Windows 標準の WinSCard API が接続元 PC 側のカードリーダーを参照するためです。  
 > [Windows 標準の対処方法](https://learn.microsoft.com/ja-jp/azure/virtual-desktop/redirection-configure-smart-cards)として、リモート デスクトップ接続の「オプションの表示」→「ローカル リソース」→「詳細」からスマートカードのチェックを外すか、接続先 PC の `gpedit.msc` で「コンピューターの構成」→「管理用テンプレート」→「Windows コンポーネント」→「リモート デスクトップ サービス」→「リモート デスクトップ セッション ホスト」→「デバイスとリソースのリダイレクト」→「スマート カード デバイスのリダイレクトを許可しない」を有効にしてください。  
@@ -245,11 +250,11 @@ IT930xを使用する機種では、同梱の `it930x-firmware.bin` も必要で
 > また、すでに別実装の `WinSCard.dll` を配置している場合は、元の DLL を退避してから入れ替えてください。  
 > 同じフォルダで2つの `WinSCard.dll` を併用することはできません。
 
-> [!TIP]
+> [!TIP]  
 > `WinSCard.dll` の追加・退避後、TVTest ではカードリーダーエラーが発生することがありますが、これは過去使っていたカードリーダーにアクセスできなくなったことによるエラーですので、異常ではありません。  
 > **「設定」→「TSプロセッサー」→「デフォルトフィルター」のセレクトボックスで利用するカードリーダー名を選択し、TVTest を再起動すると、そのカードリーダーに挿入された B-CAS カードを使ってスクランブル解除を行えます。**  
 
-> [!TIP]
+> [!TIP]  
 > **PC に複数のチューナーを接続している場合、TVTest では複数の内蔵カードリーダーを認識します。** B-CAS カードを挿入したチューナーの内蔵カードリーダーを選択してください。  
 > **内蔵カードリーダーを使うために、PC に接続されているすべてのチューナーに B-CAS カードを挿入する必要はありません。** 内蔵カードリーダーは、受信中チューナーと異なるデバイスでも利用できます。
 
@@ -289,17 +294,17 @@ px4_drv は、Linux 4.15 (Ubuntu 18.04 の初期カーネル) 以降のカーネ
 Debian パッケージを使用してインストールすると依存パッケージも自動インストールされるほか、DKMS のソースコード管理も透過的に行われます。  
 Ubuntu / Debian 環境では Debian パッケージを使用してインストールすることを強く推奨します。
 
-	$ wget https://github.com/tsukumijima/px4_drv/releases/download/v0.7.0/px4-drv-dkms_0.7.0_all.deb
-	$ sudo apt install -y ./px4-drv-dkms_0.7.0_all.deb
+	$ wget https://github.com/tsukumijima/px4_drv/releases/download/v0.7.1/px4-drv-dkms_0.7.1_all.deb
+	$ sudo apt install -y ./px4-drv-dkms_0.7.1_all.deb
 
 上記コマンドで、px4_drv の Debian パッケージをインストールできます。
 
-> [!TIP]
-手動で Debian パッケージを生成することもできます。  
-> `./build_deb.sh` を実行すると、`./build_deb.sh` の一つ上層のディレクトリに `px4-drv-dkms_0.7.0_all.deb` という名前の Debian パッケージが生成されます。  
+> [!TIP]  
+> 手動で Debian パッケージを生成することもできます。  
+> `./build_deb.sh` を実行すると、`./build_deb.sh` の一つ上層のディレクトリに `px4-drv-dkms_0.7.1_all.deb` という名前の Debian パッケージが生成されます。  
 > ```
 > $ ./build_deb.sh
-> $ sudo apt install -y ../px4-drv-dkms_0.7.0_all.deb
+> $ sudo apt install -y ../px4-drv-dkms_0.7.1_all.deb
 > ```
 > 上記コマンドで、生成した px4_drv の Debian パッケージをインストールできます。
 
@@ -307,9 +312,9 @@ Ubuntu / Debian 環境では Debian パッケージを使用してインスト�
 
 gcc, make, カーネルソース/ヘッダ, dkms がインストールされている必要があります。
 
-	$ sudo cp -a ./ /usr/src/px4_drv-0.7.0
-	$ sudo dkms add px4_drv/0.7.0
-	$ sudo dkms install px4_drv/0.7.0
+	$ sudo cp -a ./ /usr/src/px4_drv-0.7.1
+	$ sudo dkms add px4_drv/0.7.1
+	$ sudo dkms install px4_drv/0.7.1
 
 #### DKMS を使用せずにインストールする
 
@@ -427,7 +432,7 @@ gcc, make, カーネルソース/ヘッダ, dkms がインストールされて�
 **v0.7.0 以降、pcscd 用ドライバ (`px4-drv-pcsc`) を別途インストールすることで、内蔵カードリーダーを外付けカードリーダー同様に利用できるようになりました！**  
 内蔵 B-CAS カードリーダーを使わない場合は、この手順は不要です。
 
-> [!NOTE]
+> [!NOTE]  
 > Mirakurun などを Docker 環境で稼働させている場合は、pcscd をホストとコンテナのどちらで動かすかによって、ドライバのインストール先が異なります。  
 > 先に [Docker 環境からカードリーダーにアクセスする場合](#docker-環境からカードリーダーにアクセスする場合) をお読みください。 
 
@@ -436,17 +441,25 @@ gcc, make, カーネルソース/ヘッダ, dkms がインストールされて�
 Releases から、CPU アーキテクチャに合った Debian パッケージ (amd64 か arm64) をダウンロードし、pcscd と一緒にインストールします。  
 Ubuntu 20.04 以降と、同じ世代以降の Debian 系ディストリビューションで動作します。
 
-	$ wget https://github.com/tsukumijima/px4_drv/releases/download/v0.7.0/px4-drv-pcsc_0.7.0_amd64.deb
-	$ sudo apt install -y ./px4-drv-pcsc_0.7.0_amd64.deb pcscd
+	$ wget https://github.com/tsukumijima/px4_drv/releases/download/v0.7.1/px4-drv-pcsc_0.7.1_amd64.deb
+	$ sudo apt install -y ./px4-drv-pcsc_0.7.1_amd64.deb pcscd
 	$ sudo udevadm trigger --subsystem-match=px4card
 	$ sudo udevadm settle
 	$ sudo systemctl restart pcscd
 
 `udevadm` の2行は、すでに接続しているチューナーのカードリーダーを、新しくインストールした pcscd から開けるようにするためのものです。
 
-> [!IMPORTANT]
+> [!IMPORTANT]  
 > 基本的に、異なるバージョンの px4_drv と px4-drv-pcsc を混在させて利用することはできません。  
 > px4_drv と px4-drv-pcsc の更新後は、必ず pcscd を再起動してください。
+
+> [!IMPORTANT]  
+> **カードの抜き差しを検出するため、pcscd が内蔵カードリーダーを認識している間は、チューナーの未使用時でも PX4 系・PX-MLT 系チューナーと DTV03A-1TU の本体へ給電されます。**  
+> DTV02A-1T1S-U / PX-M1UR などは、内蔵カードリーダーの利用のためにチューナー本体へ給電しません。  
+> Ubuntu や Debian 標準の pcscd は、カードリーダーを使用するアプリケーションの終了から約1分で自動停止するため、給電もあわせて停止します。
+> 
+> 一方、 **Docker コンテナ内などで pcscd を常駐させている場合は、pcscd の動作中は給電が継続します。**  
+> pcscd を Docker コンテナで運用する際のチューナーへの常時給電を避けたい方は、pcscd をホスト側で実行してカードリーダー利用終了後に自動停止できるようにするか、内蔵カードリーダーが不要であれば px4-drv-pcsc 自体をコンテナ上から削除してください。
 
 > [!TIP]  
 > ソースからビルドしてインストールすることもできます。  
@@ -502,7 +515,7 @@ Possibly identified card (using /usr/share/pcsc/smartcard_list.txt):
 Ubuntu 24.04 / Debian 13 以降の pcscd は、接続してきたプログラムを polkit で検証し、ログインしていないユーザーからの接続を拒否します。  
 このため、Mirakurun / EDCB を一般ユーザー権限 (root 以外) の systemd サービスとして稼働させている場合、カードリーダーにアクセスできなくなります。
 
-> [!NOTE]
+> [!NOTE]  
 > この問題は内蔵カードリーダー固有の問題ではなく、外付けカードリーダーでも同様に発生します。  
 > カードリーダーへのアクセスが拒否された場合、pcscd のログに `is NOT authorized for action: access_pcsc` が出力されます。
 > なお、Ubuntu 22.04 / Debian 12 以前の pcscd は当該チェックを行わないため、この設定を記述する必要はありません。
@@ -520,7 +533,7 @@ polkit.addRule(function(action, subject) {
 });
 ```
 
-> [!NOTE]
+> [!NOTE]  
 > recisdb などの受信ソフトウェアは、カードリーダーのデバイスファイルには直接アクセスせず、pcscd 経由で間接的にアクセスします。  
 > チューナーデバイスの `video` グループと異なり、recisdb を実行するユーザーを `pcscd` グループに追加する必要はありません。
 
@@ -531,7 +544,7 @@ Docker 環境からカードリーダーにアクセスするには、ホスト�
 - **コンテナ内で pcscd を動かす (Mirakurun の既定の構成):** コンテナのイメージにドライバを追加してビルドし直します
 - **ホストの pcscd を使う:** イメージはそのままで済みますが、ホストとコンテナの pcsc-lite のバージョンが異なる場合は接続できないことがあります
 
-> [!WARNING]
+> [!WARNING]  
 > 事前に px4_drv のカーネルモジュールがホスト側にインストールされている必要があります。  
 > ホストとコンテナの両方で pcscd を起動するとカードリーダーへのアクセスが競合し、どちらか一方が正常に動作しなくなってしまいます。
 
@@ -543,15 +556,15 @@ Mirakurun の公式イメージには pcscd 用ドライバが入っていない
 ```dockerfile
 # arm64 環境では "amd64" を "arm64" に変更してください
 FROM chinachu/mirakurun:latest
-ADD https://github.com/tsukumijima/px4_drv/releases/download/v0.7.0/px4-drv-pcsc_0.7.0_amd64.deb /tmp/
-RUN dpkg -i /tmp/px4-drv-pcsc_0.7.0_amd64.deb && rm /tmp/px4-drv-pcsc_0.7.0_amd64.deb
+ADD https://github.com/tsukumijima/px4_drv/releases/download/v0.7.1/px4-drv-pcsc_0.7.1_amd64.deb /tmp/
+RUN dpkg -i /tmp/px4-drv-pcsc_0.7.1_amd64.deb && rm /tmp/px4-drv-pcsc_0.7.1_amd64.deb
 ```
 
 完了したら、ホストの pcscd を停止します。
 
 	$ sudo systemctl disable --now pcscd.socket pcscd.service
 
-> [!NOTE]
+> [!NOTE]  
 > 全てのチューナー機器が取り外されると、`/dev/px4card` はディレクトリごと消滅します。  
 > `/dev/px4card` だけをコンテナへマウントしてしまうと、USB を抜き差しした後にデバイスファイルがコンテナから見えなくなってしまう可能性があります。  
 > 公式の Docker Compose に従い、`/dev` 全体をマウントしてください。
@@ -563,7 +576,7 @@ RUN dpkg -i /tmp/px4-drv-pcsc_0.7.0_amd64.deb && rm /tmp/px4-drv-pcsc_0.7.0_amd6
 その後、コンテナ内では pcscd を起動させず、代わりにホスト上の pcscd のソケットディレクトリをコンテナ内にマウントします。  
 Mirakurun の場合は、環境変数 `DISABLE_PCSCD=1` を設定した上で、`/var/run/pcscd:/var/run/pcscd` をコンテナ内にマウントしてください。
 
-> [!WARNING]
+> [!WARNING]  
 > Mirakurun 公式の `docker-compose.yml` のようにソケットファイル (`pcscd.comm`) だけをマウントすると、ホストの pcscd が再起動した際にコンテナから接続できなくなります。  
 > 必ず `/var/run/pcscd` ディレクトリごとコンテナへマウントしてください。  
 > また、ホストとコンテナの pcsc-lite のバージョンが大きく異なると接続できないことがあります。その場合は、コンテナ内で pcscd を動かす構成を検討してください。
@@ -589,8 +602,8 @@ Mirakurun の場合は、環境変数 `DISABLE_PCSCD=1` を設定した上で、
 
 #### DKMS を使用してインストールした場合
 
-	$ sudo dkms remove px4_drv/0.7.0 --all
-	$ sudo rm -rf /usr/src/px4_drv-0.7.0
+	$ sudo dkms remove px4_drv/0.7.1 --all
+	$ sudo rm -rf /usr/src/px4_drv-0.7.1
 
 #### DKMS を使用せずにインストールした場合
 
@@ -663,7 +676,7 @@ System="ISDB-T,ISDB-S"
 > チャンネル定義にある「C52Ch/TS1」のような行は、こうした TSMF 方式で送出されているチャンネルの、2本目以降の TS を受信するためのものです。  
 > 当該物理チャンネルに該当する TS がなければ、チャンネルスキャン時に自動的に除外されます。
 
-> [!NOTE]
+> [!NOTE]  
 > BS4K が再送信されているケーブルテレビにおいて 4K 放送を受信するには、別途 [BonDriver_dantto4k](https://github.com/nekohkr/dantto4k) と組み合わせてご利用ください。
 
 ### Linux

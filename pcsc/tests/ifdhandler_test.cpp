@@ -6,12 +6,15 @@ extern "C" {
 
 #include <array>
 #include <cassert>
+#include <chrono>
 #include <cstdarg>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <deque>
 #include <filesystem>
 #include <fstream>
+#include <thread>
 #include <dlfcn.h>
 #include <fcntl.h>
 #include <sys/ioctl.h>
@@ -31,8 +34,13 @@ struct Device {
 	bool powered = false;
 	bool old_module = false;
 	int error = 0;
-	int detect_error = 0;
-	int power_error = 0;
+	int detect_error = ETIMEDOUT;
+	unsigned int detect_failures = 0;
+	unsigned int detects = 0;
+	int power_error = ETIMEDOUT;
+	unsigned int power_failures = 0;
+	/* 制御転送のタイムアウトのように、失敗を返すまでにかかる時間 */
+	std::chrono::milliseconds power_failure_delay{0};
 	unsigned int resets = 0;
 	unsigned int writes = 0;
 	unsigned int sequence = 0;
@@ -42,6 +50,7 @@ std::array<Device, 2> devices;
 constexpr int FIRST_FD = 50000;
 unsigned char atr[] = {0x3b, 0x80, 0x01, 0x81};
 std::string last_log;
+std::string all_logs;
 
 int Failure(int error)
 {
@@ -77,6 +86,8 @@ extern "C" void log_msg(const int priority, const char *format, ...)
 	std::vsnprintf(message, sizeof(message), format, args);
 	va_end(args);
 	last_log = message;
+	all_logs += message;
+	all_logs += '\n';
 	errno = EIO;
 }
 
@@ -116,6 +127,32 @@ extern "C" int __wrap_close(int fd)
 	return __real_close(fd);
 }
 
+#ifdef PX4_IFD_FAKE_MODULE
+/*
+ * pcscd の中で動く模擬モジュールへ、試験のクライアントが PX4_IFD_TEST_CONTROL のディレクトリのファイルで指示する
+ * card-absent があればカードを抜いた状態とし、detect-failures に書かれた回数だけ PX4_CARD_DETECT を ETIMEDOUT で失敗させる
+ * detect-failing がある間は PX4_CARD_DETECT を失敗させ続け、クライアントが異常の通知を受け取ってから削除して回復させる
+ */
+void ApplyControl(Device &device)
+{
+	const char *control = std::getenv("PX4_IFD_TEST_CONTROL");
+	if (!control)
+		return;
+	const std::filesystem::path directory(control);
+	device.present = !std::filesystem::exists(directory / "card-absent");
+	unsigned int failures;
+	if (std::ifstream(directory / "detect-failures") >> failures) {
+		std::filesystem::remove(directory / "detect-failures");
+		device.detect_error = ETIMEDOUT;
+		device.detect_failures = failures;
+	}
+	if (std::filesystem::exists(directory / "detect-failing")) {
+		device.detect_error = ETIMEDOUT;
+		device.detect_failures = 1;
+	}
+}
+#endif
+
 extern "C" int __wrap_ioctl(int fd, unsigned long command, ...)
 {
 	va_list args;
@@ -125,6 +162,11 @@ extern "C" int __wrap_ioctl(int fd, unsigned long command, ...)
 	auto *device = FromFd(fd);
 	if (!device)
 		return __real_ioctl(fd, command, argument);
+#ifdef PX4_IFD_FAKE_MODULE
+	ApplyControl(*device);
+#endif
+	if (command == PX4_CARD_DETECT)
+		device->detects++;
 	if (!device->opened || !device->available)
 		return Failure(ENODEV);
 	/* カードのコマンドを知らないカーネルモジュールは ENOTTY を返す */
@@ -134,18 +176,20 @@ extern "C" int __wrap_ioctl(int fd, unsigned long command, ...)
 	auto &frame = *static_cast<px4_card_frame *>(argument);
 	switch (command) {
 	case PX4_CARD_POWER_ON:
-		if (device->power_error)
+		if (device->power_failures) {
+			device->power_failures--;
+			std::this_thread::sleep_for(device->power_failure_delay);
 			return Failure(device->power_error);
+		}
 		device->powered = true;
 		return 0;
 	case PX4_CARD_POWER_OFF:
 		device->powered = false;
 		return 0;
 	case PX4_CARD_DETECT:
-		if (device->detect_error) {
-			const int error = device->detect_error;
-			device->detect_error = 0;
-			return Failure(error);
+		if (device->detect_failures) {
+			device->detect_failures--;
+			return Failure(device->detect_error);
 		}
 		/* PX-W3U4 は基板電源が切れると、カードを抜いていても挿入済みの値を返す */
 		value = !device->powered || device->present;
@@ -273,13 +317,23 @@ int main(int argc, char *argv[])
 	assert(devices[0].powered && devices[0].resets == 0);
 	assert(IFDHCloseChannel(0) == IFD_SUCCESS && !devices[0].powered);
 	devices[0] = Device{};
-	devices[0].power_error = ETIMEDOUT;
-	assert(IFDHCreateChannelByName(0, path0) == IFD_RESPONSE_TIMEOUT);
+	devices[0].power_failures = 1;
+	assert(IFDHCreateChannelByName(0, path0) == IFD_SUCCESS); // 電源投入の一時的な失敗は再試行して登録する
+	assert(devices[0].opened && devices[0].powered && last_log.empty());
+	assert(IFDHCloseChannel(0) == IFD_SUCCESS && !devices[0].opened);
+	devices[0].power_failures = 1;
+	devices[0].power_failure_delay = std::chrono::milliseconds(3100);
+	assert(IFDHCreateChannelByName(0, path0) == IFD_SUCCESS); // タイムアウト1回で期限を使い切っても、電源投入をやり直す
+	assert(devices[0].opened && devices[0].powered);
+	assert(IFDHCloseChannel(0) == IFD_SUCCESS && !devices[0].opened);
+	devices[0].power_failure_delay = std::chrono::milliseconds(0);
+	devices[0].power_failures = 1000000;
+	assert(IFDHCreateChannelByName(0, path0) == IFD_RESPONSE_TIMEOUT); // 期限まで失敗し続けたら登録を失敗させる
 	assert(!devices[0].opened && !devices[0].powered);
 	assert(last_log.find("PX4_CARD_POWER_ON") != std::string::npos &&
 		last_log.find("errno=" + std::to_string(ETIMEDOUT)) != std::string::npos);
 	last_log.clear();
-	devices[0].power_error = 0;
+	devices[0].power_failures = 0;
 	assert(IFDHCreateChannelByName(1, path0) == IFD_NO_SUCH_DEVICE);
 	assert(IFDHCreateChannelByName(0, path0) == IFD_SUCCESS);
 	assert(last_log.empty());
@@ -321,16 +375,26 @@ int main(int argc, char *argv[])
 	length = sizeof(buffer);
 	assert(IFDHTransmitToICC(0, pci, apdu, sizeof(apdu), buffer, &length, &received) == IFD_SUCCESS);
 	assert(length == 2 && devices[0].resets == 2); // 次の APDU の前にカードをリセットして復帰する
-	devices[0].detect_error = ETIMEDOUT;
-	assert(IFDHICCPresence(0) == IFD_RESPONSE_TIMEOUT && devices[0].powered); // 有無の問い合わせの一時的な失敗でもカードを閉じない
+	devices[0].detect_failures = 1;
+	assert(IFDHICCPresence(0) == IFD_ICC_PRESENT && devices[0].detect_failures == 0); // 1回の失敗は検出し直して pcscd へ伝えない
+	assert(last_log.find("PX4_CARD_DETECT failed") != std::string::npos); // 検出し直して成功しても失敗をログに残す
+	last_log.clear();
+	devices[0].detect_failures = 2;
+	assert(IFDHICCPresence(0) == IFD_RESPONSE_TIMEOUT && devices[0].powered); // 続けて失敗したら伝えるが、カードは閉じない
 	length = sizeof(buffer);
 	assert(IFDHTransmitToICC(0, pci, apdu, sizeof(apdu), buffer, &length, &received) == IFD_SUCCESS);
 	assert(devices[0].resets == 2);
+	devices[0].detect_failures = 1;
+	length = sizeof(buffer);
+	assert(IFDHTransmitToICC(0, pci, apdu, sizeof(apdu), buffer, &length, &received) == IFD_RESPONSE_TIMEOUT);
+	length = sizeof(buffer);
+	assert(IFDHTransmitToICC(0, pci, apdu, sizeof(apdu), buffer, &length, &received) == IFD_SUCCESS);
+	assert(devices[0].resets == 3); // 送信前の検出の失敗では T=1 を捨て、次の APDU の前にカードをリセットして復帰する
 	length = sizeof(buffer);
 	assert(IFDHGetCapabilities(0, TAG_IFD_ATR, &length, buffer) == IFD_SUCCESS && length == sizeof(atr));
 	length = sizeof(buffer);
 	assert(IFDHPowerICC(0, IFD_RESET, buffer, &length) == IFD_SUCCESS);
-	assert(devices[0].resets == 3);
+	assert(devices[0].resets == 4);
 	devices[0].present = false;
 	length = sizeof(buffer);
 	assert(IFDHSetProtocolParameters(0, SCARD_PROTOCOL_T1, 0, 0, 0, 0) == IFD_SUCCESS);
@@ -357,15 +421,24 @@ int main(int argc, char *argv[])
 	assert(IFDHSetProtocolParameters(0, SCARD_PROTOCOL_T1, 0, 0, 0, 0) == IFD_SUCCESS);
 	length = sizeof(buffer);
 	assert(IFDHTransmitToICC(0, pci, apdu, sizeof(apdu), buffer, &length, &received) == IFD_SUCCESS && length == 2);
+	devices[0].present = false;
+	devices[0].detect_failures = 1;
+	assert(IFDHICCPresence(0) == IFD_ICC_NOT_PRESENT); // 検出し直した結果が抜去なら、抜去として伝える
+	length = sizeof(buffer);
+	assert(IFDHGetCapabilities(0, TAG_IFD_ATR, &length, buffer) == IFD_SUCCESS && length == 0);
 	devices[0].available = false;
+	const auto detects = devices[0].detects;
 	assert(IFDHICCPresence(0) == IFD_NO_SUCH_DEVICE);
+	assert(devices[0].detects == detects + 1); // USB の切断は検出し直さずにすぐ伝える
 	assert(IFDHICCPresence(0x10000) == IFD_ICC_PRESENT);
 	assert(IFDHCloseChannel(0) == IFD_SUCCESS && !devices[0].opened);
 	assert(IFDHCloseChannel(0) == IFD_NO_SUCH_DEVICE);
 	assert(IFDHCloseChannel(0x10000) == IFD_SUCCESS && !devices[1].opened && !devices[1].powered);
 	devices[0].available = true;
 	devices[0].old_module = true;
+	all_logs.clear();
 	assert(IFDHCreateChannelByName(0, path0) == IFD_COMMUNICATION_ERROR && !devices[0].opened);
+	assert(all_logs.find("not supported by the px4_drv kernel module") != std::string::npos);
 	assert(last_log.find("PX4_CARD_POWER_ON") != std::string::npos &&
 		last_log.find("errno=" + std::to_string(ENOTTY)) != std::string::npos);
 	std::puts("ifdhandler_test: passed");

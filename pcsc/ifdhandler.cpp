@@ -100,21 +100,34 @@ extern "C" RESPONSECODE IFDHCreateChannelByName(DWORD Lun, LPSTR DeviceName)
 		const char *failed_operation = "ResolveCardDevice";
 		int ret;
 		const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+		bool power_on_retried = false, retry_power_on = false;
 		do {
 			failed_operation = "ResolveCardDevice";
 			ret = px4::ResolveCardDevice(DeviceName, path);
 			if (!ret)
 				ret = reader->device->Connect(path, &failed_operation);
-			if (ret != -ENODEV && ret != -ENOENT && ret != -EACCES)
-				break;
-			if (DeviceName[0] == '/')
-				break;
+			/*
+			 * 登録に失敗したリーダーを pcscd は USB の再接続まで登録し直さないため、電源投入の一時的な USB の失敗も期限まで再試行する
+			 * 制御転送のタイムアウト1回で期限を使い切ることがあるため、期限を過ぎていても電源投入は少なくとも1回やり直す
+			 * 電源投入に失敗するとカーネルモジュールが電源を停止済みに戻すため、再実行しても電源の参照は重複しない
+			 */
+			const bool power_on_failed = ret && std::strcmp(failed_operation, "PX4_CARD_POWER_ON") == 0 &&
+				ret != -ENOTTY && MapError(ret) != IFD_NO_SUCH_DEVICE;
+			retry_power_on = power_on_failed && !power_on_retried;
+			if (power_on_failed)
+				power_on_retried = true;
+			if (!power_on_failed) {
+				if (ret != -ENODEV && ret != -ENOENT && ret != -EACCES)
+					break;
+				if (DeviceName[0] == '/')
+					break;
+			}
 			/*
 			 * pcscd への USB の接続通知は、カーネルがカードデバイスを登録し終える前に届くことがある
 			 * 登録の直後は root の 0600 で作られ、udev が pcscd グループの 0660 に直すまで、root 以外の pcscd は開けない
 			 */
 			std::this_thread::sleep_for(std::chrono::milliseconds(5));
-		} while (std::chrono::steady_clock::now() < deadline);
+		} while (retry_power_on || std::chrono::steady_clock::now() < deadline);
 		if (ret) {
 			/* 再試行の途中の失敗は記録せず、権限の不足のような原因を最後の1回だけ pcscd のログに残す */
 			if (!path.empty())
@@ -207,6 +220,17 @@ extern "C" RESPONSECODE IFDHICCPresence(DWORD Lun)
 	return WithReader(Lun, [](Reader &reader) -> RESPONSECODE {
 		bool present = false;
 		int ret = CheckPresence(reader, present);
+		/*
+		 * pcscd は検出のエラーでリーダーの状態を不明とし、次に検出できたときにカードを再初期化する
+		 * 既存の接続にはリセットを通知せずにプロトコルを未設定へ戻すため、その接続の送信は SCARD_E_PROTO_MISMATCH で失敗し続ける
+		 * USB 切断以外の失敗は1回だけ検出し直し、続けて失敗したときはエラーを返して監視側に異常を通知する
+		 */
+		if (ret && MapError(ret) != IFD_NO_SUCH_DEVICE) {
+			/* 検出し直して成功したときも、接触不良や USB の不調を追えるよう失敗の時刻を pcscd のログに残す */
+			Log3(PCSC_LOG_ERROR, "PX4_CARD_DETECT failed, retrying once: %s (errno=%d)",
+				std::strerror(-ret), -ret);
+			ret = CheckPresence(reader, present);
+		}
 		return ret ? MapError(ret) : present ? IFD_ICC_PRESENT : IFD_ICC_NOT_PRESENT;
 	});
 }
