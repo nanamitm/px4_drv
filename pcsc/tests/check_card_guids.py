@@ -16,7 +16,10 @@ for inf in sorted((root / 'winusb/pkg/inf').glob('*.inf')):
     text = inf.read_text(encoding='utf-8-sig')
     pids = set(re.findall(r'USB\\VID_0511&PID_([0-9a-f]{4})', text, re.IGNORECASE))
     guids = set(re.findall(r'DeviceInterfaceGUIDs,[^"\n]*"(\{[0-9a-f-]+\})"', text, re.IGNORECASE))
-    assert pids and len(guids) == 1, f'{inf.name}: expected PIDs and one interface GUID'
+    # px4_card_guids は VID 0x0511 の機種だけを扱うため、他社 VID の機種の INF は照合の対象外にする
+    if not pids:
+        continue
+    assert len(guids) == 1, f'{inf.name}: expected one interface GUID'
     guid = guids.pop().lower()
     for pid in pids:
         product = int(pid, 16)
