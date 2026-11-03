@@ -6,7 +6,7 @@
 #include <assert.h>
 #include <stdbool.h>
 
-static LONG outstanding, submissions, aborts;
+static LONG outstanding, submissions, aborts, unsubmitted_waits;
 static ULONG mock_maximum = 4096;
 static USHORT mock_packet = 512;
 static bool fail_restore, fail_submission, short_write, stuck_transfer;
@@ -14,7 +14,8 @@ static LONG fail_submission_at;
 static BOOL WINAPI mock_read(WINUSB_INTERFACE_HANDLE h, UCHAR ep, PUCHAR b, ULONG n, PULONG r, LPOVERLAPPED ol)
 {
     (void)h; (void)b; (void)n; (void)r;
-    if (fail_submission || (fail_submission_at && submissions >= fail_submission_at)) { SetLastError(ERROR_BAD_COMMAND); return FALSE; }
+    /* kernel32 は投入前に Internal を STATUS_PENDING にし、即時失敗では event も完了も通知しない。 */
+    if (fail_submission || (fail_submission_at && submissions >= fail_submission_at)) { ol->Internal = STATUS_PENDING; SetLastError(ERROR_BAD_COMMAND); return FALSE; }
     ol->Internal = 1;
     ol->InternalHigh = n;
     ol->Offset = ep;
@@ -27,6 +28,11 @@ static BOOL WINAPI mock_read(WINUSB_INTERFACE_HANDLE h, UCHAR ep, PUCHAR b, ULON
 static BOOL WINAPI mock_result(WINUSB_INTERFACE_HANDLE h, LPOVERLAPPED ol, PULONG n, BOOL wait)
 {
     (void)h;
+    if (ol->Internal == STATUS_PENDING) {
+        /* 実機では完了が届かず待機が戻らないため、待機した事実だけを記録する。 */
+        if (wait) InterlockedIncrement(&unsubmitted_waits);
+        SetLastError(ERROR_IO_INCOMPLETE); return FALSE;
+    }
     if (ol->Internal == 1 && !wait && WaitForSingleObject(ol->hEvent, 0) == WAIT_TIMEOUT) {
         SetLastError(ERROR_IO_INCOMPLETE); return FALSE;
     }
@@ -114,6 +120,15 @@ int main(void)
     short_write = true;
     CHECK(itedtv_usb_ctrl_tx(&bus, response, sizeof(response)) == -EIO && outstanding == 0);
     short_write = false;
+    /* 投入時の即時失敗は完了待ちへ入らず、エラーをそのまま返す。 */
+    fail_submission = true;
+    CHECK(itedtv_usb_ctrl_tx(&bus, response, sizeof(response)) == -EIO);
+    len = sizeof(response);
+    CHECK(itedtv_usb_ctrl_rx(&bus, response, &len) == -EIO && len == -1);
+    len = sizeof(response);
+    CHECK(itedtv_usb_stream_rx(&bus, response, &len, 10) == -EIO && len == -1);
+    CHECK(unsubmitted_waits == 0 && outstanding == 0);
+    fail_submission = false;
     SetLastError(ERROR_DEVICE_NOT_CONNECTED);
     CHECK(winerr_to_errno(&log) == ENODEV);
     fail_restore = true;

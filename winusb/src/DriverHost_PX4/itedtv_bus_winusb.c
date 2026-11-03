@@ -98,6 +98,7 @@ static int itedtv_usb_ctrl_tx(struct itedtv_bus *bus, void *buf, int len)
 	struct itedtv_usb_context *ctx = bus->usb.priv;
 	ULONG rlen = 0;
 	OVERLAPPED ol = {0};
+	bool pending = false;
 
 	if (!buf || len <= 0)
 		return -EINVAL;
@@ -108,9 +109,10 @@ static int itedtv_usb_ctrl_tx(struct itedtv_bus *bus, void *buf, int len)
 
 	/* Endpoint 0x02: Host->Device bulk endpoint for controlling the device */
 	if (!WinUsb_WritePipe(dev->winusb, 0x02, buf, len, NULL, &ol)) {
-		if (GetLastError() == ERROR_IO_PENDING)
+		if (GetLastError() == ERROR_IO_PENDING) {
+			pending = true;
 			WaitForSingleObject(ol.hEvent, bus->usb.ctrl_timeout);
-		else
+		} else
 			ret = -winerr_to_errno(bus->dev);
 	} else {
 		dev_dbg(bus->dev, "itedtv_usb_ctrl_tx: WinUsb_WritePipe() TRUE\n");
@@ -125,9 +127,12 @@ static int itedtv_usb_ctrl_tx(struct itedtv_bus *bus, void *buf, int len)
 
 	if (ret) {
 		WinUsb_AbortPipe(dev->winusb, 0x02);
-		CancelIoEx(dev->dev, &ol);
-		/* 中止要求だけでは stack 上の OVERLAPPED/呼び出し元バッファを解放できない。 */
-		WinUsb_GetOverlappedResult(dev->winusb, &ol, &rlen, TRUE);
+		/* 投入時に失敗した要求は event も OVERLAPPED も更新されず、完了を待つと戻らない。 */
+		if (pending) {
+			CancelIoEx(dev->dev, &ol);
+			/* 中止要求だけでは stack 上の OVERLAPPED/呼び出し元バッファを解放できない。 */
+			WinUsb_GetOverlappedResult(dev->winusb, &ol, &rlen, TRUE);
+		}
 	}
 
 	return ret;
@@ -140,6 +145,7 @@ static int itedtv_usb_ctrl_rx(struct itedtv_bus *bus, void *buf, int *len)
 	struct itedtv_usb_context *ctx = bus->usb.priv;
 	ULONG rlen = 0;
 	OVERLAPPED ol = {0};
+	bool pending = false;
 
 	if (!buf || !len || *len <= 0)
 		return -EINVAL;
@@ -150,9 +156,10 @@ static int itedtv_usb_ctrl_rx(struct itedtv_bus *bus, void *buf, int *len)
 
 	/* Endpoint 0x81: Device->Host bulk endpoint for controlling the device */
 	if (!WinUsb_ReadPipe(dev->winusb, 0x81, buf, *len, NULL, &ol)) {
-		if (GetLastError() == ERROR_IO_PENDING)
+		if (GetLastError() == ERROR_IO_PENDING) {
+			pending = true;
 			WaitForSingleObject(ol.hEvent, bus->usb.ctrl_timeout);
-		else
+		} else
 			ret = -winerr_to_errno(bus->dev);
 	} else {
 		dev_dbg(bus->dev, "itedtv_usb_ctrl_rx: WinUsb_ReadPipe() TRUE\n");
@@ -165,8 +172,10 @@ static int itedtv_usb_ctrl_rx(struct itedtv_bus *bus, void *buf, int *len)
 
 	if (ret) {
 		WinUsb_AbortPipe(dev->winusb, 0x81);
-		CancelIoEx(dev->dev, &ol);
-		WinUsb_GetOverlappedResult(dev->winusb, &ol, &rlen, TRUE);
+		if (pending) {
+			CancelIoEx(dev->dev, &ol);
+			WinUsb_GetOverlappedResult(dev->winusb, &ol, &rlen, TRUE);
+		}
 		*len = -1;
 	} else {
 		*len = rlen;
@@ -182,6 +191,7 @@ static int itedtv_usb_stream_rx(struct itedtv_bus *bus, void *buf, int *len, int
 	struct itedtv_usb_context *ctx = bus->usb.priv;
 	ULONG rlen = 0;
 	OVERLAPPED ol = {0};
+	bool pending = false;
 
 	if (!buf || !len || *len <= 0)
 		return -EINVAL;
@@ -195,9 +205,10 @@ static int itedtv_usb_stream_rx(struct itedtv_bus *bus, void *buf, int *len, int
 
 	/* Endpoint 0x84: Device->Host bulk endpoint for receiving TS from the device */
 	if (!WinUsb_ReadPipe(dev->winusb, 0x84, buf, *len, NULL, &ol)) {
-		if (GetLastError() == ERROR_IO_PENDING)
+		if (GetLastError() == ERROR_IO_PENDING) {
+			pending = true;
 			WaitForSingleObject(ol.hEvent, timeout);
-		else
+		} else
 			ret = -winerr_to_errno(bus->dev);
 	} else {
 		dev_dbg(bus->dev, "itedtv_usb_stream_rx: WinUsb_ReadPipe() TRUE\n");
@@ -210,8 +221,10 @@ static int itedtv_usb_stream_rx(struct itedtv_bus *bus, void *buf, int *len, int
 
 	if (ret) {
 		WinUsb_AbortPipe(dev->winusb, 0x84);
-		CancelIoEx(dev->dev, &ol);
-		WinUsb_GetOverlappedResult(dev->winusb, &ol, &rlen, TRUE);
+		if (pending) {
+			CancelIoEx(dev->dev, &ol);
+			WinUsb_GetOverlappedResult(dev->winusb, &ol, &rlen, TRUE);
+		}
 		*len = -1;
 	} else {
 		*len = rlen;
