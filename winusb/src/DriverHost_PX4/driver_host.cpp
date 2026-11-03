@@ -18,6 +18,12 @@ DriverHost::DriverHost()
 
 	msg_info("DriverHost config: %ls\n", config_path.c_str());
 	configs_.Load(config_path);
+	/* 短い待機を削る変更は既定へ入れず、機種ごとの比較測定用に明示設定する。 */
+	const bool precise_wait = configs_.Exists(L"DriverHost_PX4") &&
+		px4::util::wtob(configs_.Get(L"DriverHost_PX4").Get(L"HighPrecisionDeviceWait", L"false"));
+	if (!SetEnvironmentVariableW(L"PX4_PRECISE_DEVICE_WAIT", precise_wait ? L"1" : L"0"))
+		throw DriverHostError("Cannot configure device wait policy.");
+	msg_info("HighPrecisionDeviceWait: %s\n", precise_wait ? "true" : "false");
 
 	dev_defs_.Load(configs_);
 }

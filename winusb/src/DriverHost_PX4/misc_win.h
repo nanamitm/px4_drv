@@ -24,7 +24,8 @@ typedef uint32_t u32;
 
 #define ARRAY_SIZE(arr)	(sizeof(arr) / sizeof((arr)[0]))
 
-#define msleep(ms)		Sleep((ms) + (16 - ((ms) % 16)))
+#include "device_wait.h"
+#define msleep(ms)		px4_device_wait((DWORD)(ms))
 #define mdelay(ms)		/* do nothing*/
 
 #define GFP_KERNEL	0

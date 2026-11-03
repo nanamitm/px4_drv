@@ -54,6 +54,10 @@ if ((Get-Command msbuild -ErrorAction SilentlyContinue) -eq $null) {
 # MSBuild を使用してソリューションをビルド
 $build_platforms = @('x86', 'x64')
 foreach ($build_platform in $build_platforms) {
+    msbuild tests/device_wait_test.vcxproj /p:"Configuration=Release-static;Platform=$build_platform;PlatformToolset=v143"
+    if ($LASTEXITCODE -ne 0) { throw "Device wait test build failed ($build_platform)" }
+    & "build/$build_platform/Release-static/device_wait_test.exe"
+    if ($LASTEXITCODE -ne 0) { throw "Device wait test failed ($build_platform)" }
     msbuild tests/winusb_lifetime_test.vcxproj /p:"Configuration=Release-static;Platform=$build_platform;PlatformToolset=v143"
     if ($LASTEXITCODE -ne 0) { throw "WinUSB lifetime test build failed ($build_platform)" }
     & "build/$build_platform/Release-static/winusb_lifetime_test.exe"
