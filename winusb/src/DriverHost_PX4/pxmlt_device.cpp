@@ -220,6 +220,7 @@ int PxMltDevice::Init()
 		}
 	}
 
+	backend_power_.SetOff();
 	init_ = true;
 
 	for (auto it = device_def_.receivers.cbegin(); it != device_def_.receivers.cend(); ++it) {
@@ -240,7 +241,7 @@ int PxMltDevice::Init()
 		ri.index = it->index;
 		ri.data_id = 0;
 
-		receiver_manager_.Register(ri, receivers_[it->index].get());
+		receiver_manager_.Register(ri, receivers_[it->index].get(), GetDeviceIdentity());
 	}
 
 	return 0;
@@ -292,8 +293,10 @@ void PxMltDevice::SetAvailability(bool available)
 {
 	std::lock_guard<std::recursive_mutex> lock(lock_);
 	/* 切断後の古いカードセッションから USB 制御転送を発行しない */
-	if (available_ && !available)
+	if (available_ && !available) {
 		card_open_ = false;
+		backend_power_.Disconnect();
+	}
 	available_ = available;
 }
 
@@ -393,13 +396,11 @@ int PxMltDevice::SetBackendPower(bool state)
 {
 	dev_dbg(&dev_, "px4::PxMltDevice::SetBackendPower: state: %s\n", (state) ? "true" : "false");
 
-	int ret = 0;
 	std::lock_guard<std::recursive_mutex> lock(lock_);
-
-	if (!state && !available_)
-		return 0;
-
-	if (state) {
+	return backend_power_.Request(state, available_, open_count_ + (card_open_ ? 1U : 0U),
+		[this](bool on) {
+		int ret = 0;
+		if (on) {
 		ret = it930x_write_gpio(&it930x_, 7, false);
 		if (ret)
 			return ret;
@@ -415,12 +416,15 @@ int PxMltDevice::SetBackendPower(bool state)
 		// 電源を入れた直後のチューナーは、PLEX の公開ドライバーと同じ既定の待機状態から始める
 		for (int i = 0; i < receiver_num_; i++)
 			receivers_[i]->cxd2858er_.config.ter.rfin_matching = false;
-	} else {
-		it930x_write_gpio(&it930x_, 2, false);
-		it930x_write_gpio(&it930x_, 7, true);
-	}
-
-	return 0;
+		} else {
+			/* 片方に失敗してももう一方を停止し、最初のエラーを保持する。 */
+			ret = it930x_write_gpio(&it930x_, 2, false);
+			int second = it930x_write_gpio(&it930x_, 7, true);
+			if (!ret) ret = second;
+		}
+		if (ret) dev_err(&dev_, "backend power %s failed: ret=%d\n", on ? "on" : "off", ret);
+		return ret;
+	});
 }
 
 int PxMltDevice::SetLnbVoltage(std::int32_t voltage)

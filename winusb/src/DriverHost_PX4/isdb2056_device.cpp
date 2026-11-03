@@ -204,7 +204,7 @@ int Isdb2056Device::Init()
 		ri.index = it->index;
 		ri.data_id = 0;
 
-		receiver_manager_.Register(ri, receiver_.get());
+		receiver_manager_.Register(ri, receiver_.get(), GetDeviceIdentity());
 	}
 
 	return 0;

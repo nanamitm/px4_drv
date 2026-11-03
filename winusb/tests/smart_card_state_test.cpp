@@ -92,6 +92,7 @@ public:
 
 	int WriteCardData(const std::uint8_t *buffer, std::uint8_t length) override
 	{
+		if (write_error) { int error = write_error; write_error = 0; return error; }
 		if (throw_next_apdu) {
 			throw_next_apdu = false;
 			throw std::bad_alloc();
@@ -289,6 +290,7 @@ public:
 	bool read_allowed = false;
 	unsigned int ready_delay_checks = 0;
 	int detect_error = 0;
+	int write_error = 0;
 	unsigned int reset_count = 0;
 	unsigned int malformed_atr_resets = 0;
 	std::vector<std::uint8_t> malformed_atr_bytes = { 0xfc, 0xff };
@@ -561,6 +563,45 @@ int main()
 		!unsupported_device->is_open,
 		"An unsupported TA1 value was accepted.") && succeeded;
 
+	/* 一度抜去を観測した接続は、別の監視者が再初期化しても復活させない。 */
+	auto generation_device = std::make_shared<MockCardDevice>();
+	generation_device->is_present = true;
+	px4::SmartCard generation_card(generation_device);
+	std::uint64_t first_generation = 0, replacement_generation = 0;
+	succeeded = Check(generation_card.Open() == 0 &&
+		generation_card.BindConnection(first_generation) == 0,
+		"Cannot bind a card connection.") && succeeded;
+	std::vector<std::uint8_t> generation_atr;
+	succeeded = Check(generation_card.Reset(generation_atr) == 0 &&
+		generation_card.CheckConnection(first_generation) == 0,
+		"Reset of the same card invalidated its connection.") && succeeded;
+	generation_device->is_present = false;
+	succeeded = Check(generation_card.CheckConnection(first_generation) == -ENODEV,
+		"Card removal did not invalidate the connection.") && succeeded;
+	generation_device->is_present = true;
+	succeeded = Check(generation_card.BindConnection(replacement_generation) == 0 &&
+		replacement_generation != first_generation,
+		"Replacement card reused its predecessor's generation.") && succeeded;
+	const auto resets_before_stale_check = generation_device->reset_count;
+	succeeded = Check(generation_card.CheckConnection(first_generation) == -ENODEV &&
+		generation_device->reset_count == resets_before_stale_check &&
+		generation_card.CheckConnection(replacement_generation) == 0,
+		"Stale connection accessed or reset the replacement card.") && succeeded;
+	generation_device->detect_error = -ENODEV;
+	succeeded = Check(generation_card.CheckConnection(replacement_generation) == -ENODEV &&
+		generation_card.CheckConnection(replacement_generation) == -ENODEV,
+		"USB loss allowed an old connection to recover implicitly.") && succeeded;
+	generation_card.Close();
+	/* presence照会に成功した直後のUSB切断も、古い接続を無効化する。 */
+	succeeded = Check(generation_card.Open() == 0 &&
+		generation_card.BindConnection(replacement_generation) == 0,
+		"Cannot reopen generation test card.") && succeeded;
+	generation_device->write_error = -ENODEV;
+	response_length = sizeof(response);
+	succeeded = Check(generation_card.Transmit(apdu, sizeof(apdu), response, response_length) == -ENODEV &&
+		generation_card.CheckConnection(replacement_generation) == -ENODEV,
+		"USB loss during APDU did not invalidate the connection.") && succeeded;
+	generation_card.Close();
 	card.Close();
 	succeeded = Check(!device->is_open, "Closing the reader failed.") && succeeded;
 	std::printf("smart_card_state_test: %s\n", succeeded ? "passed" : "failed");

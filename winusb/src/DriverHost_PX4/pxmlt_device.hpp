@@ -14,6 +14,7 @@
 #include "receiver_base.hpp"
 #include "receiver_manager.hpp"
 #include "ringbuffer.hpp"
+#include "backend_power_state.hpp"
 
 #include "winusb_compat.h"
 
@@ -192,6 +193,7 @@ private:
 	std::atomic_bool init_;
 	unsigned int open_count_;
 	bool card_open_;
+	BackendPowerState backend_power_;
 	unsigned int lnb_power_count_;
 	unsigned int streaming_count_;
 	std::mutex tuner_lock_[2];

@@ -53,6 +53,7 @@ public:
 	int WriteCardData(const std::uint8_t *buf, std::uint8_t len) override { return -ENOSYS; }
 
 	const std::wstring& GetCardReaderName() const noexcept { return card_reader_name_; }
+	DeviceIdentity GetDeviceIdentity() const { return { device_path_, usb_serial_number_ }; }
 
 protected:
 	const device& GetDevice() const { return dev_; }
@@ -63,6 +64,7 @@ protected:
 	device dev_;
 	usb_device usb_dev_;
 	std::wstring usb_serial_number_;
+	std::wstring device_path_;
 	std::wstring card_reader_name_;
 };
 
