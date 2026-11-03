@@ -26,6 +26,9 @@ public:
 	void Close() noexcept;
 	int GetStatus(bool &present, bool &initialized, std::vector<std::uint8_t> &atr);
 	int Reset(std::vector<std::uint8_t> &atr);
+	/* 呼び出し元がカード I/O の排他を保持する。世代検査はAPDUを送信しない。 */
+	int BindConnection(std::uint64_t &generation);
+	int CheckConnection(std::uint64_t generation);
 	int Transmit(const std::uint8_t *send_buf, std::size_t send_len,
 		     std::uint8_t *recv_buf, std::size_t &recv_len);
 
@@ -57,6 +60,7 @@ private:
 				const Deadline &deadline);
 	std::uint16_t CalculateCrc(const std::uint8_t *data, std::size_t length) const;
 	void InvalidateSession() noexcept;
+	int ProbePresence(bool &present);
 
 	std::shared_ptr<CardDevice> device_;
 	bool open_;
@@ -68,6 +72,9 @@ private:
 	std::uint8_t send_sequence_;
 	std::uint8_t receive_sequence_;
 	std::vector<std::uint8_t> atr_;
+	std::uint64_t generation_ = 1;
+	bool presence_known_ = false;
+	bool observed_present_ = false;
 };
 
 } // namespace px4

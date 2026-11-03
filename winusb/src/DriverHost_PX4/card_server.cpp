@@ -145,6 +145,7 @@ void CardServer::CardConnection::ReleaseCard() noexcept
 	card_parent_.ReleaseCard(card_, share_mode_);
 	card_.reset();
 	share_mode_ = card_command::ShareMode::UNDEFINED;
+	generation_ = 0;
 }
 
 void CardServer::CardConnection::SetError(card_command::Command &command,
@@ -252,6 +253,11 @@ void CardServer::CardConnection::Worker() noexcept
 				}
 				card_ = std::move(card);
 				share_mode_ = share_mode;
+				{
+					std::lock_guard<std::recursive_mutex> lock(card_->io_mutex);
+					ret = card_->card.BindConnection(generation_);
+				}
+				if (ret) { SetError(command, ret); ReleaseCard(); }
 				break;
 			}
 
@@ -269,6 +275,11 @@ void CardServer::CardConnection::Worker() noexcept
 					break;
 				}
 				share_mode_ = requested_mode;
+				{
+					std::lock_guard<std::recursive_mutex> lock(card_->io_mutex);
+					ret = card_->card.BindConnection(generation_);
+				}
+				if (ret) SetError(command, ret);
 				break;
 			}
 
@@ -319,6 +330,10 @@ void CardServer::CardConnection::Worker() noexcept
 					SetError(command, -EBUSY);
 					break;
 				}
+				if (status_card == card_) {
+					ret = card_->card.CheckConnection(generation_);
+					if (ret) { SetError(command, ret); break; }
+				}
 				ret = status_card->card.GetStatus(command.card_present,
 					command.card_initialized, atr);
 				if (ret) {
@@ -339,7 +354,8 @@ void CardServer::CardConnection::Worker() noexcept
 				}
 				std::vector<std::uint8_t> atr;
 				std::lock_guard<std::recursive_mutex> lock(card_->io_mutex);
-				int ret = card_->card.Reset(atr);
+				int ret = card_->card.CheckConnection(generation_);
+				if (!ret) ret = card_->card.Reset(atr);
 				if (ret) {
 					SetError(command, ret);
 					break;
@@ -362,7 +378,8 @@ void CardServer::CardConnection::Worker() noexcept
 				/* 必要サイズを返せるよう、共有コマンド領域の全容量で受信する */
 				std::size_t recv_length = card_command::MAX_DATA_SIZE;
 				std::lock_guard<std::recursive_mutex> lock(card_->io_mutex);
-				int ret = card_->card.Transmit(command.data, command.data_length,
+				int ret = card_->card.CheckConnection(generation_);
+				if (!ret) ret = card_->card.Transmit(command.data, command.data_length,
 					command.data, recv_length);
 				command.data_length = static_cast<std::uint32_t>(recv_length);
 				if (!ret && recv_length > command.data_capacity)
@@ -378,6 +395,10 @@ void CardServer::CardConnection::Worker() noexcept
 					break;
 				}
 				card_->io_mutex.lock();
+				{
+					int ret = card_->card.CheckConnection(generation_);
+					if (ret) { card_->io_mutex.unlock(); SetError(command, ret); break; }
+				}
 				card_->transaction_active = true;
 				transaction_ = true;
 				break;
@@ -397,7 +418,8 @@ void CardServer::CardConnection::Worker() noexcept
 					} else if (disposition == card_command::Disposition::RESET) {
 						try {
 							std::vector<std::uint8_t> atr;
-							ret = card_->card.Reset(atr);
+							ret = card_->card.CheckConnection(generation_);
+							if (!ret) ret = card_->card.Reset(atr);
 							if (!ret) {
 								command.atr_length = static_cast<std::uint32_t>(atr.size());
 								if (!atr.empty())

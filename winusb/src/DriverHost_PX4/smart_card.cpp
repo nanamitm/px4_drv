@@ -67,7 +67,7 @@ int SmartCard::Open()
 
 	open_ = true;
 	bool detected = false;
-	ret = device_->DetectCard(detected);
+	ret = ProbePresence(detected);
 	if (ret) {
 		Close();
 		return ret;
@@ -91,7 +91,47 @@ void SmartCard::Close() noexcept
 
 	device_->CloseCard();
 	open_ = false;
+	presence_known_ = false;
+	++generation_;
 	InvalidateSession();
+}
+
+int SmartCard::ProbePresence(bool &present)
+{
+	int ret = device_->DetectCard(present);
+	if (ret) {
+		if (ret == -ENODEV || ret == -ENXIO || ret == SMART_CARD_NO_MEDIUM) {
+			if (presence_known_) ++generation_;
+			presence_known_ = false;
+		}
+		return ret;
+	}
+	if (!presence_known_ || present != observed_present_) ++generation_;
+	presence_known_ = true;
+	observed_present_ = present;
+	return 0;
+}
+
+int SmartCard::BindConnection(std::uint64_t &generation)
+{
+	bool present = false, initialized = false;
+	std::vector<std::uint8_t> atr;
+	int ret = GetStatus(present, initialized, atr);
+	if (ret) return ret;
+	if (!present) return SMART_CARD_NO_MEDIUM;
+	generation = generation_;
+	return 0;
+}
+
+int SmartCard::CheckConnection(std::uint64_t generation)
+{
+	if (!open_) return -ENODEV;
+	bool present = false;
+	int ret = ProbePresence(present);
+	if (ret || !present) InvalidateSession();
+	if (generation != generation_) return -ENODEV;
+	if (ret) return ret;
+	return present ? 0 : SMART_CARD_NO_MEDIUM;
 }
 
 int SmartCard::GetStatus(bool &present, bool &initialized,
@@ -100,7 +140,7 @@ int SmartCard::GetStatus(bool &present, bool &initialized,
 	if (!open_)
 		return -ENODEV;
 
-	int ret = device_->DetectCard(present);
+	int ret = ProbePresence(present);
 	if (ret) {
 		InvalidateSession();
 		return ret;
@@ -128,7 +168,7 @@ int SmartCard::Reset(std::vector<std::uint8_t> &atr)
 	/* 途中で失敗しても以前のカードの通信状態を再利用させない */
 	InvalidateSession();
 	bool detected = false;
-	int ret = device_->DetectCard(detected);
+	int ret = ProbePresence(detected);
 	if (ret)
 		return ret;
 	if (!detected)
@@ -571,7 +611,7 @@ int SmartCard::Transmit(const std::uint8_t *send_buf, std::size_t send_len,
 
 	/* 接触不良や抜去を APDU 送信前に検出し、壊れたセッションを即座に破棄する */
 	bool detected = false;
-	int status_ret = device_->DetectCard(detected);
+	int status_ret = ProbePresence(detected);
 	if (status_ret) {
 		InvalidateSession();
 		return status_ret;

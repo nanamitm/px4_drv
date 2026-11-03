@@ -561,6 +561,35 @@ int main()
 		!unsupported_device->is_open,
 		"An unsupported TA1 value was accepted.") && succeeded;
 
+	/* 一度抜去を観測した接続は、別の監視者が再初期化しても復活させない。 */
+	auto generation_device = std::make_shared<MockCardDevice>();
+	generation_device->is_present = true;
+	px4::SmartCard generation_card(generation_device);
+	std::uint64_t first_generation = 0, replacement_generation = 0;
+	succeeded = Check(generation_card.Open() == 0 &&
+		generation_card.BindConnection(first_generation) == 0,
+		"Cannot bind a card connection.") && succeeded;
+	std::vector<std::uint8_t> generation_atr;
+	succeeded = Check(generation_card.Reset(generation_atr) == 0 &&
+		generation_card.CheckConnection(first_generation) == 0,
+		"Reset of the same card invalidated its connection.") && succeeded;
+	generation_device->is_present = false;
+	succeeded = Check(generation_card.CheckConnection(first_generation) == -ENODEV,
+		"Card removal did not invalidate the connection.") && succeeded;
+	generation_device->is_present = true;
+	succeeded = Check(generation_card.BindConnection(replacement_generation) == 0 &&
+		replacement_generation != first_generation,
+		"Replacement card reused its predecessor's generation.") && succeeded;
+	const auto resets_before_stale_check = generation_device->reset_count;
+	succeeded = Check(generation_card.CheckConnection(first_generation) == -ENODEV &&
+		generation_device->reset_count == resets_before_stale_check &&
+		generation_card.CheckConnection(replacement_generation) == 0,
+		"Stale connection accessed or reset the replacement card.") && succeeded;
+	generation_device->detect_error = -ENODEV;
+	succeeded = Check(generation_card.CheckConnection(replacement_generation) == -ENODEV &&
+		generation_card.CheckConnection(replacement_generation) == -ENODEV,
+		"USB loss allowed an old connection to recover implicitly.") && succeeded;
+	generation_card.Close();
 	card.Close();
 	succeeded = Check(!device->is_open, "Closing the reader failed.") && succeeded;
 	std::printf("smart_card_state_test: %s\n", succeeded ? "passed" : "failed");

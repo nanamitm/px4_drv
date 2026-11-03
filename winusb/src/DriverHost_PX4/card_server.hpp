@@ -44,6 +44,7 @@ private:
 		std::unordered_map<std::wstring, std::shared_ptr<SharedCard>> monitored_cards_;
 		card_command::ShareMode share_mode_;
 		bool transaction_;
+		std::uint64_t generation_ = 0;
 	};
 
 	Connection* CreateConnection(std::unique_ptr<PipeServer> &pipe) override;
