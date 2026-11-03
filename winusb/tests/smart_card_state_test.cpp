@@ -92,6 +92,7 @@ public:
 
 	int WriteCardData(const std::uint8_t *buffer, std::uint8_t length) override
 	{
+		if (write_error) { int error = write_error; write_error = 0; return error; }
 		if (throw_next_apdu) {
 			throw_next_apdu = false;
 			throw std::bad_alloc();
@@ -289,6 +290,7 @@ public:
 	bool read_allowed = false;
 	unsigned int ready_delay_checks = 0;
 	int detect_error = 0;
+	int write_error = 0;
 	unsigned int reset_count = 0;
 	unsigned int malformed_atr_resets = 0;
 	std::vector<std::uint8_t> malformed_atr_bytes = { 0xfc, 0xff };
@@ -589,6 +591,16 @@ int main()
 	succeeded = Check(generation_card.CheckConnection(replacement_generation) == -ENODEV &&
 		generation_card.CheckConnection(replacement_generation) == -ENODEV,
 		"USB loss allowed an old connection to recover implicitly.") && succeeded;
+	generation_card.Close();
+	/* presence照会に成功した直後のUSB切断も、古い接続を無効化する。 */
+	succeeded = Check(generation_card.Open() == 0 &&
+		generation_card.BindConnection(replacement_generation) == 0,
+		"Cannot reopen generation test card.") && succeeded;
+	generation_device->write_error = -ENODEV;
+	response_length = sizeof(response);
+	succeeded = Check(generation_card.Transmit(apdu, sizeof(apdu), response, response_length) == -ENODEV &&
+		generation_card.CheckConnection(replacement_generation) == -ENODEV,
+		"USB loss during APDU did not invalidate the connection.") && succeeded;
 	generation_card.Close();
 	card.Close();
 	succeeded = Check(!device->is_open, "Closing the reader failed.") && succeeded;

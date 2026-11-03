@@ -179,21 +179,27 @@ int SmartCard::Reset(std::vector<std::uint8_t> &atr)
 		/* 前回の不正 ATR を途中まで解析していても T=1 パラメータを次の試行へ残さない */
 		parameters = AtrParameters{};
 		ret = device_->ResetCard();
-		if (ret)
+		if (ret) {
+			InvalidateSession(ret);
 			return ret;
+		}
 
 		ret = ReadAtr(atr, parameters);
 		if (!ret)
 			break;
 		/* 一部機種は連続リセット時に UART の残留バイトを ATR より先に返すため、形式不正だけ再初期化する */
-		if (ret != -EBADMSG || attempt != 0)
+		if (ret != -EBADMSG || attempt != 0) {
+			InvalidateSession(ret);
 			return ret;
+		}
 	}
 
 	/* 特定モードのカードは PPS を行わず、TA1 が指定した速度へ直接切り替える */
 	ret = device_->SetCardBaudrate(parameters.baudrate);
-	if (ret)
+	if (ret) {
+		InvalidateSession(ret);
 		return ret;
+	}
 
 	atr_ = atr;
 	present_ = true;
@@ -205,7 +211,7 @@ int SmartCard::Reset(std::vector<std::uint8_t> &atr)
 	const std::uint8_t ifsd = is_acas ? 254 : (use_crc_ ? 250 : 251);
 	ret = InitializeT1(!is_acas, ifsd);
 	if (ret) {
-		InvalidateSession();
+		InvalidateSession(ret);
 		return ret;
 	}
 	initialized_ = true;
@@ -647,6 +653,7 @@ int SmartCard::Transmit(const std::uint8_t *send_buf, std::size_t send_len,
 	} guard{ *this, succeeded };
 
 	int ret = TransmitInitialized(send_buf, send_len, recv_buf, recv_len, deadline);
+	if (ret) InvalidateSession(ret);
 	succeeded = !ret;
 	return ret;
 }
@@ -757,8 +764,13 @@ int SmartCard::TransmitInitialized(const std::uint8_t *send_buf,
 	}
 }
 
-void SmartCard::InvalidateSession() noexcept
+void SmartCard::InvalidateSession(int cause) noexcept
 {
+	/* 検出照会の後にUSBが切れた場合も、次のカードへ接続を持ち越さない。 */
+	if (cause == -ENODEV || cause == -ENXIO || cause == SMART_CARD_NO_MEDIUM) {
+		if (presence_known_) ++generation_;
+		presence_known_ = false;
+	}
 	present_ = false;
 	initialized_ = false;
 	use_crc_ = false;

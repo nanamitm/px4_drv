@@ -59,7 +59,7 @@ private:
 				std::uint8_t *recv_buf, std::size_t &recv_len,
 				const Deadline &deadline);
 	std::uint16_t CalculateCrc(const std::uint8_t *data, std::size_t length) const;
-	void InvalidateSession() noexcept;
+	void InvalidateSession(int cause = 0) noexcept;
 	int ProbePresence(bool &present);
 
 	std::shared_ptr<CardDevice> device_;
