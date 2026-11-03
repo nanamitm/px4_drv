@@ -133,11 +133,13 @@ int main(void)
     fail_submission = false;
     SetLastError(ERROR_DEVICE_NOT_CONNECTED);
     CHECK(winerr_to_errno(&log) == ENODEV);
+    /* RAW_IO の復元失敗は 0x84 だけの設定のため、制御転送と次回の受信開始を止めない。 */
     fail_restore = true;
     CHECK(itedtv_usb_start_streaming(&bus, stream, ctx) == 0);
-    CHECK(itedtv_usb_stop_streaming(&bus) == -EIO);
-    CHECK(outstanding == 0 && ctx->policy_failed);
-    CHECK(itedtv_usb_start_streaming(&bus, stream, ctx) == -EIO);
+    CHECK(itedtv_usb_stop_streaming(&bus) == 0 && outstanding == 0);
+    CHECK(!ctx->faulted && itedtv_usb_ctrl_tx(&bus, response, sizeof(response)) == 0);
+    CHECK(itedtv_usb_start_streaming(&bus, stream, ctx) == 0);
+    CHECK(itedtv_usb_stop_streaming(&bus) == 0 && outstanding == 0);
     CHECK(itedtv_bus_term(&bus) == 0);
     /* 中止しても完了しない模擬IRPは、再利用・解放せず有限時間で隔離する。 */
     fail_restore = false; stuck_transfer = true;

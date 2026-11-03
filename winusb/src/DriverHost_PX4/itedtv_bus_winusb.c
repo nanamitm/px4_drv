@@ -49,8 +49,7 @@ struct itedtv_usb_context {
 	HANDLE worker_thread;
 	HANDLE startup_event;
 	LONG startup_result;
-	/* RAW_IO の復元に失敗したパイプは再利用しない。 */
-	bool policy_failed;
+	/* 完了未確認の IRP が参照する受信領域が残り、受信を再開できない。 */
 	bool quarantined;
 	LONG faulted;
 	struct itedtv_usb_ctrl_xfer ctrl_xfer[2];
@@ -530,11 +529,13 @@ exit:
 	itedtv_usb_drain(ctx);
 	if (raw_io && !ctx->quarantined) {
 		raw_io = 0;
-		if (!WinUsb_SetPipePolicy(winusb, 0x84, RAW_IO, sizeof(raw_io), &raw_io)) {
-			ctx->policy_failed = true;
-			InterlockedExchange(&ctx->faulted, 1);
-			dev_err(bus->dev, "RAW_IO restore failed: error=%lu; reopen device required\n", GetLastError());
-		}
+		/*
+		 * RAW_IO は 0x84 だけの設定で制御パイプには影響せず、次回の受信開始で worker が
+		 * 設定し直す。パイプ自体が使えない場合はその設定と転送の投入が失敗するため、
+		 * 復元の失敗はデバイスの故障として扱わずに記録する。
+		 */
+		if (!WinUsb_SetPipePolicy(winusb, 0x84, RAW_IO, sizeof(raw_io), &raw_io))
+			dev_err(bus->dev, "RAW_IO restore failed: error=%lu\n", GetLastError());
 	}
 	InterlockedExchange(&ctx->streaming, 0);
 	dev_dbg(bus->dev, "itedtv_winusb_worker: exit\n");
@@ -554,9 +555,9 @@ static int itedtv_usb_start_streaming(struct itedtv_bus *bus, itedtv_bus_stream_
 	dev_dbg(bus->dev, "itedtv_usb_start_streaming\n");
 
 	EnterCriticalSection(&ctx->lock);
-	if (ctx->worker_thread || ctx->policy_failed || ctx->quarantined) {
+	if (ctx->worker_thread || ctx->quarantined) {
 		LeaveCriticalSection(&ctx->lock);
-		return ctx->policy_failed || ctx->quarantined ? -EIO : -EBUSY;
+		return ctx->quarantined ? -EIO : -EBUSY;
 	}
 
 	ctx->stream_handler = stream_handler;
@@ -698,7 +699,7 @@ static int itedtv_usb_stop_streaming(struct itedtv_bus *bus)
 	LeaveCriticalSection(&ctx->lock);
 
 	dev_dbg(bus->dev, "itedtv_usb_stop_streaming: exit\n");
-	return ctx->quarantined || ctx->policy_failed ? -EIO : 0;
+	return ctx->quarantined ? -EIO : 0;
 }
 
 int itedtv_bus_init(struct itedtv_bus *bus)
