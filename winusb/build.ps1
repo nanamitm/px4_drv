@@ -382,7 +382,11 @@ if ($LASTEXITCODE -ne 0) { throw 'PX-BCUD package validation regression failed.'
 & (Join-Path $PSScriptRoot 'tests/distribution_archive_test.ps1')
 
 # 共通 DLL/EXE の生成後に helper・依存 DLL・対応ソースを32bit/64bit配布へ追加する。
-& (Join-Path $PSScriptRoot 'tools/rtlsdr/build-bondriver.ps1') -SkipNativeBuild
+foreach ($runtime_architecture in @('x86', 'x64')) {
+    # VsDevCmd が追加する PATH/INCLUDE/LIB を次の architecture へ持ち越さない。
+    & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot 'tools/rtlsdr/build-bondriver.ps1') -SkipNativeBuild -Architecture $runtime_architecture
+    if ($LASTEXITCODE -ne 0) { throw "RTL-SDR runtime packaging failed ($runtime_architecture)" }
+}
 & python (Join-Path $PSScriptRoot 'tools/check_rtlsdr_package.py')
 if ($LASTEXITCODE -ne 0) { throw 'RTL-SDR package validation failed.' }
 & python (Join-Path $PSScriptRoot 'tests/rtlsdr_package_test.py')
