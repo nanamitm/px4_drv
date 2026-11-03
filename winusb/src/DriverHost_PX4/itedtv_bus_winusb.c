@@ -40,6 +40,8 @@ struct itedtv_usb_context {
 	LONG startup_result;
 	/* RAW_IO の復元に失敗したパイプは再利用しない。 */
 	bool policy_failed;
+	bool quarantined;
+	LONG faulted;
 };
 
 static int winerr_to_errno(struct device *dev)
@@ -69,7 +71,15 @@ static int winerr_to_errno(struct device *dev)
 		break;
 
 	case ERROR_BAD_COMMAND:
+	case ERROR_GEN_FAILURE:
 		ret = EIO;
+		break;
+	case ERROR_DEVICE_NOT_CONNECTED:
+	case ERROR_NO_SUCH_DEVICE:
+		ret = ENODEV;
+		break;
+	case ERROR_OPERATION_ABORTED:
+		ret = ECANCELED;
 		break;
 
 	default:
@@ -89,8 +99,9 @@ static int itedtv_usb_ctrl_tx(struct itedtv_bus *bus, void *buf, int len)
 	ULONG rlen = 0;
 	OVERLAPPED ol = {0};
 
-	if (!buf || !len)
+	if (!buf || len <= 0)
 		return -EINVAL;
+	if (InterlockedCompareExchange(&ctx->faulted, 0, 0)) return -EIO;
 
 	ol.hEvent = ctx->ctrl_event[0];
 	ResetEvent(ol.hEvent);
@@ -108,10 +119,13 @@ static int itedtv_usb_ctrl_tx(struct itedtv_bus *bus, void *buf, int len)
 	if (!ret) {
 		if (!WinUsb_GetOverlappedResult(dev->winusb, &ol, &rlen, FALSE))
 			ret = -winerr_to_errno(bus->dev);
+		else if (rlen != (ULONG)len)
+			ret = -EIO;
 	}
 
 	if (ret) {
 		WinUsb_AbortPipe(dev->winusb, 0x02);
+		CancelIoEx(dev->dev, &ol);
 		/* 中止要求だけでは stack 上の OVERLAPPED/呼び出し元バッファを解放できない。 */
 		WinUsb_GetOverlappedResult(dev->winusb, &ol, &rlen, TRUE);
 	}
@@ -127,8 +141,9 @@ static int itedtv_usb_ctrl_rx(struct itedtv_bus *bus, void *buf, int *len)
 	ULONG rlen = 0;
 	OVERLAPPED ol = {0};
 
-	if (!buf || !len || !*len)
+	if (!buf || !len || *len <= 0)
 		return -EINVAL;
+	if (InterlockedCompareExchange(&ctx->faulted, 0, 0)) return -EIO;
 
 	ol.hEvent = ctx->ctrl_event[1];
 	ResetEvent(ol.hEvent);
@@ -150,6 +165,7 @@ static int itedtv_usb_ctrl_rx(struct itedtv_bus *bus, void *buf, int *len)
 
 	if (ret) {
 		WinUsb_AbortPipe(dev->winusb, 0x81);
+		CancelIoEx(dev->dev, &ol);
 		WinUsb_GetOverlappedResult(dev->winusb, &ol, &rlen, TRUE);
 		*len = -1;
 	} else {
@@ -163,11 +179,13 @@ static int itedtv_usb_stream_rx(struct itedtv_bus *bus, void *buf, int *len, int
 {
 	int ret = 0;
 	struct usb_device *dev = bus->usb.dev;
+	struct itedtv_usb_context *ctx = bus->usb.priv;
 	ULONG rlen = 0;
 	OVERLAPPED ol = {0};
 
-	if (!buf || !len || !*len)
+	if (!buf || !len || *len <= 0)
 		return -EINVAL;
+	if (InterlockedCompareExchange(&ctx->faulted, 0, 0)) return -EIO;
 
 	ol.hEvent = CreateEventW(NULL, FALSE, FALSE, NULL);
 	if (!ol.hEvent) {
@@ -192,6 +210,7 @@ static int itedtv_usb_stream_rx(struct itedtv_bus *bus, void *buf, int *len, int
 
 	if (ret) {
 		WinUsb_AbortPipe(dev->winusb, 0x84);
+		CancelIoEx(dev->dev, &ol);
 		WinUsb_GetOverlappedResult(dev->winusb, &ol, &rlen, TRUE);
 		*len = -1;
 	} else {
@@ -289,6 +308,8 @@ static void itedtv_usb_free_work_buffers(struct itedtv_usb_context *ctx)
 
 static void itedtv_usb_clean_context(struct itedtv_usb_context *ctx)
 {
+	/* 完了未確認の IRP が参照する領域は、プロセス終了まで隔離する。 */
+	if (ctx->quarantined) return;
 	if (ctx->works) {
 		itedtv_usb_free_work_buffers(ctx);
 		free(ctx->works);
@@ -305,16 +326,28 @@ static void itedtv_usb_drain(struct itedtv_usb_context *ctx)
 {
 	/* 投入済み要求は成功/中止の完了を回収するまで buffer と event を保持する。 */
 	WinUsb_AbortPipe(ctx->bus->usb.dev->winusb, 0x84);
+	const ULONGLONG deadline = GetTickCount64() + ctx->bus->usb.ctrl_timeout;
 	for (uint32_t i = 0; i < ctx->num_works; ++i) {
 		struct itedtv_usb_work *work = &ctx->works[i];
 		if (work->submitted) {
 			ULONG received = 0;
 			CancelIoEx(ctx->bus->usb.dev->dev, &work->ol);
-			WinUsb_GetOverlappedResult(ctx->bus->usb.dev->winusb, &work->ol, &received, TRUE);
+			const ULONGLONG now = GetTickCount64();
+			WaitForSingleObject(work->ol.hEvent, now < deadline ? (DWORD)(deadline - now) : 0);
+			if (!WinUsb_GetOverlappedResult(ctx->bus->usb.dev->winusb, &work->ol, &received, FALSE)) {
+				DWORD error = GetLastError();
+				if (error == ERROR_IO_INCOMPLETE || error == ERROR_INVALID_HANDLE) {
+					ctx->quarantined = true;
+					InterlockedExchange(&ctx->faulted, 1);
+					continue;
+				}
+			}
 			work->can_submit = true;
 			work->submitted = false;
 		}
 	}
+	if (ctx->quarantined)
+		dev_err(ctx->bus->dev, "USB cancellation incomplete; buffers retained, device restart required\n");
 }
 
 unsigned __stdcall itedtv_winusb_worker(void *arg)
@@ -423,10 +456,11 @@ startup_failed:
 
 exit:
 	itedtv_usb_drain(ctx);
-	if (raw_io) {
+	if (raw_io && !ctx->quarantined) {
 		raw_io = 0;
 		if (!WinUsb_SetPipePolicy(winusb, 0x84, RAW_IO, sizeof(raw_io), &raw_io)) {
 			ctx->policy_failed = true;
+			InterlockedExchange(&ctx->faulted, 1);
 			dev_err(bus->dev, "RAW_IO restore failed: error=%lu; reopen device required\n", GetLastError());
 		}
 	}
@@ -448,9 +482,9 @@ static int itedtv_usb_start_streaming(struct itedtv_bus *bus, itedtv_bus_stream_
 	dev_dbg(bus->dev, "itedtv_usb_start_streaming\n");
 
 	EnterCriticalSection(&ctx->lock);
-	if (ctx->worker_thread || ctx->policy_failed) {
+	if (ctx->worker_thread || ctx->policy_failed || ctx->quarantined) {
 		LeaveCriticalSection(&ctx->lock);
-		return ctx->policy_failed ? -EIO : -EBUSY;
+		return ctx->policy_failed || ctx->quarantined ? -EIO : -EBUSY;
 	}
 
 	ctx->stream_handler = stream_handler;
@@ -592,7 +626,7 @@ static int itedtv_usb_stop_streaming(struct itedtv_bus *bus)
 	LeaveCriticalSection(&ctx->lock);
 
 	dev_dbg(bus->dev, "itedtv_usb_stop_streaming: exit\n");
-	return 0;
+	return ctx->quarantined || ctx->policy_failed ? -EIO : 0;
 }
 
 int itedtv_bus_init(struct itedtv_bus *bus)
@@ -703,6 +737,7 @@ int itedtv_bus_init(struct itedtv_bus *bus)
 
 int itedtv_bus_term(struct itedtv_bus *bus)
 {
+	int ret = 0;
 	if (!bus)
 		return -EINVAL;
 
@@ -713,6 +748,11 @@ int itedtv_bus_term(struct itedtv_bus *bus)
 
 		if (ctx) {
 			itedtv_usb_stop_streaming(bus);
+			if (ctx->quarantined) {
+				/* DeviceBase はUSB handleを閉じるが、遅延完了先の領域は解放しない。 */
+				ret = -EIO;
+				break;
+			}
 			CloseHandle(ctx->ctrl_event[0]);
 			CloseHandle(ctx->ctrl_event[1]);
 			DeleteCriticalSection(&ctx->lock);
@@ -730,5 +770,5 @@ int itedtv_bus_term(struct itedtv_bus *bus)
 
 	memset(bus, 0, sizeof(*bus));
 
-	return 0;
+	return ret;
 }

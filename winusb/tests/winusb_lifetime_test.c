@@ -7,17 +7,20 @@
 #include <stdbool.h>
 
 static LONG outstanding, submissions, aborts;
-static ULONG maximum = 4096;
-static USHORT packet = 512;
-static bool fail_restore, fail_submission;
+static ULONG mock_maximum = 4096;
+static USHORT mock_packet = 512;
+static bool fail_restore, fail_submission, short_write, stuck_transfer;
+static LONG fail_submission_at;
 static BOOL WINAPI mock_read(WINUSB_INTERFACE_HANDLE h, UCHAR ep, PUCHAR b, ULONG n, PULONG r, LPOVERLAPPED ol)
 {
     (void)h; (void)b; (void)n; (void)r;
-    if (fail_submission) { SetLastError(ERROR_BAD_COMMAND); return FALSE; }
+    if (fail_submission || (fail_submission_at && submissions >= fail_submission_at)) { SetLastError(ERROR_BAD_COMMAND); return FALSE; }
     ol->Internal = 1;
+    ol->InternalHigh = n;
+    ol->Offset = ep;
     InterlockedIncrement(&outstanding);
     InterlockedIncrement(&submissions);
-    if (ep == 0x84) SetEvent(ol->hEvent);
+    if (ep != 0x81 && !stuck_transfer) SetEvent(ol->hEvent);
     SetLastError(ERROR_IO_PENDING);
     return FALSE;
 }
@@ -28,13 +31,13 @@ static BOOL WINAPI mock_result(WINUSB_INTERFACE_HANDLE h, LPOVERLAPPED ol, PULON
         SetLastError(ERROR_IO_INCOMPLETE); return FALSE;
     }
     if (ol->Internal == 1) { ol->Internal = 0; InterlockedDecrement(&outstanding); }
-    *n = 188;
+    *n = short_write && ol->Offset == 0x02 ? 0 : (ULONG)ol->InternalHigh;
     return TRUE;
 }
 static BOOL WINAPI mock_abort(WINUSB_INTERFACE_HANDLE h, UCHAR ep)
 { (void)h; (void)ep; InterlockedIncrement(&aborts); return TRUE; }
 static BOOL WINAPI mock_cancel(HANDLE h, LPOVERLAPPED ol)
-{ (void)h; SetEvent(ol->hEvent); return TRUE; }
+{ (void)h; if (!stuck_transfer) SetEvent(ol->hEvent); return TRUE; }
 static BOOL WINAPI mock_reset(WINUSB_INTERFACE_HANDLE h, UCHAR ep)
 { (void)h; (void)ep; return TRUE; }
 static BOOL WINAPI mock_set(WINUSB_INTERFACE_HANDLE h, UCHAR ep, ULONG policy, ULONG n, PVOID value)
@@ -44,11 +47,11 @@ static BOOL WINAPI mock_set(WINUSB_INTERFACE_HANDLE h, UCHAR ep, ULONG policy, U
     return TRUE;
 }
 static BOOL WINAPI mock_get(WINUSB_INTERFACE_HANDLE h, UCHAR ep, ULONG policy, PULONG n, PVOID value)
-{ (void)h; (void)ep; (void)policy; *n = sizeof(maximum); *(ULONG *)value = maximum; return TRUE; }
+{ (void)h; (void)ep; (void)policy; *n = sizeof(mock_maximum); *(ULONG *)value = mock_maximum; return TRUE; }
 static BOOL WINAPI mock_interface(WINUSB_INTERFACE_HANDLE h, UCHAR alt, PUSB_INTERFACE_DESCRIPTOR info)
 { (void)h; (void)alt; ZeroMemory(info, sizeof(*info)); info->bNumEndpoints = 1; return TRUE; }
 static BOOL WINAPI mock_pipe(WINUSB_INTERFACE_HANDLE h, UCHAR alt, UCHAR index, PWINUSB_PIPE_INFORMATION info)
-{ (void)h; (void)alt; (void)index; ZeroMemory(info, sizeof(*info)); info->PipeId = 0x84; info->PipeType = UsbdPipeTypeBulk; info->MaximumPacketSize = packet; return TRUE; }
+{ (void)h; (void)alt; (void)index; ZeroMemory(info, sizeof(*info)); info->PipeId = 0x84; info->PipeType = UsbdPipeTypeBulk; info->MaximumPacketSize = mock_packet; return TRUE; }
 
 #define WinUsb_ReadPipe mock_read
 #define WinUsb_WritePipe mock_read
@@ -98,15 +101,44 @@ int main(void)
     CHECK(itedtv_usb_start_streaming(&bus, stream, ctx) != 0);
     CHECK(outstanding == 0);
     fail_submission = false;
+    fail_submission_at = submissions + 2;
+    CHECK(itedtv_usb_start_streaming(&bus, stream, ctx) == 0);
+    CHECK(itedtv_usb_stop_streaming(&bus) == 0 && outstanding == 0);
+    fail_submission_at = 0;
     unsigned char response[8]; int len = sizeof(response);
     CHECK(itedtv_usb_ctrl_rx(&bus, response, &len) == -ETIMEDOUT);
     CHECK(outstanding == 0);
+    len = -1;
+    CHECK(itedtv_usb_ctrl_rx(&bus, response, &len) == -EINVAL);
+    CHECK(itedtv_usb_ctrl_tx(&bus, response, -1) == -EINVAL);
+    short_write = true;
+    CHECK(itedtv_usb_ctrl_tx(&bus, response, sizeof(response)) == -EIO && outstanding == 0);
+    short_write = false;
+    SetLastError(ERROR_DEVICE_NOT_CONNECTED);
+    CHECK(winerr_to_errno(&log) == ENODEV);
     fail_restore = true;
     CHECK(itedtv_usb_start_streaming(&bus, stream, ctx) == 0);
-    CHECK(itedtv_usb_stop_streaming(&bus) == 0);
+    CHECK(itedtv_usb_stop_streaming(&bus) == -EIO);
     CHECK(outstanding == 0 && ctx->policy_failed);
     CHECK(itedtv_usb_start_streaming(&bus, stream, ctx) == -EIO);
     CHECK(itedtv_bus_term(&bus) == 0);
+    /* 中止しても完了しない模擬IRPは、再利用・解放せず有限時間で隔離する。 */
+    fail_restore = false; stuck_transfer = true;
+    bus.type = ITEDTV_BUS_USB; bus.dev = &log; bus.usb.dev = &usb;
+    bus.usb.ctrl_timeout = 10; bus.usb.streaming.urb_num = 2;
+    bus.usb.streaming.urb_buffer_size = 512;
+    CHECK(itedtv_bus_init(&bus) == 0);
+    ctx = bus.usb.priv;
+    CHECK(itedtv_usb_start_streaming(&bus, stream, ctx) == 0);
+    ULONGLONG before_stop = GetTickCount64();
+    CHECK(itedtv_usb_stop_streaming(&bus) == -EIO && ctx->quarantined);
+    CHECK(GetTickCount64() - before_stop < 2000);
+    CHECK(ctx->works != NULL && outstanding == 2);
+    CHECK(itedtv_usb_start_streaming(&bus, stream, ctx) == -EIO);
+    void *late_completion_buffer = ctx->works[0].buffer;
+    CHECK(itedtv_bus_term(&bus) == -EIO);
+    /* 遅延したkernel書き込み先がterm後も有効である。領域は意図的に終了まで保持する。 */
+    memset(late_completion_buffer, 0, 512);
     printf("winusb_lifetime_test: %s\n", checks ? "FAILED" : "PASS");
     return checks ? 1 : 0;
 }
