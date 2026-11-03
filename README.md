@@ -10,6 +10,8 @@ PLEX 社の [Webサイト](http://plex-net.co.jp) にて配布されている公
 
 ### 変更点 (WinUSB 版)
 
+- USB 転送終了時の完了回収、RAW_IO 上限検査、カード接続の世代管理、PX-MLT 共有電源のエラー管理、同型機の明示選択を補強しました。高精度待機は比較測定用の任意設定です。[Windows デバイス操作の設定と検証](winusb/docs/device-operations.md)を参照してください。
+
 - RTL2838UHIDIR（USB ID `0BDA:2838`）向けに、受信用 Interface 0 の WinUSB INF、機器診断・I/Q 収録ツールと、独立したソフトウェア復調 helper を使うワンセグ BonDriver を追加（Windows WinUSB 版のみ、実験的）。[診断・収録手順](winusb/tools/rtlsdr/README.md)と[導入手順](docs/rtlsdr-install.md)と[技術資料・検証記録](winusb/docs/rtlsdr-bondriver.md)を参照。
 - PLEX PX-BCUD に実験的に対応（Windows WinUSB版のみ、アンテナへの外部給電が必要）。通常配布に専用BonDriverとINFを同梱します。BS/CS受信、チャンネル切り替え、TVTestでのチャンネルスキャン・視聴、USBの抜き差しを確認済み。長時間録画とスリープ復帰後の動作は未確認です。導入方法と検証範囲は[PX-BCUD対応の詳細](docs/px-bcud-winusb.md)を参照。
 - Sony torne CECH-ZD1J に実験的に対応（Windows WinUSB版のみ）。復調と内蔵カードリーダーの制御を `DriverHost_PX4.exe` に統合。現行の統合版と配布設定の組み合わせは実機未検証です。過去の別設定・旧実装での実測結果とは区別し、検証範囲と導入方法は[統合手順](winusb/docs/cech-zd1j-integration.md)を参照。

@@ -349,6 +349,9 @@
     <ClInclude Include="isdb2056_device.hpp" />
     <ClInclude Include="isdbt2071_device.hpp" />
     <ClInclude Include="misc_win.h" />
+    <ClInclude Include="device_wait.h" />
+    <ClInclude Include="device_identity.hpp" />
+    <ClInclude Include="backend_power_state.hpp" />
     <ClInclude Include="notify_icon.hpp" />
     <ClInclude Include="pipe_server.hpp" />
     <ClInclude Include="px4_device.hpp" />
