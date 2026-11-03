@@ -3,17 +3,19 @@
 #include "receiver_manager.hpp"
 
 #include <random>
+#include "msg.h"
 
 namespace px4 {
 
-bool ReceiverManager::Register(px4::command::ReceiverInfo &info, px4::ReceiverBase *receiver)
+bool ReceiverManager::Register(px4::command::ReceiverInfo &info, px4::ReceiverBase *receiver,
+	const DeviceIdentity &identity)
 {
 	std::lock_guard<std::shared_mutex> lock(mtx_);
 
 	if (data_.count(receiver))
 		return false;
 
-	data_.emplace(receiver, ReceiverData{ info, false });
+	data_.emplace(receiver, ReceiverData{ info, false, identity });
 	return true;
 }
 
@@ -34,13 +36,37 @@ px4::ReceiverBase* ReceiverManager::SearchAndOpen(px4::command::ReceiverInfo &ke
 {
 	std::lock_guard<std::shared_mutex> lock(mtx_);
 
+	if (!wmemchr(key.device_name, L'\0', sizeof(key.device_name) / sizeof(wchar_t)) ||
+		!wmemchr(key.receiver_name, L'\0', sizeof(key.receiver_name) / sizeof(wchar_t)))
+		return nullptr;
+	const std::wstring selector = key.device_name;
+	const bool explicit_device = IsDeviceSelector(selector);
+	if (explicit_device) {
+		/* 空き受信機だけを調べると、片方が使用中の重複serialを見落とす。 */
+		std::wstring matched_path;
+		for (const auto &entry : data_) {
+			if (!MatchesDeviceSelector(selector, entry.second.identity)) continue;
+			if (!matched_path.empty() && matched_path != entry.second.identity.path) {
+				msg_err("Ambiguous device selector: %ls; use @id:<path ID>\n", selector.c_str());
+				return nullptr;
+			}
+			matched_path = entry.second.identity.path;
+		}
+		if (matched_path.empty()) {
+			msg_err("Device selector not found: %ls\n", selector.c_str());
+			return nullptr;
+		}
+	}
+
 	for (auto it = data_.cbegin(); it != data_.cend(); ++it) {
 		const px4::command::ReceiverInfo& k = it->second.info;
 
 		if (k.data_id)
 			continue;
 
-		if (key.device_name[0] && wcscmp(key.device_name, k.device_name))
+		if (explicit_device && !MatchesDeviceSelector(selector, it->second.identity))
+			continue;
+		if (!explicit_device && key.device_name[0] && wcscmp(key.device_name, k.device_name))
 			continue;
 
 		if (memcmp(&key.device_guid, &empty_guid, sizeof(key.device_guid)) &&

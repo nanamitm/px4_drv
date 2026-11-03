@@ -54,6 +54,10 @@ if ((Get-Command msbuild -ErrorAction SilentlyContinue) -eq $null) {
 # MSBuild を使用してソリューションをビルド
 $build_platforms = @('x86', 'x64')
 foreach ($build_platform in $build_platforms) {
+    msbuild tests/device_identity_test.vcxproj /p:"Configuration=Release-static;Platform=$build_platform;PlatformToolset=v143"
+    if ($LASTEXITCODE -ne 0) { throw "Device identity test build failed ($build_platform)" }
+    & "build/$build_platform/Release-static/device_identity_test.exe"
+    if ($LASTEXITCODE -ne 0) { throw "Device identity test failed ($build_platform)" }
     msbuild tests/backend_power_test.vcxproj /p:"Configuration=Release-static;Platform=$build_platform;PlatformToolset=v143"
     if ($LASTEXITCODE -ne 0) { throw "Backend power test build failed ($build_platform)" }
     & "build/$build_platform/Release-static/backend_power_test.exe"

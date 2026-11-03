@@ -265,7 +265,7 @@ int Px4Device::Init()
 		ri.index = it->index;
 		ri.data_id = 0;
 
-		receiver_manager_.Register(ri, receivers_[((it->systems == px4::SystemType::ISDB_T) ? 2 : 0) + it->index].get());
+		receiver_manager_.Register(ri, receivers_[((it->systems == px4::SystemType::ISDB_T) ? 2 : 0) + it->index].get(), GetDeviceIdentity());
 	}
 
 	return 0;

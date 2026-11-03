@@ -241,7 +241,7 @@ int PxMltDevice::Init()
 		ri.index = it->index;
 		ri.data_id = 0;
 
-		receiver_manager_.Register(ri, receivers_[it->index].get());
+		receiver_manager_.Register(ri, receivers_[it->index].get(), GetDeviceIdentity());
 	}
 
 	return 0;

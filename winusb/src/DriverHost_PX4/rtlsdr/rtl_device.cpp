@@ -264,7 +264,7 @@ int Device::Init()
     wcscpy_s(info.device_name,device_def_.name.c_str());info.device_guid=device_def_.guid;
     wcscpy_s(info.receiver_name,definition.name.c_str());info.receiver_guid=definition.guid;
     info.systems=SystemType::ISDB_T;info.index=definition.index;
-    if(!receiver_manager_.Register(info,receiver_.get())){receiver_.reset();return -EIO;}
+    if(!receiver_manager_.Register(info,receiver_.get(),GetDeviceIdentity())){receiver_.reset();return -EIO;}
     return 0;
 }
 void Device::Term(){SetAvailability(false);if(receiver_){receiver_manager_.Unregister(receiver_.get());receiver_.reset();}}

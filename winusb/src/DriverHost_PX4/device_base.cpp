@@ -34,7 +34,7 @@ DeviceBase::DeviceBase(const std::wstring &path, const px4::DeviceDefinition &de
 
 DeviceBase::DeviceBase(const std::wstring &path, const px4::DeviceDefinition &device_def, std::uintptr_t index, px4::ReceiverManager &receiver_manager, bool short_serial_request)
 	: device_def_(device_def),
-	receiver_manager_(receiver_manager)
+	receiver_manager_(receiver_manager), device_path_(path)
 {
 	strncpy_s(dev_.driver_name, "px4_winusb", sizeof("px4_winusb"));
 	sprintf_s(dev_.device_name, "%" PRIuPTR, index);
@@ -117,6 +117,8 @@ DeviceBase::DeviceBase(const std::wstring &path, const px4::DeviceDefinition &de
 			serial_descriptor->bString,
 			(serial_descriptor->bLength - header_size) / sizeof(wchar_t));
 	}
+	msg_info("USB device: model=%ls id=%ls serial=%ls\n", device_def_.name.c_str(),
+		GetDeviceIdentity().PathId().c_str(), usb_serial_number_.c_str());
 }
 
 DeviceBase::~DeviceBase()
