@@ -21,6 +21,7 @@ struct itedtv_usb_work {
 	void *buffer;
 	size_t size;
 	bool can_submit;
+	bool submitted;
 };
 
 struct itedtv_usb_context {
@@ -37,6 +38,8 @@ struct itedtv_usb_context {
 	HANDLE worker_thread;
 	HANDLE startup_event;
 	LONG startup_result;
+	/* RAW_IO の復元に失敗したパイプは再利用しない。 */
+	bool policy_failed;
 };
 
 static int winerr_to_errno(struct device *dev)
@@ -84,7 +87,7 @@ static int itedtv_usb_ctrl_tx(struct itedtv_bus *bus, void *buf, int len)
 	struct usb_device *dev = bus->usb.dev;
 	struct itedtv_usb_context *ctx = bus->usb.priv;
 	ULONG rlen = 0;
-	OVERLAPPED ol;
+	OVERLAPPED ol = {0};
 
 	if (!buf || !len)
 		return -EINVAL;
@@ -107,8 +110,11 @@ static int itedtv_usb_ctrl_tx(struct itedtv_bus *bus, void *buf, int len)
 			ret = -winerr_to_errno(bus->dev);
 	}
 
-	if (ret)
+	if (ret) {
 		WinUsb_AbortPipe(dev->winusb, 0x02);
+		/* 中止要求だけでは stack 上の OVERLAPPED/呼び出し元バッファを解放できない。 */
+		WinUsb_GetOverlappedResult(dev->winusb, &ol, &rlen, TRUE);
+	}
 
 	return ret;
 }
@@ -119,7 +125,7 @@ static int itedtv_usb_ctrl_rx(struct itedtv_bus *bus, void *buf, int *len)
 	struct usb_device *dev = bus->usb.dev;
 	struct itedtv_usb_context *ctx = bus->usb.priv;
 	ULONG rlen = 0;
-	OVERLAPPED ol;
+	OVERLAPPED ol = {0};
 
 	if (!buf || !len || !*len)
 		return -EINVAL;
@@ -144,6 +150,7 @@ static int itedtv_usb_ctrl_rx(struct itedtv_bus *bus, void *buf, int *len)
 
 	if (ret) {
 		WinUsb_AbortPipe(dev->winusb, 0x81);
+		WinUsb_GetOverlappedResult(dev->winusb, &ol, &rlen, TRUE);
 		*len = -1;
 	} else {
 		*len = rlen;
@@ -157,7 +164,7 @@ static int itedtv_usb_stream_rx(struct itedtv_bus *bus, void *buf, int *len, int
 	int ret = 0;
 	struct usb_device *dev = bus->usb.dev;
 	ULONG rlen = 0;
-	OVERLAPPED ol;
+	OVERLAPPED ol = {0};
 
 	if (!buf || !len || !*len)
 		return -EINVAL;
@@ -185,6 +192,7 @@ static int itedtv_usb_stream_rx(struct itedtv_bus *bus, void *buf, int *len, int
 
 	if (ret) {
 		WinUsb_AbortPipe(dev->winusb, 0x84);
+		WinUsb_GetOverlappedResult(dev->winusb, &ol, &rlen, TRUE);
 		*len = -1;
 	} else {
 		*len = rlen;
@@ -293,6 +301,22 @@ static void itedtv_usb_clean_context(struct itedtv_usb_context *ctx)
 	ctx->works = NULL;
 }
 
+static void itedtv_usb_drain(struct itedtv_usb_context *ctx)
+{
+	/* 投入済み要求は成功/中止の完了を回収するまで buffer と event を保持する。 */
+	WinUsb_AbortPipe(ctx->bus->usb.dev->winusb, 0x84);
+	for (uint32_t i = 0; i < ctx->num_works; ++i) {
+		struct itedtv_usb_work *work = &ctx->works[i];
+		if (work->submitted) {
+			ULONG received = 0;
+			CancelIoEx(ctx->bus->usb.dev->dev, &work->ol);
+			WinUsb_GetOverlappedResult(ctx->bus->usb.dev->winusb, &work->ol, &received, TRUE);
+			work->can_submit = true;
+			work->submitted = false;
+		}
+	}
+}
+
 unsigned __stdcall itedtv_winusb_worker(void *arg)
 {
 	struct itedtv_usb_context *ctx = arg;
@@ -321,6 +345,7 @@ unsigned __stdcall itedtv_winusb_worker(void *arg)
 			continue;
 
 		works[i].can_submit = false;
+		works[i].submitted = true;
 		ResetEvent(works[i].ol.hEvent);
 
 		if (WinUsb_ReadPipe(winusb, 0x84, works[i].buffer, (ULONG)works[i].size, NULL, &works[i].ol))
@@ -332,6 +357,7 @@ unsigned __stdcall itedtv_winusb_worker(void *arg)
 		startup_result = -winerr_to_errno(bus->dev);
 		dev_err(bus->dev, "itedtv_winusb_worker: WinUsb_ReadPipe() 1 failed. (%u, %u)\n", i, GetLastError());
 		works[i].can_submit = true;
+		works[i].submitted = false;
 
 		num = i;
 		break;
@@ -371,9 +397,11 @@ unsigned __stdcall itedtv_winusb_worker(void *arg)
 
 		if (WinUsb_GetOverlappedResult(winusb, &work->ol, &rlen, TRUE))
 			ctx->stream_handler(ctx->ctx, work->buffer, rlen);
+		work->submitted = false;
 
 		next_idx = (idx + 1) % num;
 		ResetEvent(work->ol.hEvent);
+		work->submitted = true;
 
 		if (WinUsb_ReadPipe(winusb, 0x84, work->buffer, (ULONG)work->size, NULL, &work->ol))
 			continue;
@@ -383,13 +411,7 @@ unsigned __stdcall itedtv_winusb_worker(void *arg)
 
 		dev_err(bus->dev, "itedtv_winusb_worker: WinUsb_ReadPipe() 2 failed. (%u, %u)\n", idx, GetLastError());
 		work->can_submit = true;
-	}
-
-	WinUsb_AbortPipe(winusb, 0x84);
-
-	if (raw_io) {
-		raw_io = 0;
-		WinUsb_SetPipePolicy(winusb, 0x84, RAW_IO, sizeof(raw_io), &raw_io);
+		work->submitted = false;
 	}
 
 	goto exit;
@@ -398,12 +420,17 @@ startup_failed:
 	InterlockedExchange(&ctx->streaming, 0);
 	InterlockedExchange(&ctx->startup_result, startup_result ? startup_result : -EIO);
 	SetEvent(ctx->startup_event);
-	if (raw_io) {
-		raw_io = 0;
-		WinUsb_SetPipePolicy(winusb, 0x84, RAW_IO, sizeof(raw_io), &raw_io);
-	}
 
 exit:
+	itedtv_usb_drain(ctx);
+	if (raw_io) {
+		raw_io = 0;
+		if (!WinUsb_SetPipePolicy(winusb, 0x84, RAW_IO, sizeof(raw_io), &raw_io)) {
+			ctx->policy_failed = true;
+			dev_err(bus->dev, "RAW_IO restore failed: error=%lu; reopen device required\n", GetLastError());
+		}
+	}
+	InterlockedExchange(&ctx->streaming, 0);
 	dev_dbg(bus->dev, "itedtv_winusb_worker: exit\n");
 	return 0;
 }
@@ -421,6 +448,10 @@ static int itedtv_usb_start_streaming(struct itedtv_bus *bus, itedtv_bus_stream_
 	dev_dbg(bus->dev, "itedtv_usb_start_streaming\n");
 
 	EnterCriticalSection(&ctx->lock);
+	if (ctx->worker_thread || ctx->policy_failed) {
+		LeaveCriticalSection(&ctx->lock);
+		return ctx->policy_failed ? -EIO : -EBUSY;
+	}
 
 	ctx->stream_handler = stream_handler;
 	ctx->ctx = context;
@@ -434,8 +465,23 @@ static int itedtv_usb_start_streaming(struct itedtv_bus *bus, itedtv_bus_stream_
 		goto fail;
 	}
 
-	if (!ctx->no_raw_io && (buf_size % bus->usb.max_bulk_size))
-		buf_size += bus->usb.max_bulk_size - (buf_size % bus->usb.max_bulk_size);
+	if (!ctx->no_raw_io) {
+		ULONG maximum = 0, length = sizeof(maximum);
+		const u32 packet = bus->usb.max_bulk_size;
+		if (!packet || !WinUsb_GetPipePolicy(bus->usb.dev->winusb, 0x84,
+			MAXIMUM_TRANSFER_SIZE, &length, &maximum)) {
+			ret = packet ? -winerr_to_errno(bus->dev) : -EINVAL;
+			goto fail;
+		}
+		/* 加算前に上限との差を検査し、32bit の丸め溢れも拒否する。 */
+		const u32 padding = (packet - buf_size % packet) % packet;
+		if (length != sizeof(maximum) || buf_size > maximum || padding > maximum - buf_size) {
+			dev_err(bus->dev, "RAW_IO transfer exceeds limit: requested=%u packet=%u maximum=%lu\n", buf_size, packet, maximum);
+			ret = -EMSGSIZE;
+			goto fail;
+		}
+		buf_size += padding;
+	}
 
 	if (ctx->works && num != ctx->num_works) {
 		itedtv_usb_free_work_buffers(ctx);
@@ -464,7 +510,10 @@ static int itedtv_usb_start_streaming(struct itedtv_bus *bus, itedtv_bus_stream_
 	}
 	InterlockedExchange(&ctx->startup_result, -EIO);
 
-	WinUsb_ResetPipe(bus->usb.dev->winusb, 0x84);
+	if (!WinUsb_ResetPipe(bus->usb.dev->winusb, 0x84)) {
+		ret = -winerr_to_errno(bus->dev);
+		goto fail;
+	}
 	InterlockedExchange(&ctx->streaming, 1);
 
 	ctx->worker_thread = (HANDLE)_beginthreadex(NULL, 0, itedtv_winusb_worker, ctx, 0, NULL);
@@ -530,9 +579,13 @@ static int itedtv_usb_stop_streaming(struct itedtv_bus *bus)
 
 	InterlockedExchange(&ctx->streaming, 0);
 
-	WaitForSingleObject(ctx->worker_thread, INFINITE);
-	CloseHandle(ctx->worker_thread);
-	ctx->worker_thread = NULL;
+	if (ctx->worker_thread) {
+		/* Abort は起床の補助。完了回収は worker が所有する。 */
+		WinUsb_AbortPipe(bus->usb.dev->winusb, 0x84);
+		WaitForSingleObject(ctx->worker_thread, INFINITE);
+		CloseHandle(ctx->worker_thread);
+		ctx->worker_thread = NULL;
+	}
 
 	itedtv_usb_clean_context(ctx);
 
@@ -565,13 +618,36 @@ int itedtv_bus_init(struct itedtv_bus *bus)
 			break;
 		}
 
+		/* 実際の endpoint の USB packet size を使い、TS の188byteと区別する。 */
+		USB_INTERFACE_DESCRIPTOR interface_descriptor;
+		WINUSB_PIPE_INFORMATION pipe;
+		bool found = false;
+		if (!WinUsb_QueryInterfaceSettings(bus->usb.dev->winusb, 0, &interface_descriptor)) {
+			ret = -winerr_to_errno(bus->dev);
+			break;
+		}
+		for (UCHAR i = 0; i < interface_descriptor.bNumEndpoints; ++i) {
+			if (!WinUsb_QueryPipe(bus->usb.dev->winusb, 0, i, &pipe)) {
+				ret = -winerr_to_errno(bus->dev);
+				break;
+			}
+			if (pipe.PipeId == 0x84 && pipe.PipeType == UsbdPipeTypeBulk && pipe.MaximumPacketSize) {
+				bus->usb.max_bulk_size = pipe.MaximumPacketSize;
+				found = true;
+			}
+		}
+		if (ret || !found) {
+			if (!ret) ret = -ENODEV;
+			break;
+		}
+
 		raw_io = 1;
 		if (!WinUsb_SetPipePolicy(bus->usb.dev->winusb, 0x84, RAW_IO, sizeof(raw_io), &raw_io)) {
 			ret = -winerr_to_errno(bus->dev);
 			break;
 		}
 
-		ctx = malloc(sizeof(*ctx));
+		ctx = calloc(1, sizeof(*ctx));
 		if (!ctx) {
 			ret = -ENOMEM;
 			break;
@@ -584,6 +660,13 @@ int itedtv_bus_init(struct itedtv_bus *bus)
 				ret = -winerr_to_errno(bus->dev);
 				break;
 			}
+		}
+		if (ret) {
+			for (int i = 0; i < 2; ++i)
+				if (ctx->ctrl_event[i]) CloseHandle(ctx->ctrl_event[i]);
+			DeleteCriticalSection(&ctx->lock);
+			free(ctx);
+			break;
 		}
 		ctx->bus = bus;
 		ctx->stream_handler = NULL;

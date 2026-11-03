@@ -54,6 +54,10 @@ if ((Get-Command msbuild -ErrorAction SilentlyContinue) -eq $null) {
 # MSBuild を使用してソリューションをビルド
 $build_platforms = @('x86', 'x64')
 foreach ($build_platform in $build_platforms) {
+    msbuild tests/winusb_lifetime_test.vcxproj /p:"Configuration=Release-static;Platform=$build_platform;PlatformToolset=v143"
+    if ($LASTEXITCODE -ne 0) { throw "WinUSB lifetime test build failed ($build_platform)" }
+    & "build/$build_platform/Release-static/winusb_lifetime_test.exe"
+    if ($LASTEXITCODE -ne 0) { throw "WinUSB lifetime test failed ($build_platform)" }
     # PX-BCUD の USB 分割境界・I2C 故障注入は実機接続なしで検証する。
     foreach ($bcud_test in @('pxbcud_frontend_test', 'pxbcud_usb_probe', 'pxbcud_live_test', 'pxbcud_usb_diagnostic', 'channel_switch_stress')) {
         msbuild "tests/$bcud_test.vcxproj" /p:"Configuration=Release-static;Platform=$build_platform;PlatformToolset=v143"
