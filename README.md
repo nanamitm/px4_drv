@@ -15,6 +15,7 @@ PLEX 社の [Webサイト](http://plex-net.co.jp) にて配布されている公
 - RTL2838UHIDIR（USB ID `0BDA:2838`）向けに、受信用 Interface 0 の WinUSB INF、機器診断・I/Q 収録ツールと、独立したソフトウェア復調 helper を使うワンセグ BonDriver を追加（Windows WinUSB 版のみ、実験的）。[診断・収録手順](winusb/tools/rtlsdr/README.md)と[導入手順](docs/rtlsdr-install.md)と[技術資料・検証記録](winusb/docs/rtlsdr-bondriver.md)を参照。
 - PLEX PX-BCUD に実験的に対応（Windows WinUSB版のみ、アンテナへの外部給電が必要）。通常配布に専用BonDriverとINFを同梱します。BS/CS受信、チャンネル切り替え、TVTestでのチャンネルスキャン・視聴、USBの抜き差しを確認済み。長時間録画とスリープ復帰後の動作は未確認です。導入方法と検証範囲は[PX-BCUD対応の詳細](docs/px-bcud-winusb.md)を参照。
 - Sony torne CECH-ZD1J に実験的に対応（Windows WinUSB版のみ）。復調と内蔵カードリーダーの制御を `DriverHost_PX4.exe` に統合。現行の統合版と配布設定の組み合わせは実機未検証です。過去の別設定・旧実装での実測結果とは区別し、検証範囲と導入方法は[統合手順](winusb/docs/cech-zd1j-integration.md)を参照。
+- PIX-DT295 (`06b8:103b`) 向けにmAgicVISION常駐方式の実験的バックエンドを追加（Windows WinUSB版のみ、DT295実機は未検証）。既定では無効です。[導入と制約](winusb/docs/pix-dt295.md)、共通経路を検証した[torne常駐方式の実機記録](winusb/docs/torne-resident-validation.md)を参照。
 - 最新coaxの選局改善、複数台管理、初回ロック待ちと自動復帰の設定は[統合版の保守情報](winusb/docs/torne-integration-notes.md)、DLL・EXEの署名と信頼登録は[アプリケーション署名](winusb/docs/application-signing.md)を参照。
 
 動作確認は Windows 10 / Windows 11 (x64) で行っています。

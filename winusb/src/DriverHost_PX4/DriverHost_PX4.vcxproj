@@ -282,6 +282,8 @@
       <ObjectFileName>$(IntDir)siano_frontend.obj</ObjectFileName>
     </ClCompile>
     <ClCompile Include="siano\protocol.c" />
+    <ClCompile Include="dt295\device.cpp"><ObjectFileName>$(IntDir)dt295_device.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="dt295\winusb_transport.cpp" />
     <ClCompile Include="torne\experimental_device.cpp" />
     <ClCompile Include="torne\frontend_native_client.cpp" />
     <ClCompile Include="torne\dib8096_native.cpp" />
@@ -371,6 +373,7 @@
   <ItemGroup>
     <ResourceCompile Include="DriverHost_PX4.rc" />
   </ItemGroup>
+  <Import Project="dt295\upstream.props" />
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">
   </ImportGroup>

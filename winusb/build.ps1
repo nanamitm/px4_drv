@@ -15,6 +15,9 @@ foreach ($rust_target in @('i686-pc-windows-msvc','x86_64-pc-windows-msvc')) {
     if ($rust_target -notin $rust_targets) { throw "Missing Rust target: $rust_target. Run rustup target add $rust_target." }
 }
 
+& python (Join-Path $PSScriptRoot 'tools/run_dt295_tests.py')
+if ($LASTEXITCODE -ne 0) { throw 'PIX-DT295 offline tests failed.' }
+
 # カレントディレクトリに移動
 if ($MyInvocation.MyCommand.Path -ne $null) {
     $CurrentPath = (Split-Path $MyInvocation.MyCommand.Path -Parent)
@@ -138,6 +141,12 @@ foreach ($build_platform in $build_platforms) {
         if ($LASTEXITCODE -ne 0) { throw "Torne test build failed: $torne_test ($build_platform)" }
         & "build/$build_platform/Release-static/$torne_test.exe"
         if ($LASTEXITCODE -ne 0) { throw "Torne test failed: $torne_test ($build_platform)" }
+    }
+
+    # 常駐方式の診断ツールはビルドだけ行い、実機の操作は明示的な引数を伴う手動試験へ分ける。
+    foreach ($resident_tool in @('magicvision_boot_probe', 'resident_capture')) {
+        msbuild "tests/$resident_tool.vcxproj" /p:"Configuration=Release-static;Platform=$build_platform;PlatformToolset=v143"
+        if ($LASTEXITCODE -ne 0) { throw "Resident diagnostic build failed: $resident_tool ($build_platform)" }
     }
 
     msbuild tests/ts_continuity_test.vcxproj /p:"Configuration=Release-static;Platform=$build_platform;PlatformToolset=v143"
@@ -399,6 +408,11 @@ if ($LASTEXITCODE -ne 0) { throw 'PX-S1UD packaging failed.' }
 if ($LASTEXITCODE -ne 0) { throw 'PX-S1UD package check failed.' }
 & python (Join-Path $PSScriptRoot 'tests/siano_package_test.py')
 if ($LASTEXITCODE -ne 0) { throw 'PX-S1UD package regression failed.' }
+
+& python (Join-Path $PSScriptRoot 'tools/package_dt295.py')
+if ($LASTEXITCODE -ne 0) { throw 'PIX-DT295 packaging failed.' }
+& python (Join-Path $PSScriptRoot 'tools/check_dt295_package.py')
+if ($LASTEXITCODE -ne 0) { throw 'PIX-DT295 package check failed.' }
 
 # アプリ署名も CAT と同じ上流の署名者へ固定する。通常の開発ビルドは従来どおり
 # 署名キー不要とし、配布用途では検証に成功した成果物だけを渡す。

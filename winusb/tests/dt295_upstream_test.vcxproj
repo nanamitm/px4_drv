@@ -1,0 +1,48 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup Label="ProjectConfigurations">
+    <ProjectConfiguration Include="Release-static|Win32"><Configuration>Release-static</Configuration><Platform>Win32</Platform></ProjectConfiguration>
+    <ProjectConfiguration Include="Release-static|x64"><Configuration>Release-static</Configuration><Platform>x64</Platform></ProjectConfiguration>
+  </ItemGroup>
+  <PropertyGroup Label="Globals">
+    <VCProjectVersion>17.0</VCProjectVersion>
+    <ProjectGuid>{D5137882-6507-49DD-A3EC-A62755C8B02A}</ProjectGuid>
+    <RootNamespace>Dt295UpstreamTest</RootNamespace>
+    <WindowsTargetPlatformVersion>10.0</WindowsTargetPlatformVersion>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
+  <PropertyGroup Label="Configuration">
+    <ConfigurationType>Application</ConfigurationType><PlatformToolset>v143</PlatformToolset>
+    <UseDebugLibraries>false</UseDebugLibraries>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
+  <PropertyGroup>
+    <NativeBuildPlatform Condition="'$(Platform)'=='Win32'">x86</NativeBuildPlatform>
+    <NativeBuildPlatform Condition="'$(Platform)'=='x64'">x64</NativeBuildPlatform>
+    <OutDir>$(MSBuildThisFileDirectory)..\build\$(NativeBuildPlatform)\$(Configuration)\</OutDir>
+    <IntDir>$(MSBuildThisFileDirectory)build\torne_bootstrap_test\$(NativeBuildPlatform)\$(Configuration)\</IntDir>
+  </PropertyGroup>
+  <ItemDefinitionGroup>
+    <ClCompile>
+      <WarningLevel>Level4</WarningLevel><TreatWarningAsError>true</TreatWarningAsError>
+      <SDLCheck>true</SDLCheck><ConformanceMode>true</ConformanceMode>
+      <LanguageStandard>stdcpp17</LanguageStandard><RuntimeLibrary>MultiThreaded</RuntimeLibrary>
+      <AdditionalOptions>/utf-8 %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
+  </ItemDefinitionGroup>
+  <PropertyGroup><DtRoot>$(MSBuildThisFileDirectory)..\src\DriverHost_PX4\dt295\</DtRoot><TestName Condition="'$(TestName)'==''">session</TestName><TargetName>dt295_$(TestName)_test</TargetName><IntDir>$(MSBuildThisFileDirectory)build\dt295_$(TestName)\$(Platform)\</IntDir></PropertyGroup>
+  <Import Project="$(DtRoot)upstream.props" />
+  <ItemDefinitionGroup><ClCompile><TreatWarningAsError>false</TreatWarningAsError><SDLCheck>false</SDLCheck><PreprocessorDefinitions>_CRT_SECURE_NO_WARNINGS;%(PreprocessorDefinitions)</PreprocessorDefinitions><UndefinePreprocessorDefinitions>NDEBUG</UndefinePreprocessorDefinitions></ClCompile><Link><AdditionalOptions>/STACK:8388608 %(AdditionalOptions)</AdditionalOptions></Link></ItemDefinitionGroup>
+  <ItemGroup><ClCompile Include="$(DtRoot)upstream\tests\test_$(TestName).c"><CompileAs>CompileAsC</CompileAs><LanguageStandard_C>stdc11</LanguageStandard_C><ForcedIncludeFiles>$(DtRoot)compat.h</ForcedIncludeFiles></ClCompile>
+<ClCompile Include="$(DtRoot)upstream\device\device.c"><ObjectFileName>$(IntDir)extra_0.obj</ObjectFileName><CompileAs>CompileAsC</CompileAs><LanguageStandard_C>stdc11</LanguageStandard_C><ForcedIncludeFiles>$(DtRoot)compat.h</ForcedIncludeFiles></ClCompile>
+<ClCompile Include="$(DtRoot)upstream\device\firmware.c"><ObjectFileName>$(IntDir)extra_1.obj</ObjectFileName><CompileAs>CompileAsC</CompileAs><LanguageStandard_C>stdc11</LanguageStandard_C><ForcedIncludeFiles>$(DtRoot)compat.h</ForcedIncludeFiles></ClCompile>
+<ClCompile Include="$(DtRoot)upstream\device\gv_mvp_xz\device.c"><ObjectFileName>$(IntDir)extra_2.obj</ObjectFileName><CompileAs>CompileAsC</CompileAs><LanguageStandard_C>stdc11</LanguageStandard_C><ForcedIncludeFiles>$(DtRoot)compat.h</ForcedIncludeFiles></ClCompile>
+<ClCompile Include="$(DtRoot)upstream\device\gv_mvp_xz\boot.c"><ObjectFileName>$(IntDir)extra_3.obj</ObjectFileName><CompileAs>CompileAsC</CompileAs><LanguageStandard_C>stdc11</LanguageStandard_C><ForcedIncludeFiles>$(DtRoot)compat.h</ForcedIncludeFiles></ClCompile>
+<ClCompile Include="$(DtRoot)upstream\device\torne\device.c"><ObjectFileName>$(IntDir)extra_4.obj</ObjectFileName><CompileAs>CompileAsC</CompileAs><LanguageStandard_C>stdc11</LanguageStandard_C><ForcedIncludeFiles>$(DtRoot)compat.h</ForcedIncludeFiles></ClCompile>
+<ClCompile Include="$(DtRoot)upstream\device\pix_dt295\device.c"><ObjectFileName>$(IntDir)extra_5.obj</ObjectFileName><CompileAs>CompileAsC</CompileAs><LanguageStandard_C>stdc11</LanguageStandard_C><ForcedIncludeFiles>$(DtRoot)compat.h</ForcedIncludeFiles></ClCompile>
+<ClCompile Include="$(DtRoot)upstream\device\pix_dt295\boot.c"><ObjectFileName>$(IntDir)extra_6.obj</ObjectFileName><CompileAs>CompileAsC</CompileAs><LanguageStandard_C>stdc11</LanguageStandard_C><ForcedIncludeFiles>$(DtRoot)compat.h</ForcedIncludeFiles></ClCompile>
+<ClCompile Include="$(DtRoot)upstream\usb\boot.c"><ObjectFileName>$(IntDir)extra_7.obj</ObjectFileName><CompileAs>CompileAsC</CompileAs><LanguageStandard_C>stdc11</LanguageStandard_C><ForcedIncludeFiles>$(DtRoot)compat.h</ForcedIncludeFiles></ClCompile>
+<ClCompile Include="$(DtRoot)upstream\core\native_download.c"><ObjectFileName>$(IntDir)extra_8.obj</ObjectFileName><CompileAs>CompileAsC</CompileAs><LanguageStandard_C>stdc11</LanguageStandard_C><ForcedIncludeFiles>$(DtRoot)compat.h</ForcedIncludeFiles></ClCompile>
+  </ItemGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+</Project>

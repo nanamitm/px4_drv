@@ -16,6 +16,7 @@
 #include "pxbcud/device.hpp"
 #include "rtlsdr/device.hpp"
 #include "siano/device.hpp"
+#include "dt295/device.hpp"
 
 namespace px4 {
 
@@ -65,6 +66,8 @@ DeviceManager::DeviceManager(const px4::DeviceDefinitionSet &device_defs, px4::R
 			type = DeviceType::PXBCUD;
 		else if (it->first == L"SIANO")
 			type = DeviceType::SIANO;
+		else if (it->first == L"PIXDT295")
+			type = DeviceType::PIXDT295;
 		else if (it->first == L"RTLSDR")
 			type = DeviceType::RTLSDR;
 
@@ -146,6 +149,14 @@ void DeviceManager::Add(const std::wstring &path, const std::pair<DeviceType, px
 
 	/* 機種追加時に型と DeviceType の対応をこの場で確認できるよう生成分岐を明示する */
 	switch (def.first) {
+	case px4::DeviceType::PIXDT295:
+	{
+		auto dev = std::make_shared<px4::dt295::Device>(path, def.second, ++index_, receiver_manager_);
+		const int ret = dev->Init();
+		if (!ret) devices_.emplace(path, std::move(dev));
+		else msg_err("PIX-DT295: device initialization failed ret=%d\n", ret);
+		break;
+	}
 	case px4::DeviceType::SIANO:
 	{
 		auto dev = std::make_shared<px4::siano::Device>(path, def.second, ++index_, receiver_manager_);
@@ -172,6 +183,14 @@ void DeviceManager::Add(const std::wstring &path, const std::pair<DeviceType, px
 	}
 	case px4::DeviceType::CECHZD1J:
 	{
+		// 常駐方式の実機試験だけを明示選択する。既存のnative torne経路とカード共有は維持する。
+		if (px4::util::wtob(def.second.configs.Get(L"ResidentFirmware", L"false"))) {
+			auto dev = std::make_shared<px4::dt295::Device>(path, def.second, ++index_, receiver_manager_);
+			const int ret = dev->Init();
+			if (!ret) devices_.emplace(path, std::move(dev));
+			else msg_err("torne resident: device initialization failed ret=%d\n", ret);
+			break;
+		}
 		// torneだけの初期化失敗を局所化し、既存機種の到着処理を維持する。
 		try {
 			auto dev = std::make_shared<px4::torne::ExperimentalDevice>(path, def.second, ++index_, receiver_manager_);

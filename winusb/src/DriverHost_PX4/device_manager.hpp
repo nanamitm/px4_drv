@@ -37,6 +37,7 @@ enum class DeviceType : std::uint32_t {
 	PXBCUD,
 	RTLSDR,
 	SIANO,
+	PIXDT295,
 };
 
 class DeviceManager final {
