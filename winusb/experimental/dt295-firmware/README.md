@@ -23,7 +23,7 @@ BonDriver / DriverHost
 
 DT295向けUSBアダプターには限定命令モデルによる確認だけがあり、実機での要求構造体・EP0完了・割り込み・実行状態の検証は残っています。DT295用のロード/復元、物理HAL、電源/リセット、TS取り込み・USB転送、DriverHostとの接続は未実装です。通常の `build.ps1`、パッケージング、DeviceDefinition、稼働中の受信経路への接続もありません。
 
-I²CのC状態機械と、補助CPUのC診断プログラムを追加しています。既定のPAF1ではI²C状態機械へ接続せず、ビルド・ABI・失敗時の契約は [auxiliary-design.md](auxiliary-design.md) にあります。torne用の別ビルドPAF2では、ソース生成FRイメージを実機で動かし、HAL経由のID読み取りと100組の反復一致、core1 RAMの復元・既存経路への復帰を確認しています。時計は診断用のホスト供給方式です。詳細は [torne-fr-i2c.md](torne-fr-i2c.md) にあります。
+I²CのC状態機械と、補助CPUのC診断プログラムを追加しています。既定のPAF1ではI²C状態機械へ接続せず、ビルド・ABI・失敗時の契約は [auxiliary-design.md](auxiliary-design.md) にあります。torne用の別ビルドPAF2では、ソース生成FRイメージを実機で動かし、HAL経由のID読み取りと100組の反復一致、選局・80秒のTS受信、core1 RAMの復元・既存経路への復帰を確認しています。時計は診断用のホスト供給方式です。詳細は [torne-fr-i2c.md](torne-fr-i2c.md) にあります。
 
 ## ビルド
 
@@ -114,7 +114,7 @@ python3 tests/test_reference_aux.py --reference /path/to/magicvision-dt295.bin -
 
 ## 次の実装段階
 
-torneで最下層を検証するためのHALは [torne-hal.md](torne-hal.md) にあります。Windows上の専用診断ツールから実機の既知ID読み取り、100組の反復一致、GR13→GR17→GR13の選局と80秒のTS受信を確認しています。初期同期のバイト破棄と、同期後に破棄・TEI・CCエラーがなかった区間を分けて記録しています。[新FR版のPAF2診断](torne-fr-i2c.md) でもID読み取り・100組の反復一致まで確認済みで、新FR版経由の選局・TS受信が次の段階です。
+torneで最下層を検証するためのHALは [torne-hal.md](torne-hal.md) にあります。Windows上の専用診断ツールと、[新FR版のPAF2診断](torne-fr-i2c.md) の双方で、ID読み取り・100組の反復一致、GR13→GR17→GR13の選局と80秒のTS受信を確認しています。各試験では初期同期のバイト破棄と、同期後に破棄・TEI・CCエラーがなかった区間を分けて記録しています。
 
 1. **I²Cの最下層の特定**: コントローラーのMMIO、クロック/リセット、開始/停止/repeated START、完了条件、NACK、タイマー、バス回復を根拠付きで記録。既存常駐の呼び出しとキュー/補助CPU依存も分ける。
 2. **ソースを持つUSB/ブートアダプター**: 診断用アダプターはビルド・命令モデル試験まで実装済み。次に入口の実機契約、ロード/復元、途中失敗、終了経路を実装・検証。既存バイナリのブートストラップや常駐イメージの流用をビルド条件にしない。

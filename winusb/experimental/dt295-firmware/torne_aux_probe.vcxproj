@@ -31,6 +31,9 @@
     <ClCompile Include="torne_aux_probe.cpp" />
     <ClCompile Include="..\..\src\DriverHost_PX4\torne\winusb_control.cpp" />
     <ClCompile Include="..\..\src\DriverHost_PX4\torne\mb86h47_bootstrap.cpp" />
+    <ClCompile Include="..\..\src\DriverHost_PX4\torne\dib8096_native.cpp"><WarningLevel>Level3</WarningLevel><TreatWarningAsError>false</TreatWarningAsError></ClCompile>
+    <ClCompile Include="..\..\src\DriverHost_PX4\torne\mb86h47_stream.cpp" />
+    <ClCompile Include="..\..\tests\torne_capture.cpp" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
 </Project>

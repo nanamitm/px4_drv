@@ -11,7 +11,11 @@
 #include <filesystem>
 #include <cstdio>
 #include <algorithm>
+#include <cstring>
 #include "../../src/DriverHost_PX4/torne/winusb_control.hpp"
+#include "../../src/DriverHost_PX4/torne/dib8096_native.hpp"
+#include "../../src/DriverHost_PX4/torne/frontend_wait.hpp"
+#include "../../tests/torne_capture.hpp"
 extern "C" {
 #include "torne_auxiliary.h"
 }
@@ -84,10 +88,21 @@ class Client {
     uint32_t sequence_=0, token_;
 public:
     std::array<uint8_t,192> response{};
+    Clock::time_point limit=(Clock::time_point::max)();
+    bool healthy=true;
     Client(MemoryAccess &memory,WinUsbControl &control,uint32_t token):memory_(memory),control_(control),token_(token) {}
     bool Command(uint32_t operation,const std::vector<uint8_t> &tx={},uint32_t reads=0,uint32_t address=9) {
+        if (!healthy) return false;
+        const bool ok=Exchange(operation,tx,reads,address);
+        // 期限切れや不明な応答を次の要求に混ぜず、再送せずにローダーの復元へ進む。
+        if (!ok) healthy=false;
+        return ok;
+    }
+private:
+    bool Exchange(uint32_t operation,const std::vector<uint8_t> &tx,uint32_t reads,uint32_t address) {
         if (tx.size()>40 || reads>40 || address>127) return false;
-        const auto deadline=Clock::now()+std::chrono::seconds(2);
+        const auto deadline=(std::min)(Clock::now()+std::chrono::seconds(2),limit);
+        if (Clock::now()>=deadline) return false;
         control_.Begin(deadline);
         std::array<uint8_t,28> metadata{};
         WriteWord(metadata.data(),Now()); WriteWord(metadata.data()+4,token_);
@@ -117,13 +132,17 @@ public:
                     std::printf("PAF2 seq=%u operation=%u status=%u result=%u features=%u tx_done=%u rx_done=%u state=%08x control=%08x\n",
                         sequence_,operation,status,result,ReadWord(response.data()+28),ReadWord(response.data()+144),
                         ReadWord(response.data()+148),ReadWord(response.data()+152),ReadWord(response.data()+156));
-                return status==DTP_TA_OK && result==DTP_I2C_OK;
+                const bool counts=operation!=DTP_TA_I2C ||
+                    (ReadWord(response.data()+144)==tx.size() && ReadWord(response.data()+148)==reads);
+                if (!counts) std::printf("PAF2 malformed completion counts seq=%u\n",sequence_);
+                return status==DTP_TA_OK && result==DTP_I2C_OK && counts;
             }
             if (control_.Pause(1)) return false;
         }
         std::printf("PAF2 request deadline expired sequence=%u operation=%u\n",sequence_,operation);
         return false;
     }
+public:
     bool ReadRegister(uint16_t reg,uint16_t &value) {
         if (!Command(DTP_TA_I2C,{static_cast<uint8_t>(reg>>8),static_cast<uint8_t>(reg)},2) ||
             ReadWord(response.data()+144)!=2 || ReadWord(response.data()+148)!=2) return false;
@@ -132,7 +151,188 @@ public:
     }
 };
 
-static bool Run(HANDLE file,WINUSB_INTERFACE_HANDLE usb,HANDLE cancel,std::vector<uint8_t> image,const std::wstring &prefix)
+// 通常探索の全転送をPAF2へ渡す。旧core1のI2C/Captrim/TMCC経路は呼ばない。
+class FirmwareBus final : public dibnative::Bus {
+    Client &client_;
+    HANDLE cancel_;
+public:
+    unsigned requests=0;
+    Clock::time_point deadline{};
+    FirmwareBus(Client &client,HANDLE cancel):client_(client),cancel_(cancel) {}
+    void Begin(unsigned seconds) { deadline=Clock::now()+std::chrono::seconds(seconds); client_.limit=deadline; }
+    std::tuple<dibnative::Slice<uint8_t>,dibnative::Error> WriteRead(uint8_t address,
+        dibnative::Slice<uint8_t> write,int64_t length) override {
+        if ((address&1) || write.size()>40 || length<0 || length>40 || (!write.size() && !length))
+            return {{},dibnative::MakeError("invalid firmware I2C request")};
+        if (WaitForSingleObject(cancel_,0)!=WAIT_TIMEOUT || Clock::now()>=deadline)
+            return {{},dibnative::MakeError("firmware frontend cancelled/deadline expired")};
+        std::vector<uint8_t> tx(write.size());
+        for (size_t i=0;i<write.size();++i) tx[i]=write[static_cast<int64_t>(i)];
+        ++requests;
+        if (!client_.Command(DTP_TA_I2C,tx,static_cast<uint32_t>(length),address>>1))
+            return {{},dibnative::MakeError("PAF2 I2C failed","address",unsigned(address),"request",requests)};
+        dibnative::Slice<uint8_t> result(static_cast<size_t>(length));
+        for (int64_t i=0;i<length;++i) result[i]=client_.response[104+static_cast<size_t>(i)];
+        return {result,nullptr};
+    }
+    dibnative::Error Wait(int64_t ns) override {
+        const auto error=WaitFrontendDelay(cancel_,deadline,ns);
+        return error ? dibnative::MakeError("firmware frontend wait failed",error) : nullptr;
+    }
+};
+
+static bool SelfTest()
+{
+    struct Fake final : ControlTransport {
+        std::array<uint8_t,192> bytes{};
+        unsigned calls=0;
+        bool bad_counts=false,bad_identity=false,io_error=false;
+        int Transfer(const MemoryRequest &r,uint8_t *data,size_t size,size_t &transferred) override {
+            ++calls;
+            const uint32_t a=(uint32_t(r.value&0xff00)<<8)|(uint32_t(r.value&255)<<24)|r.index;
+            if (io_error || a<mailbox || a-mailbox>bytes.size() || size>bytes.size()-(a-mailbox)) return ERROR_INVALID_DATA;
+            const auto offset=a-mailbox;
+            if (r.type==0xc0) std::copy_n(bytes.data()+offset,size,data);
+            else {
+                std::copy_n(data,size,bytes.data()+offset);
+                if (offset==12) {
+                    WriteWord(bytes.data(),bad_identity ? 0 : DTP_TA_MAGIC);
+                    WriteWord(bytes.data()+4,DTP_TA_ABI);
+                    WriteWord(bytes.data()+16,ReadWord(bytes.data()+12));
+                    WriteWord(bytes.data()+24,0); WriteWord(bytes.data()+28,3); WriteWord(bytes.data()+60,0);
+                    WriteWord(bytes.data()+144,bad_counts ? 0 : ReadWord(bytes.data()+48));
+                    WriteWord(bytes.data()+148,ReadWord(bytes.data()+52));
+                    bytes[104]=1; bytes[105]=0xb3;
+                }
+            }
+            transferred=size;
+            return 0;
+        }
+    };
+    HANDLE cancel=CreateEventW(nullptr,TRUE,FALSE,nullptr);
+    if (!cancel) return false;
+    NativeControlIo native;
+    WinUsbControl control(INVALID_HANDLE_VALUE,nullptr,cancel,native);
+    bool ok=true;
+    for (unsigned mode=0;mode<5;++mode) {
+        Fake fake;
+        fake.bad_counts=mode==1; fake.bad_identity=mode==2; fake.io_error=mode==3;
+        MemoryAccess memory(fake);
+        Client client(memory,control,17);
+        if (mode==4) client.limit=Clock::now()-std::chrono::seconds(1);
+        const bool success=client.Command(DTP_TA_I2C,{3,0x80},2);
+        ok=ok && success==(mode==0);
+        if (mode==0) ok=ok && client.response[104]==1 && client.response[105]==0xb3;
+        else {
+            const auto held=fake.calls;
+            ok=ok && !client.healthy && !client.Command(DTP_TA_PING) && fake.calls==held;
+            if (mode==4) ok=ok && held==0;
+        }
+    }
+    {
+        Fake fake; MemoryAccess memory(fake); Client client(memory,control,17);
+        FirmwareBus bus(client,cancel); bus.Begin(2);
+        auto result=bus.WriteRead(0x12,{3,0x80},2);
+        ok=ok && !std::get<1>(result) && std::get<0>(result)[0]==1 && std::get<0>(result)[1]==0xb3 &&
+            ReadWord(fake.bytes.data()+44)==9 && bus.requests==1;
+        const auto held=fake.calls;
+        ok=ok && bool(std::get<1>(bus.WriteRead(0x13,{3,0x80},2))) && fake.calls==held;
+        ok=ok && bool(std::get<1>(bus.WriteRead(0x12,{3,0x80},41))) && fake.calls==held;
+        SetEvent(cancel);
+        ok=ok && bool(std::get<1>(bus.WriteRead(0x12,{3,0x80},2))) && fake.calls==held;
+    }
+    CloseHandle(cancel);
+    std::puts(ok ? "PASS: PAF2 host counts/identity/I/O/deadline poison, address conversion, bounds and cancellation; no USB device opened" : "FAIL: PAF2 host self-test");
+    return ok;
+}
+
+static bool Receive(Client &client,MemoryAccess &memory,WinUsbControl &control,Bootstrap &bootstrap,
+    HANDLE file,WINUSB_INTERFACE_HANDLE usb,HANDLE cancel,const std::wstring &prefix)
+{
+    FirmwareBus bus(client,cancel);
+    NativeFrontend frontend(bus);
+    std::vector<uint8_t> response;
+    auto command=[&](uint8_t kind,const std::vector<uint8_t> &body,unsigned seconds=30) {
+        bus.Begin(seconds);
+        const auto begin=Clock::now();
+        const bool success=frontend.Command(kind,body,response);
+        std::printf("FR FRONTEND command=%02x ok=%d elapsed_ms=%lld requests=%u error=%s\n",kind,success,
+            static_cast<long long>(std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now()-begin).count()),
+            bus.requests,frontend.Error().c_str());
+        return success;
+    };
+    uint32_t first_heartbeat=0;
+    control.Begin(Clock::now()+std::chrono::seconds(3));
+    bool ok=memory.Read32(mailbox+8,first_heartbeat)==MemoryResult::ok;
+    if (ok) ok=command(0x10,{},120);
+    const bool initialized=ok;
+    bool strict=true;
+    if (ok) ok=command(0x12,{1});
+    const unsigned channels[]{13,17,13},durations[]{10000,60000,10000};
+    unsigned runs=0;
+    for (unsigned run=0;ok && run<3;++run) {
+        const uint32_t frequency=473143000u+(channels[run]-13u)*6000000u;
+        std::vector<uint8_t> tune(4);
+        for (unsigned i=0;i<4;++i) tune[i]=static_cast<uint8_t>(frequency>>(8*i));
+        ok=command(0x11,tune,60);
+        bool locked=false;
+        const auto lock_deadline=Clock::now()+std::chrono::seconds(5);
+        while (ok && Clock::now()<lock_deadline) {
+            ok=command(0x13,{});
+            if (!ok) break;
+            locked=response.size()==24 && response[0]==1;
+            if (locked) break;
+            ok=control.Pause(20)==0;
+        }
+        double cnr=0;
+        if (response.size()==24) std::memcpy(&cnr,response.data()+8,8);
+        std::printf("FR TUNE run=%u channel=%u frequency=%u locked=%d cnr_db=%.3f requests=%u\n",run,channels[run],frequency,locked,cnr,bus.requests);
+        ok=ok && locked;
+        if (!ok) break;
+        const auto path=prefix+L"_gr"+std::to_wstring(channels[run])+L"_"+std::to_wstring(run)+L".ts";
+        FILE *output=nullptr,*raw=nullptr;
+        if (_wfopen_s(&output,path.c_str(),L"wb") || !output) { ok=false; break; }
+        if (_wfopen_s(&raw,(path+L".prefix.raw").c_str(),L"wb") || !raw) { std::fclose(output); ok=false; break; }
+        size_t prefix_bytes=0;
+        control.Begin(Clock::now()+std::chrono::milliseconds(durations[run])+std::chrono::seconds(5));
+        StreamEngine engine(memory,bootstrap);
+        TorneCaptureStats stats;
+        ok=CaptureFirstTs(file,usb,cancel,engine,Clock::now()+std::chrono::milliseconds(durations[run])+std::chrono::seconds(3),stats,
+            durations[run],[&](const uint8_t *p,size_t n) { return std::fwrite(p,1,n,output)==n; },
+            [&](const uint8_t *p,size_t n) {
+                const auto saved=(std::min)(n,size_t(12288)-prefix_bytes);
+                prefix_bytes+=saved;
+                return std::fwrite(p,1,saved,raw)==saved;
+            });
+        ok=std::fclose(output)==0 && ok;
+        ok=std::fclose(raw)==0 && ok;
+        std::printf("FR CAPTURE run=%u channel=%u ok=%d packets=%llu raw_bytes=%llu tei=%llu discarded_bytes=%llu cc=%llu malformed=%llu elapsed_ms=%lld first_ts_ms=%lld max_gap_ms=%lld error=%lu prepare=%u start=%u stop=%u\n",
+            run,channels[run],ok,static_cast<unsigned long long>(stats.packets),static_cast<unsigned long long>(stats.raw_bytes),
+            static_cast<unsigned long long>(stats.tei),static_cast<unsigned long long>(stats.discarded_bytes),
+            static_cast<unsigned long long>(stats.cc_anomalies),static_cast<unsigned long long>(stats.malformed),
+            stats.elapsed_ms,stats.first_ts_ms,stats.max_read_gap_ms,stats.error,unsigned(stats.prepare),unsigned(stats.start),unsigned(stats.stop));
+        strict=strict && !stats.discarded_bytes;
+        ok=ok && !stats.tei && !stats.cc_anomalies && !stats.malformed;
+        control.Begin(Clock::now()+std::chrono::seconds(3));
+        const auto stopped=engine.Stop();
+        std::printf("FR STREAM CLEANUP run=%u stop=%u\n",run,unsigned(stopped));
+        ok=ok && stopped==StreamResult::ok;
+        if (ok) ++runs;
+    }
+    if (initialized && client.healthy) {
+        const bool output_off=command(0x12,{0});
+        const bool slept=output_off && command(0x14,{});
+        ok=ok && slept;
+    }
+    client.limit=(Clock::time_point::max)();
+    control.Begin(Clock::now()+std::chrono::seconds(3));
+    uint32_t heartbeat=0;
+    const bool alive=memory.Read32(mailbox+8,heartbeat)==MemoryResult::ok && heartbeat!=first_heartbeat;
+    std::printf("FR RECEIVE END transport_ok=%d strict_zero_discard=%d runs=%u requests=%u firmware_alive=%d heartbeat=%08x->%08x\n",ok,strict,runs,bus.requests,alive,first_heartbeat,heartbeat);
+    return ok && strict && runs==3 && alive;
+}
+
+static bool Run(HANDLE file,WINUSB_INTERFACE_HANDLE usb,HANDLE cancel,std::vector<uint8_t> image,const std::wstring &prefix,bool receive)
 {
     NativeControlIo native;
     WinUsbControl control(file,usb,cancel,native);
@@ -190,7 +390,9 @@ static bool Run(HANDLE file,WINUSB_INTERFACE_HANDLE usb,HANDLE cancel,std::vecto
                 if (ok) ++pairs;
             }
             std::printf("FR REPEAT pairs=%u target=100 ok=%d\n",pairs,ok);
-            const bool quiet=ok && client.Command(DTP_TA_QUIESCE);
+            if (ok && receive) ok=Receive(client,memory,control,bootstrap,file,usb,cancel,prefix);
+            // 品質判定で失敗しても、通信が正常ならQUIESCEする。通信失敗時は再送せず停止へ。
+            const bool quiet=client.healthy && client.Command(DTP_TA_QUIESCE);
             ok=ok && quiet;
             std::printf("FR QUIESCE ok=%d\n",quiet);
         }
@@ -230,8 +432,10 @@ static bool Run(HANDLE file,WINUSB_INTERFACE_HANDLE usb,HANDLE cancel,std::vecto
 int wmain(int argc,wchar_t **argv)
 {
     std::setvbuf(stdout,nullptr,_IONBF,0);
-    if (argc!=6 || std::wcscmp(argv[1],L"--run")) {
-        std::puts("Usage: torne_aux_probe --run <exact device path> <FR binary> <expected SHA256> <backup prefix>");
+    if (argc==2 && !std::wcscmp(argv[1],L"--self-test")) return SelfTest() ? 0 : 1;
+    const bool receive=argc==6 && !std::wcscmp(argv[1],L"--receive");
+    if (argc!=6 || (!receive && std::wcscmp(argv[1],L"--run"))) {
+        std::puts("Usage: torne_aux_probe --run|--receive <exact device path> <FR binary> <expected SHA256> <backup/TS prefix>");
         return 2;
     }
     std::ifstream input(std::filesystem::path(argv[3]),std::ios::binary|std::ios::ate);
@@ -259,11 +463,12 @@ int wmain(int argc,wchar_t **argv)
         ok=WinUsb_GetDescriptor(usb,USB_DEVICE_DESCRIPTOR_TYPE,0,0,reinterpret_cast<PUCHAR>(&d),sizeof(d),&count) &&
             count==sizeof(d) && d.idVendor==0x054c && d.idProduct==0x04b2;
         std::printf("IDENTITY vid=%04x pid=%04x exact_match=%d exclusive=1\n",d.idVendor,d.idProduct,ok);
-        if (ok) ok=Run(file,usb,cancel,image,argv[5]);
+        if (ok) ok=Run(file,usb,cancel,image,argv[5],receive);
     }
     if (usb) WinUsb_Free(usb);
     if (cancel) CloseHandle(cancel);
     CloseHandle(file);
-    std::puts(ok ? "PASS: source-built FR PAF2 I2C, exact core1 RAM restore and legacy restart; autonomous timer and TS untested" : "FAIL: source-built FR diagnostic");
+    std::puts(ok ? (receive ? "PASS: source-built FR PAF2 frontend/TS and core1 restore; autonomous timer untested" :
+        "PASS: source-built FR PAF2 I2C, exact core1 RAM restore and legacy restart; autonomous timer and TS untested") : "FAIL: source-built FR diagnostic (see transport, strict quality and restore counters)");
     return ok ? 0 : 1;
 }

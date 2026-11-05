@@ -87,4 +87,4 @@ python tools/check_capture.py '<prefix>_gr17_1.ts' --expected-tsid 31760 --disca
 
 保存データ検査は通常 `stable_interval_ok` を終了判定に使い、`--strict-zero-discard` を指定すると開始時も含めて破棄0を要求します。`tests/test_capture.py` は既知のPAT/CRCを含むfixtureと、同期・TEI・CC・CRC破損、TSID違い、末尾切断、破棄数不一致の拒否を確認します。
 
-NACK等の実機異常注入、物理波形、長時間転送、DT295固有部は未確認です。別の [PAF2診断](torne-fr-i2c.md) ではソース生成FRイメージへHALとホスト供給時計を接続し、メールボックス経由のID読み取りまで確認しています。新FR版経由の選局・TS受信は次の段階です。
+NACK等の実機異常注入、物理波形、長時間転送、DT295固有部は未確認です。別の [PAF2診断](torne-fr-i2c.md) ではソース生成FRイメージへHALとホスト供給時計を接続し、メールボックス経由のID読み取り、選局と80秒のTS受信も確認しています。

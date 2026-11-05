@@ -2,7 +2,7 @@
 
 対象はCECH-ZD1Jの補助CPU core1です。`torne_auxiliary.c`、`torne_hal.c`、`i2c_engine.c` と既存のCランタイム・FR入口から専用イメージを生成します。Windows側はI²Cレジスターを直接進めず、共有RAMのPAF2要求を介してFR側のHALを実行します。DT295用のPAF1診断イメージ・USBコアとは別の実験ABIです。
 
-2026-11-05、Windows x64 / CECH-ZD1JでPAF2起動、PING/CAPS、I²C初期化、DiB8096のvendor ID `01b3` / device ID `8002`、100組の反復一致を確認しています。今回の新FR版での選局・TS受信は次段階です。先行するWindows上のHALによるTS受信結果とは区別します。
+2026-11-05、Windows x64 / CECH-ZD1JでPAF2起動、PING/CAPS、I²C初期化、DiB8096のvendor ID `01b3` / device ID `8002`、100組の反復一致を確認しています。さらにPAF2経由で選局し、80秒のTS受信も確認しています。先行するWindows上のHALによるTS受信結果とは別の実機試験です。
 
 ## 配置とビルド
 
@@ -71,4 +71,34 @@ MSBuild.exe torne_aux_probe.vcxproj /t:Build /p:Configuration=Release /p:Platfor
 
 ネイティブの同一サービスコードでは、lease/sequenceの失効、通知前の進行禁止、上限違反、時計停止、時刻wrap、NACK、QUIESCEをWindows ClangとWSL GCC（ASan/UBSan）で検査しています。ホストローダーはSHA不一致でデバイスを開かないことを確認しています。実機への異常注入、抜去・プロセスクラッシュからの復元は未確認です。
 
-次はこのPAF2クライアントを復調器制御へ接続し、新FR版経由で選局・TS受信を確認する段階です。機器内の自走タイマー、DT295用HALと機種固有処理、通常のDriverHost/BonDriver配布物への統合は別途必要です。
+## 新FR版経由の選局・TS受信
+
+```powershell
+.\build\aux-probe\torne_aux_probe.exe --self-test
+.\build\aux-probe\torne_aux_probe.exe --receive '<exact torne interface path>' `
+  '.\build\torne-i2c\auxiliary.bin' '<expected SHA256>' '<backup and TS prefix>'
+```
+
+`FirmwareBus` は既存 `NativeFrontend` の8bitアドレスを7bitへ変換し、すべての転送をPAF2へ送ります。core1の旧I²C・Captrim・TMCCジョブは使わず、通常探索を実行します。新FRイメージの変更は不要で、上記と同じ4,360 bytesのイメージを使っています。
+
+各PAF2要求のホスト期限は2秒以内、復調器コマンド全体の期限（初期化120秒、各選局60秒等）でも上限を設けます。要求内で期限を作り直す処理はありません。応答のidentity、sequence、結果、TX/RX完了数を確認し、通信失敗・期限切れ・不正応答後はクライアントを再利用禁止にします。以後の要求を再送せず、ローダーの停止・復元へ進みます。
+
+TS入力・DMA・リング・USB送出は既存 `StreamEngine` とソース生成core0を使用します。測定ごとにreadを回収してTS入力とcore0を停止し、最後は復調器をHigh-Z/sleepへ戻します。新FR版はcore1上で動作し続け、PAF2 heartbeatの測定前後の進行を確認します。終了時はQUIESCEの後、RAMの復元と既存core1再開を行います。
+
+同日のCECH-ZD1Jで、全3区間のLOCKと受信を確認しました。
+
+| 区間 | 測定時間 | パケット | 初期同期の破棄 | 同期後の破棄 | TEI / CC / 形式エラー | PAT正常 / CRC異常 | TSID |
+|---|---:|---:|---:|---:|---|---|---:|
+| GR13 | 10秒 | 114,815 | 155 bytes | 0 | 0 / 0 / 0 | 100 / 0 | 31761 |
+| GR17 | 60秒 | 688,863 | 138 bytes | 0 | 0 / 0 / 0 | 600 / 0 | 31760 |
+| GR13再選局 | 10秒 | 114,815 | 175 bytes | 0 | 0 / 0 / 0 | 100 / 0 | 31761 |
+
+合計918,493パケット、保存TSは172,676,684 bytesです。復調器制御はPAF2 I²C 1,795要求、識別を含めた総I²C要求は1,999件、QUIESCEまでのPAF2要求は2,003件でした。CNRは24.249 / 23.892 / 24.346dB、最初のTSは4 / 4 / 3ms、最大read間隔は7 / 25 / 7msです。既定の復調器出力条件を使用し、内蔵カード・スクランブル解除の試験は含みません。
+
+保存TSと先頭12,288 bytesの192-byte生データを `tools/check_capture.py` で検査しています。各先頭の同期獲得オフセットが破棄総数と一致し、途中の破棄は0です。PATのCRCと期待TSIDも全区間一致しました。開始時を含む無破棄ではないため、ローダーは厳密基準を維持して `transport_ok=1 / strict_zero_discard=0`、終了コード1を返します。品質判定が失敗しても通信が正常ならQUIESCEし、復元・既存core1再開を別に記録します。選局遷移中の無欠落や長時間安定性を示す結果ではありません。
+
+本受信試験の復元前後の16KB RAM SHA-256はともに `62d1630750ab67ef67a997cde8e4dab009b4719892c1fdd7f641e99fecb7ebf7`。既存core1再開後、従来メールボックス経路でvendor `01b3` / device `8002` を再取得できることも確認しています。機器全体を電源投入前像へ復元したという意味ではありません。
+
+`--self-test` はデバイスを開かず、完了数・identity・I/O異常・期限切れ後の追加要求禁止、アドレス変換、入力上限、キャンセルを模擬トランスポートで検査します。
+
+機器内の自走タイマー、実機の異常注入・抜去/クラッシュ回復、DT295用HALと機種固有処理、通常のDriverHost/BonDriver配布物への統合は残っています。
