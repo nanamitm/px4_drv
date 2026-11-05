@@ -14,6 +14,7 @@
 #include "tune_result.hpp"
 #include "reception_policy.hpp"
 #include "mb86h47_card.hpp"
+#include "source_firmware.hpp"
 #include "../../WinSCard_PX4/bcas_atr.hpp"
 #include "msg.h"
 #include "util.hpp"
@@ -25,6 +26,7 @@
 #include <cstring>
 #include <mutex>
 #include <thread>
+#include <filesystem>
 
 namespace px4::torne {
 using Clock = std::chrono::steady_clock;
@@ -59,10 +61,15 @@ struct PendingRead {
 // 制御mutexはhelper経由のI2Cとworkerのbridge操作の両方を覆う。
 // TS readの待機はこのmutexを保持せず、統計取得による受信停止を避ける。
 struct ExperimentalSession {
-	ExperimentalSession(HANDLE file_handle, WINUSB_INTERFACE_HANDLE usb_handle, HANDLE removed)
+	ExperimentalSession(HANDLE file_handle, WINUSB_INTERFACE_HANDLE usb_handle, HANDLE removed,
+        std::wstring source_path,std::wstring source_sha256)
 		: file(file_handle), usb(usb_handle), cancel(removed), control(file, usb, cancel, native),
-		memory(control), bootstrap(memory, control), bus(memory, control),
-		registers(bus), frontend(bus, cancel), engine(memory, bootstrap) {}
+		memory(control), bootstrap(memory, control),bus(memory, control),
+		registers(bus), frontend(bus, cancel), engine(memory, bootstrap),source_path_(std::move(source_path)),source_sha256_(std::move(source_sha256)) {}
+    ~ExperimentalSession() {
+        std::lock_guard<std::mutex> lock(control_mutex);
+        if(source)source->Stop();
+    }
 	bool Command(std::uint8_t command, const std::vector<std::uint8_t> &body,
 		std::vector<std::uint8_t> &response, Clock::time_point deadline,HANDLE stop=nullptr)
 	{
@@ -85,12 +92,23 @@ struct ExperimentalSession {
 	std::string FrontendError()
 	{
 		std::lock_guard<std::mutex> lock(control_mutex);
-		return frontend.Error();
+		return frontend.Error()+(source ? " / "+source->Error() : std::string());
 	}
 	bool InitializeBridge()
 	{
-		control.Begin(Clock::now() + std::chrono::seconds(8));
-		return bootstrap.Initialize(GetTickCount() | 1u) == BootstrapResult::ok && bus.BeginAfterBootstrap(bootstrap);
+		const auto deadline=Clock::now()+std::chrono::seconds(8);
+		control.Begin(deadline);
+        const bool use_source=!source_path_.empty();
+        if(use_source)source=std::make_unique<SourceFirmware>(memory,control,file,usb,cancel);
+        if(bootstrap.Initialize(GetTickCount()|1u,use_source)!=BootstrapResult::ok) {
+            msg_err("torne: bootstrap failed result=%u address=%08x os_error=%d\n",static_cast<unsigned>(bootstrap.Result()),bootstrap.LastAddress(),bootstrap.LastSystemError());
+            return false;
+        }
+        if(use_source) {
+            if(!source->Start(source_path_,source_sha256_,deadline))return false;
+            if(!bus.SetExternalTransfer([this](std::uint8_t a,const std::uint8_t *w,std::size_t wn,std::uint8_t *r,std::size_t rn,Clock::time_point end){return source->Transfer(a,w,wn,r,rn,end);}))return false;
+        }
+		return bus.BeginAfterBootstrap(bootstrap);
 	}
 	bool InitializeFrontend(bool output_error_packets)
 	{
@@ -132,6 +150,7 @@ struct ExperimentalSession {
 	WinUsbControl control;
 	MemoryAccess memory;
 	Bootstrap bootstrap;
+    std::unique_ptr<SourceFirmware> source;
 	MailboxI2c bus;
 	DiB8096Registers registers;
 #ifdef PX4_TORNE_EXPERIMENTAL
@@ -142,6 +161,7 @@ struct ExperimentalSession {
 	StreamEngine engine;
 	std::mutex control_mutex;
 	bool healthy = true, frontend_started = false;
+    std::wstring source_path_,source_sha256_;
 };
 
 struct ExperimentalDevice::CardState {
@@ -267,7 +287,7 @@ std::shared_ptr<ExperimentalSession> ExperimentalDevice::AcquireSession()
 	std::lock_guard<std::mutex> lock(session_mutex_);
 	if (!available_) return {};
 	if (auto current = shared_session_.lock()) return current;
-	auto created = std::make_shared<ExperimentalSession>(usb_dev_.dev, usb_dev_.winusb, cancel_);
+	auto created = std::make_shared<ExperimentalSession>(usb_dev_.dev, usb_dev_.winusb, cancel_,source_firmware_path_,source_firmware_sha256_);
 	if (!created->InitializeBridge() || !available_) return {};
 	shared_session_ = created;
 	return created;
@@ -603,6 +623,22 @@ ExperimentalDevice::ExperimentalDevice(const std::wstring &path, const px4::Devi
 ExperimentalDevice::~ExperimentalDevice() { Term(); if (cancel_) CloseHandle(cancel_); }
 int ExperimentalDevice::Init()
 {
+    const auto backend=device_def_.configs.Get(L"I2cBackend",L"native");
+    if(backend!=L"native" && backend!=L"source-fr") {
+        msg_err("torne: invalid I2cBackend (expected native or source-fr).\n");return -EINVAL;
+    }
+    if(backend==L"source-fr") {
+#ifdef PX4_TORNE_EXPERIMENTAL
+        msg_err("torne: source-fr requires the native frontend build.\n");return -EINVAL;
+#else
+        source_firmware_path_=device_def_.configs.Get(L"SourceFirmwarePath",L"");
+        source_firmware_sha256_=device_def_.configs.Get(L"SourceFirmwareSha256",L"");
+        if(source_firmware_path_.empty() || source_firmware_sha256_.size()!=64) {
+            msg_err("torne: source-fr requires SourceFirmwarePath and SourceFirmwareSha256.\n");return -EINVAL;
+        }
+        if(!std::filesystem::path(source_firmware_path_).is_absolute())source_firmware_path_=px4::util::path::GetDir()+source_firmware_path_;
+#endif
+    }
 	output_error_packets_=px4::util::wtob(device_def_.configs.Get(L"OutputErrorPackets",L"false"));
     auto_recovery_=px4::util::wtob(device_def_.configs.Get(L"AutoRecovery",L"false"));
     initial_lock_retry_=px4::util::wtob(device_def_.configs.Get(L"InitialLockRetry",L"false"));

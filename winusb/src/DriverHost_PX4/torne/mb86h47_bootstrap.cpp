@@ -241,7 +241,7 @@ void Bootstrap::Core1(std::uint32_t seed)
 		result_ = BootstrapResult::core1_not_running;
 }
 
-BootstrapResult Bootstrap::Initialize(std::uint32_t command_seed)
+BootstrapResult Bootstrap::Initialize(std::uint32_t command_seed,bool quiesce_source)
 {
 	ClearError();
 	initialized_ = false;
@@ -251,6 +251,14 @@ BootstrapResult Bootstrap::Initialize(std::uint32_t command_seed)
 	if (result_ == BootstrapResult::ok && (state >> 16) != 0)
 		return result_ = BootstrapResult::not_power_up_state;
 	Widen();
+	if (quiesce_source) {
+		// 前プロセスのPAF2要求やTSが残る場合も、制御器のリセットより先にCPUを停止する。
+		Write(core1_base,0xffffffff);
+		Write(0x1600000,0xffffffff);
+		Write(0xd01040,0);
+		Write(0xd01020,0x02000000);
+		Write(0xd02010,0x04000000);
+	}
 	Clocks();
 	Traps();
 	I2cInit();

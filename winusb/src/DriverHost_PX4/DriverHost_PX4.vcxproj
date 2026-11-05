@@ -286,6 +286,7 @@
     <ClCompile Include="dt295\winusb_transport.cpp" />
     <ClCompile Include="torne\experimental_device.cpp" />
     <ClCompile Include="torne\frontend_native_client.cpp" />
+    <ClCompile Include="torne\source_firmware.cpp" />
     <ClCompile Include="torne\dib8096_native.cpp" />
     <ClCompile Include="torne\winusb_control.cpp" />
     <ClCompile Include="torne\mb86h47_bootstrap.cpp" />

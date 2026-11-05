@@ -185,6 +185,10 @@ void DeviceManager::Add(const std::wstring &path, const std::pair<DeviceType, px
 	{
 		// 常駐方式の実機試験だけを明示選択する。既存のnative torne経路とカード共有は維持する。
 		if (px4::util::wtob(def.second.configs.Get(L"ResidentFirmware", L"false"))) {
+			if(def.second.configs.Get(L"I2cBackend",L"native")==L"source-fr") {
+				msg_err("torne: ResidentFirmware and I2cBackend=source-fr cannot share one device.\n");
+				break;
+			}
 			auto dev = std::make_shared<px4::dt295::Device>(path, def.second, ++index_, receiver_manager_);
 			const int ret = dev->Init();
 			if (!ret) devices_.emplace(path, std::move(dev));

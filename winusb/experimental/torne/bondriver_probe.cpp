@@ -8,6 +8,7 @@
 #include <cstdlib>
 #include <cerrno>
 #include <string>
+#include <algorithm>
 
 namespace {
 using Clock = std::chrono::steady_clock;
@@ -26,6 +27,7 @@ struct Metrics {
 	std::uint64_t scrambled = 0;
 	unsigned status_reads = 0;
 	long long first_ms = -1;
+	long long last_ms = -1, max_gap_ms = 0, tail_ms = 0;
 	bool read_failed = false;
 };
 
@@ -36,7 +38,17 @@ Metrics Measure(IBonDriver2 &driver, unsigned measure_ms, FILE *capture)
 	previous.fill(-1);
 	const auto begin = Clock::now(), deadline = begin + std::chrono::milliseconds(measure_ms);
 	auto next_status = begin + std::chrono::seconds(1);
+	auto next_progress = begin + std::chrono::seconds(30);
 	while (Clock::now() < deadline) {
+		if (Clock::now() >= next_progress) {
+			std::printf("PROGRESS elapsed_ms=%lld packets=%llu sync=%llu tei=%llu cc=%llu malformed=%llu status_reads=%u\n",
+				static_cast<long long>(std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now()-begin).count()),
+				static_cast<unsigned long long>(result.packets),static_cast<unsigned long long>(result.sync),
+				static_cast<unsigned long long>(result.tei),static_cast<unsigned long long>(result.cc),
+				static_cast<unsigned long long>(result.malformed),result.status_reads);
+			std::fflush(stdout);
+			next_progress=Clock::now()+std::chrono::seconds(30);
+		}
 		if (Clock::now() >= next_status) {
 			driver.GetSignalLevel();
 			++result.status_reads;
@@ -49,9 +61,17 @@ Metrics Measure(IBonDriver2 &driver, unsigned measure_ms, FILE *capture)
 			DWORD size = 0, remaining = 0;
 			// ポインター版で読み終えたcurrent bufferもGetReadyCountへ含まれ得る。
 			// データなしのFALSEは待機へ戻り、無受信の成否は観測区間全体で判定する。
-			if (!driver.GetTsStream(&data, &size, &remaining)) { ++result.empty_reads; break; }
+			if (!driver.GetTsStream(&data, &size, &remaining)) {
+				++result.empty_reads;
+				// IPC切断後はWaitTsStreamも即座に戻るため、診断をbusy loopにしない。
+				Sleep(1);
+				break;
+			}
 			if (!data && size) { result.read_failed = true; return result; }
 			if (!size) break;
+			const auto elapsed=std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now()-begin).count();
+			result.max_gap_ms=(std::max)(result.max_gap_ms,elapsed-(result.last_ms<0 ? 0 : result.last_ms));
+			result.last_ms=elapsed;
 			if (capture && std::fwrite(data,1,size,capture)!=size) { result.read_failed=true; return result; }
 			if (size % 188) ++result.malformed;
 			for (DWORD offset = 0; offset + 188 <= size; offset += 188) {
@@ -74,6 +94,7 @@ Metrics Measure(IBonDriver2 &driver, unsigned measure_ms, FILE *capture)
 			if (!remaining) break;
 		}
 	}
+	result.tail_ms=std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now()-begin).count()-(result.last_ms<0 ? 0 : result.last_ms);
 	return result;
 }
 }
@@ -142,12 +163,15 @@ int wmain(int argc, wchar_t **argv)
 		wchar_t capture_dir[MAX_PATH]{};
 		const auto capture_length=GetEnvironmentVariableW(L"TORNE_PROBE_CAPTURE_DIR",capture_dir,MAX_PATH);
 		if(capture_length && capture_length<MAX_PATH){
-			const auto capture_path=std::wstring(capture_dir)+L"\\channel-"+std::to_wstring(index+13)+L".ts";
+			const auto capture_path=std::wstring(capture_dir)+L"\\channel-"+std::to_wstring(index+13)+L"-run"+std::to_wstring(i-3)+L".ts";
 			if(_wfopen_s(&capture,capture_path.c_str(),L"wb")){std::fprintf(stderr,"FAIL: capture open\n");return 1;}
 		}
 		const auto metrics = Measure(*driver.value, measure_ms, capture);
 		if(capture)std::fclose(capture);
-		const bool good = metrics.packets && !metrics.sync && !metrics.tei && !metrics.cc && !metrics.malformed && !metrics.read_failed;
+		// 先頭だけ受信して途中で止まった場合も失敗にする。初期同期と末尾の空受信も同じ上限へ含める。
+		const bool live=metrics.max_gap_ms<=1000 && metrics.tail_ms<=1000;
+		const bool good = metrics.packets && live && !metrics.sync && !metrics.tei && !metrics.cc && !metrics.malformed && !metrics.read_failed;
+		std::printf("LIVENESS last_ts_ms=%lld max_gap_ms=%lld tail_ms=%lld result=%s\n",metrics.last_ms,metrics.max_gap_ms,metrics.tail_ms,live ? "PASS" : "FAIL");
 		passed = passed && good;
 		std::printf("index=%lu tune_ms=%lld first_ts_ms=%lld packets=%llu sync=%llu tei=%llu cc_anomalies=%llu malformed=%llu empty_reads=%llu scrambled=%llu status_reads=%u read_failed=%d signal=%.3f result=%s\n",
 			index, tune_ms, metrics.first_ms, static_cast<unsigned long long>(metrics.packets),

@@ -37,6 +37,8 @@ public:
 	using Clock = std::chrono::steady_clock;
 	WinUsbControl(HANDLE file, WINUSB_INTERFACE_HANDLE usb, HANDLE cancel, ControlIo &io) noexcept;
 	void Begin(Clock::time_point deadline,HANDLE stop=nullptr) noexcept { deadline_ = deadline; stop_=stop; }
+	Clock::time_point Deadline() const noexcept { return deadline_; }
+	HANDLE StopEvent() const noexcept { return stop_; }
 	int Transfer(const MemoryRequest &request, std::uint8_t *data,
 		std::size_t length, std::size_t &transferred) override;
 	int Pause(unsigned milliseconds) override;

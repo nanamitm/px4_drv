@@ -6,6 +6,7 @@
 #include "../src/DriverHost_PX4/torne/mb86h47_stream.hpp"
 
 #include <cstdlib>
+#include <algorithm>
 #include <iostream>
 #include <map>
 #include <vector>
@@ -245,8 +246,33 @@ static void I2cTests()
 	Check(registers.Identify(vendor, device, recognized, chip.Now() + std::chrono::seconds(1)) == I2cResult::ok && !recognized && device == 0, "wrong vendor cannot reuse old identity");
 }
 
+static void SourceBackendTests()
+{
+    Chip chip; MemoryAccess memory(chip); Bootstrap boot(memory,chip);
+    Check(boot.Initialize(17,true)==BootstrapResult::ok,"source recovery bootstrap");
+    const auto stopped=std::find(chip.writes.begin(),chip.writes.end(),0x1700000u);
+    const auto initialized=std::find(chip.writes.begin(),chip.writes.end(),0xfd8fe4u);
+    Check(stopped!=chip.writes.end() && initialized!=chip.writes.end() && stopped<initialized,"source CPU stopped before I2C reset");
+    MailboxI2c bus(memory,chip); unsigned calls=0;bool fail=false;
+    Check(bus.SetExternalTransfer([&](std::uint8_t address,const std::uint8_t *tx,std::size_t txs,std::uint8_t *rx,std::size_t rxs,auto){
+        ++calls;Check(address==0x12 && txs==2 && tx[0]==3 && tx[1]==0x80 && rxs==2,"external I2C receives complete transaction");
+        if(fail)return I2cResult::address_nack;
+        rx[0]=1;rx[1]=0xb3;return I2cResult::ok;
+    }) && bus.BeginAfterBootstrap(boot),"source backend attached before ready");
+    const auto held=chip.calls; const std::uint8_t tx[]{3,0x80};std::uint8_t rx[2]{};
+    const auto deadline=chip.Now()+std::chrono::seconds(1);
+    Check(bus.Transfer(0x12,tx,2,rx,2,deadline)==I2cResult::ok && rx[0]==1 && rx[1]==0xb3 && calls==1 && chip.calls==held,"external backend never sends legacy mailbox");
+    Check(!bus.SetExternalTransfer({}),"backend cannot change during ready session");
+    std::array<std::uint32_t,3> results{};int best=0,diff=0;
+    Check(bus.RunJob(3,{},0,results,deadline)==I2cResult::not_ready && bus.Captrim(0x12,0,1,0,0,0,0,0,best,diff,deadline)==I2cResult::not_ready && chip.calls==held,"legacy jobs cannot touch source firmware");
+    fail=true;
+    Check(bus.Transfer(0x12,tx,2,rx,2,deadline)==I2cResult::address_nack && calls==2,"external error returned");
+    Check(bus.Transfer(0x12,tx,2,rx,2,deadline)==I2cResult::not_ready && calls==2 && chip.calls==held,"external failure invalidates route without fallback");
+}
+
 int main()
 {
+	SourceBackendTests();
 	JobTests();
 	I2cTests();
 	StreamTests();

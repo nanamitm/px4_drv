@@ -4,6 +4,7 @@
 
 namespace px4::torne {
 dibnative::Bus::MemoryResult NativeFrontendClient::TMCC(std::uint32_t kind,const std::vector<std::uint32_t>& parameters) {
+    if(bus_.HasExternalTransfer())return {{},false,false,nullptr};
     if(auto error=CheckState())return {{},false,true,error};
     std::array<std::uint32_t,3> results{};
     const auto result=bus_.RunJob(kind,parameters,0,results,deadline_);
@@ -15,6 +16,7 @@ dibnative::Bus::MemoryResult NativeFrontendClient::RecallTMCC(std::uint32_t key)
 dibnative::Bus::MemoryResult NativeFrontendClient::RememberTMCC(std::uint8_t address,std::uint32_t key) {return TMCC(4,{address,key});}
 std::tuple<std::int64_t,std::int64_t,bool,dibnative::Error> NativeFrontendClient::Captrim(std::uint8_t address,std::uint16_t lo4,
     std::uint32_t key,std::int64_t start,std::int64_t step,std::int64_t target,std::int64_t write,std::int64_t read) {
+    if(bus_.HasExternalTransfer())return {0,0,false,nullptr};
     if(auto error=CheckState())return {0,0,true,error};
     int best=0,diff=0;
     const auto result=bus_.Captrim(address,lo4,key,static_cast<int>(start),static_cast<int>(step),static_cast<int>(target),write,read,best,diff,deadline_);

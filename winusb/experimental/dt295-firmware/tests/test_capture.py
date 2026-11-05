@@ -56,6 +56,14 @@ class CaptureTests(unittest.TestCase):
         self.assertFalse(self.check(discarded=98)['stable_interval_ok'])
         self.assertFalse(self.check(discarded=96)['stable_interval_ok'])
 
+    def test_normalized_ts_does_not_claim_raw_alignment(self):
+        self.path.write_bytes(b''.join(self.packets))
+        result=inspect(self.path,31761,None,ts_only=True)
+        self.assertTrue(result['packet_stream_ok'])
+        self.assertIsNone(result['stable_interval_ok'])
+        self.assertIsNone(result['strict_zero_discard_ok'])
+        self.assertIsNone(result['midstream_discarded_bytes'])
+
 
 if __name__ == '__main__':
     unittest.main()

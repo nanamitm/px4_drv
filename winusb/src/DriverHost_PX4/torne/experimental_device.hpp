@@ -41,5 +41,6 @@ private:
 	bool registered_ = false;
 	bool output_error_packets_ = false;
     bool auto_recovery_=false,initial_lock_retry_=false;
+    std::wstring source_firmware_path_,source_firmware_sha256_;
 };
 } // namespace px4::torne
