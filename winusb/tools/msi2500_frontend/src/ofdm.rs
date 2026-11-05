@@ -80,6 +80,9 @@ pub struct SymbolOut {
     pub z: Vec<Complex32>,
     pub w: Vec<f32>,
     pub tmcc: Option<Tmcc>,
+    /// OFDM フレームの先頭 (TMCC の B0) を 0 とした通し番号。/204 がフレーム番号、%204 がフレーム内の位置。
+    /// TMCC の同期語を確認するまでは None
+    pub frame_symbol: Option<u64>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -136,6 +139,10 @@ pub struct Ofdm {
     med_err: [f32; 3],
     out_count: u64,
     tmcc_at: Option<u64>,
+    /// tmcc_bits の先頭から捨てたビット数 (tmcc_bits[i] は out_count が tmcc_drained + i のシンボル)
+    tmcc_drained: u64,
+    /// フレームの先頭に当たるシンボルの out_count
+    frame_origin: Option<u64>,
     err_alpha: f32,
     pub stats: Stats,
     scratch: Vec<Complex32>,
@@ -176,6 +183,8 @@ impl Ofdm {
             med_err: [1.0; 3],
             out_count: 0,
             tmcc_at: None,
+            tmcc_drained: 0,
+            frame_origin: None,
             err_alpha: 0.02,
             stats: Stats::default(),
             scratch: vec![Complex32::new(0.0, 0.0); N],
@@ -521,7 +530,9 @@ impl Ofdm {
             }
         }
         self.stats.symbols_out = self.out_count;
-        Some(SymbolOut { index: m, z: zo, w: wo, tmcc: tm })
+        // この関数の冒頭で out_count を進めたため、このシンボルの番号は out_count - 1
+        let frame_symbol = self.frame_origin.map(|o| self.out_count - 1 - o);
+        Some(SymbolOut { index: m, z: zo, w: wo, tmcc: tm, frame_symbol })
     }
 
     fn update_layer_stats(&mut self, t: &Tmcc) {
@@ -566,9 +577,14 @@ impl Ofdm {
             eprintln!("[ofdm] TMCC: partial={} A={:?} B={:?} C={:?}", t.partial, t.layers[0], t.layers[1], t.layers[2]);
             self.tmcc = Some(t);
             self.stats.tmcc = Some(t);
+            // p は B0 (差動復調の基準) のビットで、フレームの先頭のシンボルに当たる
+            self.frame_origin = Some(self.tmcc_drained + p as u64);
             return;
         }
-        if b.len() > 4096 { self.tmcc_bits.drain(0..2048); }
+        if b.len() > 4096 {
+            self.tmcc_bits.drain(0..2048);
+            self.tmcc_drained += 2048;
+        }
     }
 
     fn build_data_idx(&mut self) {

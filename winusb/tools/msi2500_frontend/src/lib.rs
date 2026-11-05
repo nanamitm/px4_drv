@@ -4,7 +4,10 @@
 pub mod blocks;
 pub mod fastvit;
 pub mod fecstream;
+pub mod hostproto;
+pub mod live;
 pub mod ofdm;
 pub mod raw384;
 pub mod regs;
+pub mod remux;
 pub mod usb;

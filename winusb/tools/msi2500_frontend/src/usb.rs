@@ -42,9 +42,12 @@ const REQ_START: u8 = 0x43;
 const REQ_STOP: u8 = 0x45;
 /// 1 転送あたりのパケット数 (High-Speed は 8 の倍数が必要)。64 パケット = 8 ms
 const PACKETS: usize = 64;
-/// 同時に投入する転送数。検証環境で 600 秒の取り込みに欠落がなかった値
-const TRANSFERS: usize = 32;
+/// 同時に投入する転送数 (1 転送 8 ms)。32 (256 ms 分) では、OFDM 復調と誤り訂正を同時に動かした 600 秒の受信で
+/// 投入が間に合わない転送 (USBD_STATUS_ISO_NOT_ACCESSED_LATE) が数回起きたため、先行分を 512 ms に増やした
+const TRANSFERS: usize = 64;
 pub const BLOCK: usize = 1024;
+/// 投入前に転送のバッファーへ書く印。長さが返ってもこの値が残るブロックはドライバーが書かなかったものとして捨てる
+const UNWRITTEN: u8 = 0xEE;
 
 #[derive(Debug)]
 pub enum UsbError {
@@ -89,7 +92,12 @@ unsafe impl Send for Device {}
 impl Device {
     /// インターフェース GUID の index 番目のデバイスを開く。
     pub fn open(guid: &GUID, index: u32) -> Result<Self, UsbError> {
-        let path = device_path(guid, index)?;
+        Self::open_path(device_path(guid, index)?)
+    }
+
+    /// デバイスインターフェースのパスで開く。DriverHost が列挙した個体をそのまま指定するために使う
+    /// (この機器はシリアル番号を返さない個体があり、番号での指定は抜き差しで対象が変わる)。
+    pub fn open_path(path: String) -> Result<Self, UsbError> {
         let wide: Vec<u16> = path.encode_utf16().chain(std::iter::once(0)).collect();
         let file = unsafe {
             CreateFileW(
@@ -197,6 +205,12 @@ pub struct CaptureStats {
     pub bad_packets: u64,
     pub transfer_errors: u64,
     pub blocks: u64,
+    /// 長さが BLOCK の倍数でないパケット (端数のバイトはブロックとして扱えない)
+    pub odd_packets: u64,
+    /// 長さが返ったのに、投入前に書いた印が残っていたブロック (ドライバーがデータを書かなかった)
+    pub unwritten_blocks: u64,
+    /// 最後に失敗した転送の Win32 エラー (完了待ちの期限切れは 0x1_0000_0102 = WAIT_TIMEOUT を上位に印を付けて記録)
+    pub last_error: u64,
 }
 
 pub struct CaptureLimits {
@@ -244,6 +258,13 @@ pub fn capture(
     }
     let submit = |k: usize, cont: bool, desc: &mut [USBD_ISO_PACKET_DESCRIPTOR; PACKETS], o: &mut OVERLAPPED| -> Result<(), u32> {
         unsafe { ResetEvent(o.hEvent) };
+        // 遅れた転送を新しいストリームとして投入し直した後、ハードウェアが触れないパケットの記述子が
+        // 前回の完了時の長さと状態のまま残り、数秒前のデータを新しいデータとして読む状態が約 1 秒続いた。
+        // 投入のたびに長さと状態を消し、触れられなかったパケットを空として扱う
+        for d in desc.iter_mut() {
+            d.Length = 0;
+            d.Status = 0;
+        }
         let ok = unsafe {
             WinUsb_ReadIsochPipeAsap(bh, (k * xlen) as u32, xlen as u32, cont as i32, PACKETS as u32, desc.as_mut_ptr(), o)
         };
@@ -257,13 +278,15 @@ pub fn capture(
     };
 
     let mut result: Result<(), UsbError> = Ok(());
-    let mut submitted = 0usize;
+    // ドライバーへ投入し、まだ完了を受け取っていない転送
+    let mut inflight = [false; TRANSFERS];
+    buf.fill(UNWRITTEN);
     for k in 0..TRANSFERS {
         if let Err(e) = submit(k, k > 0, &mut desc[k], &mut ov[k]) {
             result = Err(UsbError::Win32("WinUsb_ReadIsochPipeAsap", e));
             break;
         }
-        submitted += 1;
+        inflight[k] = true;
     }
     if result.is_ok() {
         result = dev.apply(&[Op::Start]);
@@ -276,14 +299,45 @@ pub fn capture(
         let w = unsafe { WaitForSingleObject(ov[k].hEvent, 1000) };
         let mut n = 0u32;
         let ok = w == WAIT_OBJECT_0 && unsafe { WinUsb_GetOverlappedResult(dev.wh, &ov[k], &mut n, 0) } != 0;
+        if w == WAIT_OBJECT_0 {
+            inflight[k] = false;
+        }
         stats.transfers += 1;
         if !ok {
+            stats.last_error = if w == WAIT_OBJECT_0 { last_error() as u64 } else { 0x1_0000_0000 | w as u64 };
+            // 連続する失敗の最初の数回だけ記録する (投入し直した後も失敗するかを見分ける)
+            if consecutive_errors < 3 {
+                let bad = desc[k].iter().filter(|d| d.Status != 0).count();
+                eprintln!("[usb] transfer {k} failed: error=0x{:x} bad_packets_in_transfer={bad} first_status=0x{:x}",
+                    stats.last_error, desc[k].iter().map(|d| d.Status).find(|&s| s != 0).unwrap_or(0));
+            }
             stats.transfer_errors += 1;
             consecutive_errors += 1;
             if consecutive_errors > limits.max_consecutive_errors {
                 result = Err(UsbError::TransferErrors(consecutive_errors));
                 break;
             }
+            if last_data.elapsed() > limits.stall {
+                result = Err(UsbError::Stalled(last_data.elapsed()));
+                break;
+            }
+            if w != WAIT_OBJECT_0 {
+                // 完了していない転送のバッファーはドライバーが使っているため、投入し直さずに完了を待ち続ける
+                continue 'run;
+            }
+            // 完了した転送の失敗 (検証環境では USBD_STATUS_ISO_NOT_ACCESSED_LATE、投入が間に合わなかった) の後は
+            // 連続性が切れるため、この転送だけを新しいストリームとして投入し直す。
+            // パイプを止めて全転送を投入し直す方法は、以後の転送がすべて ERROR_BUSY で失敗し続けたため採用しなかった
+            buf[k * xlen..(k + 1) * xlen].fill(UNWRITTEN);
+            match submit(k, false, &mut desc[k], &mut ov[k]) {
+                Ok(()) => inflight[k] = true,
+                Err(e) => {
+                    result = Err(UsbError::DeviceGone(e));
+                    break 'run;
+                }
+            }
+            k = (k + 1) % TRANSFERS;
+            continue 'run;
         } else {
             consecutive_errors = 0;
             for d in desc[k].iter() {
@@ -296,9 +350,23 @@ pub fn capture(
                     stats.empty_packets += 1;
                     continue;
                 }
+                if d.Length as usize % BLOCK != 0 {
+                    stats.odd_packets += 1;
+                    if stats.odd_packets <= 20 {
+                        eprintln!("[usb] packet length {} is not a multiple of {BLOCK} (transfer {}, packet {})",
+                            d.Length, stats.transfers, desc[k].iter().position(|x| std::ptr::eq(x, d)).unwrap_or(0));
+                    }
+                }
                 let base = k * xlen + d.Offset as usize;
                 let mut o = 0usize;
                 while o + BLOCK <= d.Length as usize {
+                    let blk = &buf[base + o..base + o + BLOCK];
+                    if blk[4..8] == [UNWRITTEN; 4] {
+                        // ヘッダーの 5〜8 バイト目は実データでは 0x26, x, 0, 0 で、印の値にはならない
+                        stats.unwritten_blocks += 1;
+                        o += BLOCK;
+                        continue;
+                    }
                     stats.blocks += 1;
                     last_data = Instant::now();
                     if !on_block(&buf[base + o..base + o + BLOCK], stats) {
@@ -312,14 +380,15 @@ pub fn capture(
             result = Err(UsbError::Stalled(last_data.elapsed()));
             break;
         }
-        // 失敗した転送の後は連続性が切れるため、新しいストリームとして投入し直す
-        if let Err(e) = submit(k, ok, &mut desc[k], &mut ov[k]) {
-            if let Err(e2) = submit(k, false, &mut desc[k], &mut ov[k]) {
-                let _ = e;
-                result = Err(UsbError::DeviceGone(e2));
+        buf[k * xlen..(k + 1) * xlen].fill(UNWRITTEN);
+        if submit(k, true, &mut desc[k], &mut ov[k]).is_err() {
+            // 続きとして投入できなければ新しいストリームとして投入する。抜去などでそれも失敗すると DeviceGone で終わる
+            if let Err(e) = submit(k, false, &mut desc[k], &mut ov[k]) {
+                result = Err(UsbError::DeviceGone(e));
                 break;
             }
         }
+        inflight[k] = true;
         k = (k + 1) % TRANSFERS;
     }
 
@@ -328,7 +397,7 @@ pub fn capture(
     // 長めの取り込みの後で、次のストリーミング開始でデータが届かない状態に入ることがあった
     unsafe { WinUsb_AbortPipe(dev.wh, pi.PipeId) };
     let mut pending = 0usize;
-    for o in ov.iter().take(submitted) {
+    for (o, _) in ov.iter().zip(inflight.iter()).filter(|(_, &f)| f) {
         if unsafe { WaitForSingleObject(o.hEvent, 1000) } == WAIT_OBJECT_0 {
             let mut n = 0u32;
             unsafe { WinUsb_GetOverlappedResult(dev.wh, o, &mut n, 0) };

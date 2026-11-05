@@ -80,7 +80,36 @@ pub struct LayerPipe {
     checker: rs::Checker,
     last_cc: HashMap<u16, u8>,
     pub stats: FecStats,
+    /// 直前の push で ts に追加した各パケットの多重フレーム上の位置 (追加した順)。push の先頭で消す
+    pub tags: Vec<TspTag>,
+    /// 時間インターリーブと遅延補正を合わせた遅延のフレーム数
+    lag_frames: u64,
+    /// 処理中のシンボルの frame_symbol
+    cur_frame_symbol: Option<u64>,
 }
+
+/// 誤り訂正の出力パケットの多重フレーム上の位置
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TspTag {
+    /// 送信側の多重フレーム番号 (OFDM の frame_symbol / 204 と同じ数え方)。フレーム同期の前は None
+    pub frame: Option<i64>,
+    /// フレーム内でこの階層の何番目の TSP か (エネルギー拡散の初期化からの位置)
+    pub k: u32,
+}
+
+/// Mode 3 の時間インターリーブの遅延 (95×I シンボル) と送信側の遅延補正 (I = 1, 2, 4 で 109, 14, 28 シンボル) の
+/// 合計はフレーム長 204 シンボルの整数倍になり、階層ごとのフレーム数だけ受信側の出力が遅れる
+fn interleave_lag_frames(i: usize) -> u64 {
+    match i {
+        0 => 0,
+        1 | 2 => 1,
+        _ => 2,
+    }
+}
+
+/// パケットを出力したシンボルからの推定で、復号の遅れ (ビットインターリーブ、ビタビのまとめ処理、
+/// バイトデインターリーブ) として見込むシンボル数。フレームの判定はこの値から ±102 シンボルの範囲で正しくなる
+const DECODE_LATENCY_SYMBOLS: i64 = 8;
 
 impl LayerPipe {
     /// segs: この階層の論理セグメント番号 (昇順)
@@ -134,11 +163,16 @@ impl LayerPipe {
             checker: rs::Checker::new(),
             last_cc: HashMap::new(),
             stats: FecStats::default(),
+            tags: Vec::new(),
+            lag_frames: interleave_lag_frames(idepth),
+            cur_frame_symbol: None,
         }
     }
 
     /// 1 シンボルを投入し、得られた TS パケット (188 バイト単位) を ts に追加する。
     pub fn push(&mut self, s: &SymbolOut, ts: &mut Vec<u8>) {
+        self.tags.clear();
+        self.cur_frame_symbol = s.frame_symbol;
         let nc = self.nc;
         let slot = self.t % self.depth;
         for (li, &src) in self.map.iter().enumerate() {
@@ -251,6 +285,33 @@ impl LayerPipe {
     }
 
     fn run_bytes(&mut self, bytes: &[u8], ts: &mut Vec<u8>) {
+        let first_tag = self.tags.len();
+        self.decode_bytes(bytes, ts);
+        self.assign_frames(first_tag);
+    }
+
+    /// tags[first..] のフレーム番号を決める。同期の捕捉の直後は数フレーム分のパケットを一度に出すため、
+    /// 最後のパケット (いま処理したシンボルの付近にある) を基準にし、それより前は k の巻き戻りで 1 フレームずつ遡る。
+    /// k 番目の TSP は送信側でフレームの先頭から k×204/N シンボル付近にあり、出力したシンボルから
+    /// 階層の遅延フレーム数、その位置、復号の遅れを引くとフレームの先頭からの位置が求まる
+    fn assign_frames(&mut self, first: usize) {
+        let (Some(fs), Some(last)) = (self.cur_frame_symbol, self.tags.len().checked_sub(1)) else { return };
+        if last < first {
+            return;
+        }
+        let kl = self.tags[last].k as i64;
+        let x = fs as i64 - (self.lag_frames * 204) as i64 - kl * 204 / self.reset as i64 - DECODE_LATENCY_SYMBOLS;
+        let mut f = (x + 102).div_euclid(204);
+        self.tags[last].frame = Some(f);
+        for i in (first..last).rev() {
+            if self.tags[i].k >= self.tags[i + 1].k {
+                f -= 1;
+            }
+            self.tags[i].frame = Some(f);
+        }
+    }
+
+    fn decode_bytes(&mut self, bytes: &[u8], ts: &mut Vec<u8>) {
         let ByteStage::Run { di, j, ph, blk, bi, r } = &mut self.stage else { return };
         for &b in bytes {
             let o = di.push(b);
@@ -259,7 +320,8 @@ impl LayerPipe {
             if jj < BYTE_LATENCY + *ph { continue; }
             blk.push(o);
             if blk.len() < TSP { continue; }
-            let m = &self.masks[(*bi + self.reset - *r) % self.reset];
+            let k = (*bi + self.reset - *r) % self.reset;
+            let m = &self.masks[k];
             *bi += 1;
             let mut p = [0u8; TSP];
             for k in 0..TSP { p[k] = blk[k] ^ m[k]; }
@@ -288,6 +350,7 @@ impl LayerPipe {
             }
             self.stats.packets += 1;
             ts.extend_from_slice(pkt);
+            self.tags.push(TspTag { frame: None, k: k as u32 });
         }
     }
 }
