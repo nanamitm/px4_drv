@@ -127,9 +127,71 @@ fn run_capture(a: Args) -> i32 {
     }
 }
 
+/// 録画した生ブロック (capture --out の出力) を OFDM 復調し、同期・TMCC・MER を信号 1 秒ごとに出す。
+fn run_demod(path: &str) -> i32 {
+    use msi2500_frontend::ofdm::{Ofdm, FS, L};
+    use msi2500_frontend::raw384::decode_block;
+    use std::io::Read;
+    let f = match std::fs::File::open(path) {
+        Ok(f) => f,
+        Err(e) => {
+            eprintln!("[demod] {path}: {e}");
+            return 2;
+        }
+    };
+    let mut r = std::io::BufReader::with_capacity(1 << 20, f);
+    // capture --out は開始区間を除いて書き出すため、ここでは開始区間を設けずに連続性だけを確かめる
+    let mut counter = BlockCounter::with_startup_run(384, 1);
+    let mut ofdm = Ofdm::new();
+    let mut blk = vec![0u8; 1024];
+    let mut batch = Vec::with_capacity(256 * 384);
+    let (mut symbols, mut segments) = (0u64, 1u32);
+    let sym_rate = FS / L as f64;
+    let t0 = Instant::now();
+    loop {
+        let end = r.read_exact(&mut blk).is_err();
+        if !end {
+            if let BlockState::Gap(_) | BlockState::Backward = counter.push(&blk) {
+                // 不連続の前後をつながず、状態をすべて作り直す
+                eprintln!("[demod] discontinuity at block {}; resetting OFDM state", counter.blocks);
+                ofdm = Ofdm::new();
+                batch.clear();
+                segments += 1;
+            }
+            decode_block(&blk, &mut batch);
+        }
+        if batch.len() >= 256 * 384 || (end && !batch.is_empty()) {
+            for _ in ofdm.push(&batch) {
+                symbols += 1;
+                if symbols % 882 == 0 {
+                    let s = &ofdm.stats;
+                    eprintln!("[demod] signal={:7.2}s cfo={:+.1}Hz drift={:+.3}ppm res(d4={:+.4} f={:+.2}Hz pos={:+.2}) MER A/B={:.1}/{:.1}dB",
+                        symbols as f64 / sym_rate, s.cfo_hz, s.drift_ppm, s.last_timing_residual, s.last_cfo_residual,
+                        s.last_pos_error, s.mer_db[0], s.mer_db[1]);
+                }
+            }
+            batch.clear();
+        }
+        if end {
+            break;
+        }
+    }
+    let s = &ofdm.stats;
+    eprintln!("[demod] done: blocks={} symbols_out={symbols} segments={segments} ctrl_matches_center={:?} tmcc={:?} MER A/B={:.2}/{:.2}dB wall={:.2}s",
+        counter.blocks, s.ctrl_matches_center, s.tmcc.map(|t| t.layers), s.mer_db[0], s.mer_db[1], t0.elapsed().as_secs_f64());
+    if s.tmcc.is_some() && s.ctrl_matches_center == Some(true) { 0 } else { 1 }
+}
+
 fn main() {
     let mut args = std::env::args().skip(1);
     let code = match args.next().as_deref() {
+        Some("demod") => match args.next() {
+            Some(p) => run_demod(&p),
+            None => {
+                eprintln!("usage: msi2500_frontend demod RAW_BLOCKS_FILE");
+                2
+            }
+        },
         Some("capture") => match parse(args) {
             Ok(a) => run_capture(a),
             Err(e) => {

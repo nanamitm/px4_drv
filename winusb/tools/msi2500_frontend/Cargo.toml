@@ -6,6 +6,8 @@ license = "GPL-3.0-or-later"
 description = "RSP1 互換機 (MSi2500/MSi001) による ISDB-T フルセグ受信の helper"
 
 [dependencies]
+num-complex = "0.4"
+rustfft = "6"
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_Devices_DeviceAndDriverInstallation",

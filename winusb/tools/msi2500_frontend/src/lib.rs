@@ -2,5 +2,7 @@
 //! 設計は winusb/docs/msi2500-fullseg-design.md を参照。
 
 pub mod blocks;
+pub mod ofdm;
+pub mod raw384;
 pub mod regs;
 pub mod usb;
