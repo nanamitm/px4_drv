@@ -64,3 +64,7 @@ channel_switch_stress.exe .\BonDriver_DT295.dll <space> <channel-a> <channel-b> 
 WindowsのOUT制御転送は上流のconst表を直接渡さず、完了回収まで保持する書込み可能な一時バッファを使います。torne実機で検出した `ERROR_NOACCESS (998)` の修正で、DT295にも共通する転送処理です。
 
 torneで確認できるのはこの共通経路とtorne用プロファイルです。DT295固有のUSB発行方式、ブート配置、RF回路、BS/CS、給電、内蔵カードの実機確認は別に必要です。
+
+## ソースからビルドするファームウェアの開発
+
+I²Cパススルーを機器側、初期化・選局をホスト側へ置く構成の実験実装は [`experimental/dt295-firmware`](../experimental/dt295-firmware/README.md) にあります。現段階は独立したFRプロトコルコアのビルド・命令モデル検証で、USB/ブート、物理I²C、TSの実装は残っています。通常の配布物や機器定義には接続されていないため、本ページのSBC2方式と置き換えて使える段階ではありません。
