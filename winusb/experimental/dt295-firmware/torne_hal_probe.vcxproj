@@ -23,7 +23,7 @@
       <WarningLevel>Level4</WarningLevel><TreatWarningAsError>true</TreatWarningAsError>
       <ConformanceMode>true</ConformanceMode><LanguageStandard>stdcpp17</LanguageStandard>
       <LanguageStandard_C>stdc11</LanguageStandard_C><RuntimeLibrary>MultiThreaded</RuntimeLibrary>
-      <PreprocessorDefinitions>UNICODE;_UNICODE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions>NOMINMAX;UNICODE;_UNICODE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <AdditionalOptions>/utf-8 %(AdditionalOptions)</AdditionalOptions>
     </ClCompile>
     <Link><AdditionalDependencies>winusb.lib;%(AdditionalDependencies)</AdditionalDependencies></Link>
@@ -34,6 +34,9 @@
     <ClCompile Include="i2c_engine.c" />
     <ClCompile Include="..\..\src\DriverHost_PX4\torne\winusb_control.cpp" />
     <ClCompile Include="..\..\src\DriverHost_PX4\torne\mb86h47_bootstrap.cpp" />
+    <ClCompile Include="..\..\src\DriverHost_PX4\torne\dib8096_native.cpp"><WarningLevel>Level3</WarningLevel><TreatWarningAsError>false</TreatWarningAsError></ClCompile>
+    <ClCompile Include="..\..\src\DriverHost_PX4\torne\mb86h47_stream.cpp" />
+    <ClCompile Include="..\..\tests\torne_capture.cpp" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
 </Project>

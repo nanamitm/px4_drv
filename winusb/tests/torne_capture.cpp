@@ -7,7 +7,8 @@
 
 bool CaptureFirstTs(HANDLE file, WINUSB_INTERFACE_HANDLE usb, HANDLE cancel,
 	px4::torne::StreamEngine &engine, std::chrono::steady_clock::time_point deadline, TorneCaptureStats &stats, unsigned duration_ms,
-	std::function<bool(const std::uint8_t *, std::size_t)> sink)
+	std::function<bool(const std::uint8_t *, std::size_t)> sink,
+	std::function<bool(const std::uint8_t *, std::size_t)> raw_observer)
 {
 	stats = {};
 	stats.prepare = engine.Prepare();
@@ -59,6 +60,8 @@ bool CaptureFirstTs(HANDLE file, WINUSB_INTERFACE_HANDLE usb, HANDLE cancel,
 		// 計測区間の終端は正常停止。期限までに1パケットもない場合は下で失敗にする。
 		if (stats.error == ERROR_TIMEOUT && duration_ms && stats.packets && end < deadline) stats.error = 0;
 		if (!collected || stats.error) break;
+		// 初期同期と途中の欠落を区別する診断用。既定ではrawデータを保存しない。
+		if (raw_observer && !raw_observer(raw.data(),transferred)) { stats.error = ERROR_BUFFER_OVERFLOW; break; }
 		const auto now = std::chrono::steady_clock::now();
 		stats.max_read_gap_ms = (std::max)(stats.max_read_gap_ms,
 			std::chrono::duration_cast<std::chrono::milliseconds>(now - last_read).count());
