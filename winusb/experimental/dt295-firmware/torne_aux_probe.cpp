@@ -86,29 +86,34 @@ class Client {
     MemoryAccess &memory_;
     WinUsbControl &control_;
     uint32_t sequence_=0, token_;
+    HANDLE cancel_;
 public:
     std::array<uint8_t,192> response{};
     Clock::time_point limit=(Clock::time_point::max)();
     bool healthy=true;
-    Client(MemoryAccess &memory,WinUsbControl &control,uint32_t token):memory_(memory),control_(control),token_(token) {}
-    bool Command(uint32_t operation,const std::vector<uint8_t> &tx={},uint32_t reads=0,uint32_t address=9) {
+    bool device_clock=false;
+    uint32_t published_host_us=0;
+    Client(MemoryAccess &memory,WinUsbControl &control,uint32_t token,HANDLE cancel):memory_(memory),control_(control),token_(token),cancel_(cancel) {}
+    bool Command(uint32_t operation,const std::vector<uint8_t> &tx={},uint32_t reads=0,uint32_t address=9,uint32_t timeout_us=500000) {
         if (!healthy) return false;
-        const bool ok=Exchange(operation,tx,reads,address);
+        const bool ok=Exchange(operation,tx,reads,address,timeout_us);
         // 期限切れや不明な応答を次の要求に混ぜず、再送せずにローダーの復元へ進む。
         if (!ok) healthy=false;
         return ok;
     }
 private:
-    bool Exchange(uint32_t operation,const std::vector<uint8_t> &tx,uint32_t reads,uint32_t address) {
+    bool Exchange(uint32_t operation,const std::vector<uint8_t> &tx,uint32_t reads,uint32_t address,uint32_t timeout_us) {
         if (tx.size()>40 || reads>40 || address>127) return false;
-        const auto deadline=(std::min)(Clock::now()+std::chrono::seconds(2),limit);
+        if (!timeout_us || timeout_us>5000000u) return false;
+        const auto deadline=(std::min)(Clock::now()+std::chrono::microseconds(operation==DTP_TA_CLOCK_WAIT ? timeout_us+2000000u : 2000000u),limit);
         if (Clock::now()>=deadline) return false;
         control_.Begin(deadline);
         std::array<uint8_t,28> metadata{};
-        WriteWord(metadata.data(),Now()); WriteWord(metadata.data()+4,token_);
+        published_host_us=Now();
+        WriteWord(metadata.data(),published_host_us); WriteWord(metadata.data()+4,token_);
         WriteWord(metadata.data()+8,token_); WriteWord(metadata.data()+12,address);
         WriteWord(metadata.data()+16,static_cast<uint32_t>(tx.size())); WriteWord(metadata.data()+20,reads);
-        WriteWord(metadata.data()+24,500000);
+        WriteWord(metadata.data()+24,timeout_us);
         std::array<uint8_t,40> output{};
         std::copy(tx.begin(),tx.end(),output.begin());
         ++sequence_;
@@ -117,9 +122,13 @@ private:
             memory_.Transfer(mailbox+64,false,output.data(),output.size())!=MemoryResult::ok ||
             memory_.Write32(mailbox+20,operation)!=MemoryResult::ok ||
             memory_.Write32(mailbox+12,sequence_)!=MemoryResult::ok) return false;
+        if (operation==DTP_TA_CLOCK_WAIT) {
+            // この間はUSB要求も時計更新も発行しない。11bitの1周(2.048s)を越える。
+            if (!device_clock || control_.Pause(2700)) return false;
+        }
         while (Clock::now()<deadline) {
             // ホストの実時間だけを供給する。時計停止時はFR側の処理上限も働く。
-            if (memory_.Write32(mailbox+32,Now())!=MemoryResult::ok ||
+            if ((!device_clock && memory_.Write32(mailbox+32,Now())!=MemoryResult::ok) ||
                 memory_.Transfer(mailbox,true,response.data(),64)!=MemoryResult::ok) return false;
             if (ReadWord(response.data())!=DTP_TA_MAGIC || ReadWord(response.data()+4)!=DTP_TA_ABI) return false;
             if (ReadWord(response.data()+16)==sequence_) {
@@ -137,7 +146,8 @@ private:
                 if (!counts) std::printf("PAF2 malformed completion counts seq=%u\n",sequence_);
                 return status==DTP_TA_OK && result==DTP_I2C_OK && counts;
             }
-            if (control_.Pause(1)) return false;
+            // WaitForSingleObjectの1msはWindowsのtickへ丸められるため、同じ1msを高精度timerで待つ。
+            if (WaitFrontendDelay(cancel_,deadline,1000000)) return false;
         }
         std::printf("PAF2 request deadline expired sequence=%u operation=%u\n",sequence_,operation);
         return false;
@@ -218,7 +228,7 @@ static bool SelfTest()
         Fake fake;
         fake.bad_counts=mode==1; fake.bad_identity=mode==2; fake.io_error=mode==3;
         MemoryAccess memory(fake);
-        Client client(memory,control,17);
+        Client client(memory,control,17,cancel);
         if (mode==4) client.limit=Clock::now()-std::chrono::seconds(1);
         const bool success=client.Command(DTP_TA_I2C,{3,0x80},2);
         ok=ok && success==(mode==0);
@@ -230,7 +240,7 @@ static bool SelfTest()
         }
     }
     {
-        Fake fake; MemoryAccess memory(fake); Client client(memory,control,17);
+        Fake fake; MemoryAccess memory(fake); Client client(memory,control,17,cancel);
         FirmwareBus bus(client,cancel); bus.Begin(2);
         auto result=bus.WriteRead(0x12,{3,0x80},2);
         ok=ok && !std::get<1>(result) && std::get<0>(result)[0]==1 && std::get<0>(result)[1]==0xb3 &&
@@ -373,10 +383,22 @@ static bool Run(HANDLE file,WINUSB_INTERFACE_HANDLE usb,HANDLE cancel,std::vecto
         std::printf("FR READY started=%d ready=%d magic=%08x abi=%u heartbeat=%u\n",started,ready,
             ReadWord(header.data()),ReadWord(header.data()+4),ReadWord(header.data()+8));
         if (ready) {
-            Client client(memory,control,GetTickCount()|1u);
+            Client client(memory,control,GetTickCount()|1u,cancel);
             ok=client.Command(DTP_TA_PING) && client.Command(DTP_TA_CAPS);
+            client.device_clock=(ReadWord(client.response.data()+28)&DTP_TA_FEATURE_DEVICE_CLOCK)!=0;
+            if (ok && client.device_clock) {
+                const auto begin=Clock::now();
+                const auto device_before=ReadWord(client.response.data()+164);
+                ok=client.Command(DTP_TA_CLOCK_WAIT,{},0,9,2500000);
+                const auto elapsed=std::chrono::duration_cast<std::chrono::microseconds>(Clock::now()-begin).count();
+                const auto delta=ReadWord(client.response.data()+164)-device_before;
+                const auto error=static_cast<int64_t>(delta)-elapsed;
+                ok=ok && error>-20000 && error<20000 && ReadWord(client.response.data()+32)==client.published_host_us;
+                std::printf("DEVICE CLOCK WAIT ok=%d host_idle_us=%lld device_delta_us=%u error_us=%lld raw_ticks=%u host_clock_word=%u\n",ok,
+                    static_cast<long long>(elapsed),delta,static_cast<long long>(error),ReadWord(client.response.data()+160),ReadWord(client.response.data()+32));
+            }
             if (ok) ok=bootstrap.ResetDemodulator()==BootstrapResult::ok;
-            if (ok) ok=client.Command(DTP_TA_PREPARE) && ReadWord(client.response.data()+28)==3;
+            if (ok) ok=client.Command(DTP_TA_PREPARE) && ReadWord(client.response.data()+28)==(client.device_clock ? 5u : 3u);
             if (ok) ok=client.Command(DTP_TA_I2C,{5,7,0,3});
             uint16_t vendor=0,device=0;
             if (ok) ok=client.ReadRegister(896,vendor) && client.ReadRegister(896,vendor) && client.ReadRegister(897,device);
@@ -468,7 +490,7 @@ int wmain(int argc,wchar_t **argv)
     if (usb) WinUsb_Free(usb);
     if (cancel) CloseHandle(cancel);
     CloseHandle(file);
-    std::puts(ok ? (receive ? "PASS: source-built FR PAF2 frontend/TS and core1 restore; autonomous timer untested" :
-        "PASS: source-built FR PAF2 I2C, exact core1 RAM restore and legacy restart; autonomous timer and TS untested") : "FAIL: source-built FR diagnostic (see transport, strict quality and restore counters)");
+    std::puts(ok ? (receive ? "PASS: source-built FR PAF2 frontend/TS and core1 restore (clock mode in features)" :
+        "PASS: source-built FR PAF2 I2C, exact core1 RAM restore and legacy restart (clock mode in features)") : "FAIL: source-built FR diagnostic (see transport, strict quality and restore counters)");
     return ok ? 0 : 1;
 }

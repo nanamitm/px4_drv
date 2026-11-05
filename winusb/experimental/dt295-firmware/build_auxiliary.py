@@ -23,7 +23,11 @@ def main():
                     help='link dormant torne HAL for compile verification; does not enable I2C')
     ap.add_argument('--torne-i2c', action='store_true',
                     help='build PAF2 torne I2C diagnostic with host-serviced clock')
+    ap.add_argument('--torne-device-clock', action='store_true',
+                    help='use measured USB frame clock in PAF2 instead of host-serviced clock')
     args = ap.parse_args()
+    if args.torne_device_clock and not args.torne_i2c:
+        ap.error('--torne-device-clock requires --torne-i2c')
     compiler = [args.compiler, *args.compiler_arg]
     target = subprocess.check_output([*compiler,'-dumpmachine'],text=True).strip()
     if target != 'fr30-elf':
@@ -31,9 +35,9 @@ def main():
     out = args.out.resolve()
     out.mkdir(parents=True,exist_ok=True)
     objects = []
-    for name in (['torne_auxiliary'] if args.torne_i2c else ['auxiliary']) + ['i2c_engine','runtime'] + (['torne_hal'] if args.with_torne_hal or args.torne_i2c else []):
+    for name in (['torne_auxiliary'] if args.torne_i2c else ['auxiliary']) + ['i2c_engine','runtime'] + (['torne_hal'] if args.with_torne_hal or args.torne_i2c else []) + (['torne_clock'] if args.torne_device_clock else []):
         assembly = out/(name+'.s')
-        subprocess.run([*compiler,'-S','-std=c11','-Os','-ffreestanding','-fno-builtin',
+        subprocess.run([*compiler,*(['-DDTP_TORNE_DEVICE_CLOCK'] if args.torne_device_clock else []),'-S','-std=c11','-Os','-ffreestanding','-fno-builtin',
                         '-fno-stack-protector','-fno-pic','-fno-unwind-tables',
                         '-fno-asynchronous-unwind-tables','-Wall','-Wextra','-Werror',
                         '-I',str(ROOT),'-o',str(assembly),str(ROOT/(name+'.c'))],check=True)
@@ -58,9 +62,11 @@ def main():
     if args.torne_i2c:
         sources = [name for name in sources if name not in ('auxiliary.c','auxiliary.h')]
         sources += ['torne_auxiliary.c','torne_auxiliary.h']
+    if args.torne_device_clock:
+        sources += ['torne_clock.c','torne_clock.h']
     manifest = dict(schema=1,target='CECH-ZD1J auxiliary FR' if args.torne_i2c else 'PIX-DT295 auxiliary FR',stage='source-auxiliary-unverified',
                     deployable=False,features=[],torne_hal_linked=args.with_torne_hal or args.torne_i2c,
-                    diagnostic='torne-paf2-host-clock' if args.torne_i2c else 'paf1',
+                    diagnostic=('torne-paf2-device-clock' if args.torne_device_clock else 'torne-paf2-host-clock') if args.torne_i2c else 'paf1',
                     entry='0x000a0000',shared_ram='0x017a0000',
                     mailbox_cpu='0x000a3900',mailbox_shared='0x017a3900',mailbox_magic='PAF2' if args.torne_i2c else 'PAF1',
                     compiler=subprocess.check_output([*compiler,'--version'],text=True).splitlines()[0],

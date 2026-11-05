@@ -33,7 +33,7 @@ static void setup(struct fake *f)
 {
     struct dtp_torne_bus bus={f,read32,write32,write16,now,owned};
     memset(f,0,sizeof(*f));
-    dtp_torne_aux_init(&f->c,&f->m,&bus);
+    dtp_torne_aux_init(&f->c,&f->m,&bus,DTP_TA_FEATURE_HOST_CLOCK);
     assert(f->m.magic==DTP_TA_MAGIC && f->m.abi==2 && f->m.features==2 && !f->calls);
 }
 static void request(struct fake *f,uint32_t op)
@@ -88,6 +88,12 @@ int main(void)
     dtp_torne_aux_step(&f.c); assert(f.m.result==DTP_I2C_ADDRESS_NACK && f.m.rx_completed==0 && !f.m.rx[0]);
     prepare(&f); start(&f); f.m.request_sequence++;
     dtp_torne_aux_step(&f.c); assert(f.m.status==DTP_TA_REVOKED && f.c.revoked);
+    prepare(&f); f.c.clock_feature=DTP_TA_FEATURE_DEVICE_CLOCK;
+    f.m.timeout_us=2500000; request(&f,DTP_TA_CLOCK_WAIT);
+    assert(f.c.pending==2); calls=f.calls;
+    f.m.host_us+=2499999; dtp_torne_aux_step(&f.c); assert(f.c.pending==2);
+    f.m.host_us++; dtp_torne_aux_step(&f.c);
+    assert(f.m.status==DTP_TA_OK && !f.c.pending && f.calls==calls && f.m.features==5 && !f.m.rx_completed);
     puts("PAF2 mailbox: lease, sequence, I2C, bounds, clock stall/wrap, NACK and quiesce PASS");
     return 0;
 }
