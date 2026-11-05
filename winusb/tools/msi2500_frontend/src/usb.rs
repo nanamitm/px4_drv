@@ -16,7 +16,8 @@ use windows_sys::Win32::Devices::DeviceAndDriverInstallation::{
 };
 use windows_sys::Win32::Devices::Usb::{
     WinUsb_AbortPipe, WinUsb_ControlTransfer, WinUsb_Free, WinUsb_GetOverlappedResult, WinUsb_Initialize,
-    WinUsb_QueryPipeEx, WinUsb_ReadIsochPipeAsap, WinUsb_RegisterIsochBuffer, WinUsb_SetCurrentAlternateSetting,
+    WinUsb_QueryPipeEx, WinUsb_ReadIsochPipeAsap, WinUsb_ReadPipe, WinUsb_RegisterIsochBuffer, WinUsb_ResetPipe,
+    WinUsb_SetCurrentAlternateSetting,
     WinUsb_UnregisterIsochBuffer, USBD_ISO_PACKET_DESCRIPTOR, WINUSB_PIPE_INFORMATION_EX, WINUSB_SETUP_PACKET,
 };
 use windows_sys::Win32::Foundation::{
@@ -415,6 +416,221 @@ pub fn capture(
         eprintln!("[usb] {pending} transfers did not complete after abort; leaking their buffers");
         std::mem::forget(buf);
         std::mem::forget(desc);
+        std::mem::forget(ov);
+    } else {
+        for o in ov.iter() {
+            unsafe { CloseHandle(o.hEvent) };
+        }
+    }
+    result
+}
+
+/// 取り込みの転送方式
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Transfer {
+    /// alternate 1 の等時転送 (1 マイクロフレームあたり 3×1024 バイト)
+    Isoch,
+    /// alternate 3 のバルク転送 (512 バイト)。帯域の予約がないかわりに、投入の遅れによる失敗がない
+    Bulk,
+}
+
+/// 指定した方式で取り込む。
+pub fn capture_with(
+    transfer: Transfer,
+    dev: &Device,
+    setup: &[Op],
+    limits: &CaptureLimits,
+    stats: &mut CaptureStats,
+    on_block: impl FnMut(&[u8], &CaptureStats) -> bool,
+) -> Result<(), UsbError> {
+    match transfer {
+        Transfer::Isoch => capture(dev, setup, limits, stats, on_block),
+        Transfer::Bulk => capture_bulk(dev, setup, limits, stats, on_block),
+    }
+}
+
+/// バルク転送の 1 回の読み取り長 (256 ブロック、384 形式で約 12 ms 分)
+const BULK_LEN: usize = 256 * BLOCK;
+/// 同時に投入する読み取り数 (約 0.38 秒分)
+const BULK_TRANSFERS: usize = 32;
+
+/// 設定列を送り、alternate 3 のバルク転送で取り込む。後始末の順序は等時転送と同じ。
+/// バルク転送の読み取りは短いパケットで終わることがあり、ブロックが読み取りの境界をまたぐため、
+/// 端数を次の読み取りへ持ち越してから 1024 バイトのブロックに分ける。
+pub fn capture_bulk(
+    dev: &Device,
+    setup: &[Op],
+    limits: &CaptureLimits,
+    stats: &mut CaptureStats,
+    mut on_block: impl FnMut(&[u8], &CaptureStats) -> bool,
+) -> Result<(), UsbError> {
+    dev.apply(setup)?;
+    let alt = 3u8;
+    if unsafe { WinUsb_SetCurrentAlternateSetting(dev.wh, alt) } == 0 {
+        return Err(UsbError::Win32("WinUsb_SetCurrentAlternateSetting", last_error()));
+    }
+    let mut pi: WINUSB_PIPE_INFORMATION_EX = unsafe { std::mem::zeroed() };
+    if unsafe { WinUsb_QueryPipeEx(dev.wh, alt, 0, &mut pi) } == 0 {
+        return Err(UsbError::Win32("WinUsb_QueryPipeEx", last_error()));
+    }
+    let pipe = pi.PipeId;
+    eprintln!("[usb] bulk pipe: id=0x{:02x} type={} max_packet={}", pi.PipeId, pi.PipeType, pi.MaximumPacketSize);
+    // 等時転送で使った後に alternate 3 へ切り替えると、最初の読み取りが ERROR_GEN_FAILURE で失敗し、
+    // その後データが届かない状態が続いた。投入の前にパイプの停止状態とデータトグルを初期化する
+    unsafe { WinUsb_ResetPipe(dev.wh, pipe) };
+    let mut buf = vec![0u8; BULK_LEN * BULK_TRANSFERS].into_boxed_slice();
+    let base = buf.as_mut_ptr();
+    let mut ov: Vec<OVERLAPPED> = vec![unsafe { std::mem::zeroed() }; BULK_TRANSFERS];
+    for o in ov.iter_mut() {
+        o.hEvent = unsafe { CreateEventW(std::ptr::null(), 1, 0, std::ptr::null()) };
+    }
+    let submit = |k: usize, o: &mut OVERLAPPED| -> Result<(), u32> {
+        unsafe { ResetEvent(o.hEvent) };
+        let ok = unsafe { WinUsb_ReadPipe(dev.wh, pipe, base.add(k * BULK_LEN), BULK_LEN as u32, std::ptr::null_mut(), o) };
+        if ok == 0 {
+            let e = last_error();
+            if e != ERROR_IO_PENDING {
+                return Err(e);
+            }
+        }
+        Ok(())
+    };
+
+    let mut result: Result<(), UsbError> = Ok(());
+    let mut inflight = [false; BULK_TRANSFERS];
+    for k in 0..BULK_TRANSFERS {
+        if let Err(e) = submit(k, &mut ov[k]) {
+            result = Err(UsbError::Win32("WinUsb_ReadPipe", e));
+            break;
+        }
+        inflight[k] = true;
+    }
+    if result.is_ok() {
+        result = dev.apply(&[Op::Start]);
+    }
+    let mut carry: Vec<u8> = Vec::with_capacity(2 * BLOCK);
+    let mut last_data = Instant::now();
+    let mut consecutive_errors = 0u32;
+    let mut k = 0usize;
+    'run: while result.is_ok() {
+        let w = unsafe { WaitForSingleObject(ov[k].hEvent, 1000) };
+        if w != WAIT_OBJECT_0 {
+            // 完了していない読み取りのバッファーはドライバーが使っているため、完了を待ち続ける
+            if last_data.elapsed() > limits.stall {
+                result = Err(UsbError::Stalled(last_data.elapsed()));
+                break;
+            }
+            continue;
+        }
+        let mut n = 0u32;
+        let ok = unsafe { WinUsb_GetOverlappedResult(dev.wh, &ov[k], &mut n, 0) } != 0;
+        inflight[k] = false;
+        stats.transfers += 1;
+        if !ok {
+            stats.last_error = last_error() as u64;
+            if consecutive_errors < 3 {
+                eprintln!("[usb] bulk read {k} failed: error=0x{:x}", stats.last_error);
+            }
+            stats.transfer_errors += 1;
+            consecutive_errors += 1;
+            if consecutive_errors > limits.max_consecutive_errors {
+                result = Err(UsbError::TransferErrors(consecutive_errors));
+                break;
+            }
+            // 失敗した読み取りの後は順序の保証がないため、残りを止めてパイプをリセットし、番号順に投入し直す。
+            // 失敗の前後はつながず、ブロックの番号の欠落として OFDM 側で作り直す
+            unsafe { WinUsb_AbortPipe(dev.wh, pipe) };
+            for j in 0..BULK_TRANSFERS {
+                if inflight[j] {
+                    if unsafe { WaitForSingleObject(ov[j].hEvent, 1000) } != WAIT_OBJECT_0 {
+                        result = Err(UsbError::TransferErrors(consecutive_errors));
+                        break 'run;
+                    }
+                    let mut m = 0u32;
+                    unsafe { WinUsb_GetOverlappedResult(dev.wh, &ov[j], &mut m, 0) };
+                    inflight[j] = false;
+                }
+            }
+            unsafe { WinUsb_ResetPipe(dev.wh, pipe) };
+            carry.clear();
+            for j in 0..BULK_TRANSFERS {
+                if let Err(e) = submit(j, &mut ov[j]) {
+                    result = Err(UsbError::DeviceGone(e));
+                    break 'run;
+                }
+                inflight[j] = true;
+            }
+            // エンドポイントの停止でデバイスが送出を止めている場合に備え、ストリーミングの開始を送り直す
+            if let Err(e) = dev.apply(&[Op::Start]) {
+                result = Err(e);
+                break 'run;
+            }
+            k = 0;
+            continue;
+        }
+        consecutive_errors = 0;
+        stats.packets += 1;
+        let n = n as usize;
+        if n == 0 {
+            stats.empty_packets += 1;
+        } else {
+            last_data = Instant::now();
+            if n % BLOCK != 0 {
+                stats.odd_packets += 1;
+            }
+            let data = unsafe { std::slice::from_raw_parts(base.add(k * BULK_LEN), n) };
+            let mut rest = data;
+            if !carry.is_empty() {
+                let need = BLOCK - carry.len();
+                let take = need.min(rest.len());
+                carry.extend_from_slice(&rest[..take]);
+                rest = &rest[take..];
+                if carry.len() == BLOCK {
+                    stats.blocks += 1;
+                    if !on_block(&carry, stats) {
+                        break 'run;
+                    }
+                    carry.clear();
+                }
+            }
+            let whole = rest.len() / BLOCK * BLOCK;
+            for blk in rest[..whole].chunks_exact(BLOCK) {
+                stats.blocks += 1;
+                if !on_block(blk, stats) {
+                    break 'run;
+                }
+            }
+            carry.extend_from_slice(&rest[whole..]);
+        }
+        if last_data.elapsed() > limits.stall {
+            result = Err(UsbError::Stalled(last_data.elapsed()));
+            break;
+        }
+        if let Err(e) = submit(k, &mut ov[k]) {
+            result = Err(UsbError::DeviceGone(e));
+            break;
+        }
+        inflight[k] = true;
+        k = (k + 1) % BULK_TRANSFERS;
+    }
+
+    // 後始末は等時転送と同じ順序 (転送の中止、完了待ち、20 ms、停止要求、ADC の休止)
+    unsafe { WinUsb_AbortPipe(dev.wh, pipe) };
+    let mut pending = 0usize;
+    for (o, _) in ov.iter().zip(inflight.iter()).filter(|(_, &f)| f) {
+        if unsafe { WaitForSingleObject(o.hEvent, 1000) } == WAIT_OBJECT_0 {
+            let mut n = 0u32;
+            unsafe { WinUsb_GetOverlappedResult(dev.wh, o, &mut n, 0) };
+        } else {
+            pending += 1;
+        }
+    }
+    std::thread::sleep(Duration::from_millis(20));
+    dev.stop_streaming();
+    let _ = dev.apply(&crate::regs::adc_stop());
+    if pending > 0 {
+        eprintln!("[usb] {pending} bulk reads did not complete after abort; leaking their buffers");
+        std::mem::forget(buf);
         std::mem::forget(ov);
     } else {
         for o in ov.iter() {

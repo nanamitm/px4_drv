@@ -17,7 +17,7 @@
 
 use msi2500_frontend::blocks::{BlockCounter, BlockState};
 use msi2500_frontend::regs::{Format, FrontEnd, IfMode, Tuner};
-use msi2500_frontend::usb::{capture, CaptureLimits, CaptureStats, Device, SDRPLAY_INTERFACE_GUID};
+use msi2500_frontend::usb::{capture_with, CaptureLimits, CaptureStats, Device, Transfer, SDRPLAY_INTERFACE_GUID};
 use std::io::Write;
 use std::time::Instant;
 
@@ -38,11 +38,20 @@ struct Args {
     ts_mux: Option<String>,
     viterbi_threads: usize,
     high_priority: bool,
+    transfer: Transfer,
 }
 
 /// UHF 13〜62ch の中心周波数 (473 + 1/7 MHz から 6 MHz 間隔)
 fn uhf_channel_hz(ch: u32) -> Option<u32> {
     (13..=62).contains(&ch).then(|| 473_142_857 + (ch - 13) * 6_000_000)
+}
+
+fn parse_transfer(v: &str) -> Result<Transfer, String> {
+    match v {
+        "isoch" => Ok(Transfer::Isoch),
+        "bulk" => Ok(Transfer::Bulk),
+        x => Err(format!("unknown --transfer {x} (isoch or bulk)")),
+    }
 }
 
 fn parse(mut it: impl Iterator<Item = String>) -> Result<Args, String> {
@@ -51,6 +60,7 @@ fn parse(mut it: impl Iterator<Item = String>) -> Result<Args, String> {
         input: None, ts_a: None, ts_b: None, ts_mux: None,
         viterbi_threads: std::thread::available_parallelism().map(|n| n.get().min(4)).unwrap_or(2),
         high_priority: false,
+        transfer: Transfer::Isoch,
     };
     while let Some(k) = it.next() {
         let mut v = || it.next().ok_or(format!("{k} needs a value"));
@@ -67,6 +77,7 @@ fn parse(mut it: impl Iterator<Item = String>) -> Result<Args, String> {
             "--ts-b" => a.ts_b = Some(v()?),
             "--ts" => a.ts_mux = Some(v()?),
             "--viterbi-threads" => a.viterbi_threads = v()?.parse().map_err(|e| format!("--viterbi-threads: {e}"))?,
+            "--transfer" => a.transfer = parse_transfer(&v()?)?,
             "--priority" => {
                 a.high_priority = match v()?.as_str() {
                     "normal" => false,
@@ -128,7 +139,7 @@ fn run_capture(a: Args) -> i32 {
     let t0 = Instant::now();
     let mut next_report = 1.0f64;
     let mut write_failed = false;
-    let r = capture(&dev, &setup, &CaptureLimits::default(), &mut stats, |blk, st| {
+    let r = capture_with(a.transfer, &dev, &setup, &CaptureLimits::default(), &mut stats, |blk, st| {
         let prev_blocks = counter.blocks;
         let state = counter.push(blk);
         let addr = u32::from_le_bytes([blk[0], blk[1], blk[2], blk[3]]);
@@ -369,10 +380,10 @@ fn run_live(a: Args) -> i32 {
             use windows_sys::Win32::System::Threading::{GetCurrentThread, SetThreadPriority, THREAD_PRIORITY_HIGHEST};
             unsafe { SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST) };
         }
-        eprintln!("[live] {} freq={} gain={} viterbi_threads={} priority={}", dev.path, a.freq, a.gain, a.viterbi_threads,
-            if a.high_priority { "high" } else { "normal" });
+        eprintln!("[live] {} freq={} gain={} viterbi_threads={} priority={} transfer={:?}", dev.path, a.freq, a.gain, a.viterbi_threads,
+            if a.high_priority { "high" } else { "normal" }, a.transfer);
         let mut stats = CaptureStats::default();
-        let r = capture(&dev, &setup, &CaptureLimits::default(), &mut stats, |blk, _| {
+        let r = capture_with(a.transfer, &dev, &setup, &CaptureLimits::default(), &mut stats, |blk, _| {
             feeder.push(blk);
             report(&live, false);
             t0.elapsed().as_secs_f64() < a.seconds
@@ -441,6 +452,7 @@ fn run_serve(mut it: impl Iterator<Item = String>) -> i32 {
         input: None, ts_a: None, ts_b: None, ts_mux: None,
         viterbi_threads: std::thread::available_parallelism().map(|n| n.get().min(4)).unwrap_or(2),
         high_priority: false,
+        transfer: Transfer::Isoch,
     };
     let mut path: Option<String> = None;
     let parsed: Result<(), String> = (|| {
@@ -452,6 +464,7 @@ fn run_serve(mut it: impl Iterator<Item = String>) -> i32 {
                 "--frequency" => a.freq = v.parse().map_err(|e| format!("--frequency: {e}"))?,
                 "--gain" => a.gain = v.parse().map_err(|e| format!("--gain: {e}"))?,
                 "--viterbi-threads" => a.viterbi_threads = v.parse().map_err(|e| format!("--viterbi-threads: {e}"))?,
+                "--transfer" => a.transfer = parse_transfer(&v)?,
                 x => return Err(format!("unknown argument {x}")),
             }
         }
@@ -510,7 +523,7 @@ fn run_serve(mut it: impl Iterator<Item = String>) -> i32 {
             eprintln!("[serve] {} freq={} gain={} viterbi_threads={}", dev.path, a.freq, a.gain, a.viterbi_threads);
             let mut cs = CaptureStats::default();
             let mut ready = false;
-            let r = capture(&dev, &setup, &CaptureLimits::default(), &mut cs, |blk, _| {
+            let r = capture_with(a.transfer, &dev, &setup, &CaptureLimits::default(), &mut cs, |blk, _| {
                 if !ready {
                     ready = true;
                     let _ = otx.send(OutMsg::Ready);
@@ -633,8 +646,8 @@ fn main() {
             }
         },
         _ => {
-            eprintln!("usage: msi2500_frontend capture [--seconds N] [--out PATH|-] [--freq HZ|--channel N] [--gain DB] [--bw HZ] [--frontend default|sdrplay] [--index N]");
-            eprintln!("       msi2500_frontend live [--seconds N] [--freq HZ|--channel N] [--gain DB] [--index N] [--input RAW_BLOCKS_FILE] [--ts PATH] [--ts-a PATH] [--ts-b PATH] [--viterbi-threads N] [--priority normal|high]");
+            eprintln!("usage: msi2500_frontend capture [--seconds N] [--out PATH|-] [--freq HZ|--channel N] [--gain DB] [--bw HZ] [--frontend default|sdrplay] [--index N] [--transfer isoch|bulk]");
+            eprintln!("       msi2500_frontend live [--seconds N] [--freq HZ|--channel N] [--gain DB] [--index N] [--input RAW_BLOCKS_FILE] [--ts PATH] [--ts-a PATH] [--ts-b PATH] [--viterbi-threads N] [--priority normal|high] [--transfer isoch|bulk]");
             eprintln!("       msi2500_frontend demod RAW_BLOCKS_FILE [TS_OUT_B]");
             2
         }
