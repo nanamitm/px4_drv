@@ -19,6 +19,8 @@ def main():
     ap.add_argument('--objcopy', default='fr30-elf-objcopy')
     ap.add_argument('--objdump', default='fr30-elf-objdump')
     ap.add_argument('--out', type=Path, default=ROOT/'build'/'auxiliary')
+    ap.add_argument('--with-torne-hal', action='store_true',
+                    help='link dormant torne HAL for compile verification; does not enable I2C')
     args = ap.parse_args()
     compiler = [args.compiler, *args.compiler_arg]
     target = subprocess.check_output([*compiler,'-dumpmachine'],text=True).strip()
@@ -27,7 +29,7 @@ def main():
     out = args.out.resolve()
     out.mkdir(parents=True,exist_ok=True)
     objects = []
-    for name in ['auxiliary','i2c_engine','runtime']:
+    for name in ['auxiliary','i2c_engine','runtime'] + (['torne_hal'] if args.with_torne_hal else []):
         assembly = out/(name+'.s')
         subprocess.run([*compiler,'-S','-std=c11','-Os','-ffreestanding','-fno-builtin',
                         '-fno-stack-protector','-fno-pic','-fno-unwind-tables',
@@ -49,8 +51,11 @@ def main():
     digest = lambda p:hashlib.sha256(p.read_bytes()).hexdigest()
     sources = ['auxiliary.c','auxiliary.h','auxiliary_entry.s','auxiliary.ld',
                'i2c_engine.c','i2c_engine.h','runtime.c','build_auxiliary.py']
+    if args.with_torne_hal:
+        sources += ['torne_hal.c','torne_hal.h']
     manifest = dict(schema=1,target='PIX-DT295 auxiliary FR',stage='source-auxiliary-unverified',
-                    deployable=False,features=[],entry='0x000a0000',shared_ram='0x017a0000',
+                    deployable=False,features=[],torne_hal_linked=args.with_torne_hal,
+                    entry='0x000a0000',shared_ram='0x017a0000',
                     mailbox_cpu='0x000a3900',mailbox_shared='0x017a3900',mailbox_magic='PAF1',
                     compiler=subprocess.check_output([*compiler,'--version'],text=True).splitlines()[0],
                     tools={name:subprocess.check_output([tool,'--version'],text=True).splitlines()[0]

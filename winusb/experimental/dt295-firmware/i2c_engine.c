@@ -7,6 +7,12 @@ static void control(struct dtp_i2c_engine *e, uint32_t clear, uint32_t set)
     e->io.write32(e->io.opaque, DTP_I2C_CONTROL, e->control);
 }
 
+static void command(struct dtp_i2c_engine *e, uint32_t clear, uint32_t set, uint32_t torne)
+{
+    if (e->torne_controls) control(e, 0xffffffffu, torne);
+    else control(e, clear, set);
+}
+
 void dtp_i2c_init(struct dtp_i2c_engine *e, const struct dtp_i2c_io *io)
 {
     uint32_t i;
@@ -23,7 +29,7 @@ static enum dtp_i2c_result fail(struct dtp_i2c_engine *e, enum dtp_i2c_result re
 {
     if (may_stop) {
         /* 観察した制御bitを落とす停止要求。物理STOP/回復完了とは扱わない。 */
-        control(e, 0x10, 0);
+        command(e, 0x10, 0, 0x40);
         e->stop_requested = 1;
     }
     e->phase = DTP_I2C_FAILED;
@@ -34,7 +40,7 @@ static enum dtp_i2c_result fail(struct dtp_i2c_engine *e, enum dtp_i2c_result re
 
 static void stop(struct dtp_i2c_engine *e)
 {
-    control(e, 0x10, 0);
+    command(e, 0x10, 0, 0x40);
     e->stop_requested = 1;
     e->phase = DTP_I2C_STOP;
 }
@@ -42,7 +48,8 @@ static void stop(struct dtp_i2c_engine *e)
 static void receive_next(struct dtp_i2c_engine *e)
 {
     /* 参考コードの最終byte/途中byteの制御差を表現する。ACK波形は未検証。 */
-    control(e, 0x09, (e->rx_size - e->rx_completed > 1) ? 0x08 : 0);
+    command(e, 0x09, (e->rx_size - e->rx_completed > 1) ? 0x08 : 0,
+        (e->rx_size - e->rx_completed > 1) ? 0x58 : 0x50);
     e->phase = DTP_I2C_RX;
 }
 
@@ -51,12 +58,12 @@ static void transmit_next(struct dtp_i2c_engine *e)
     if (e->tx_submitted < e->tx_size) {
         e->io.write32(e->io.opaque, DTP_I2C_DATA, e->tx[e->tx_submitted++]);
         e->in_flight = 1;
-        control(e, 0x01, 0);
+        command(e, 0x01, 0, 0x50);
         e->phase = DTP_I2C_TX;
     } else if (e->rx_size) {
         /* STOPを挟まず読み取りアドレスへ進む。実機でrepeated STARTを確認する。 */
         e->io.write32(e->io.opaque, DTP_I2C_DATA, ((uint32_t)e->address << 1) | 1);
-        control(e, 0, 0x20);
+        command(e, 0, 0x20, 0x70);
         e->phase = DTP_I2C_ADDRESS_RX;
     } else {
         stop(e);
@@ -94,7 +101,7 @@ enum dtp_i2c_result dtp_i2c_start(struct dtp_i2c_engine *e, uint32_t address,
     e->timeout_us = timeout_us;
     e->result = DTP_I2C_PENDING;
     e->io.write32(e->io.opaque, DTP_I2C_DATA, ((uint32_t)address << 1) | (tx_size ? 0 : 1));
-    control(e, 0, 0x10);
+    command(e, 0, 0x10, 0x50);
     e->phase = tx_size ? DTP_I2C_ADDRESS_TX : DTP_I2C_ADDRESS_RX;
     return e->result;
 }
@@ -111,11 +118,17 @@ enum dtp_i2c_result dtp_i2c_poll(struct dtp_i2c_engine *e, uint32_t now_us, int 
     /* uint32差分でwrapを扱い、pollごとに期限を延長しない。 */
     if ((uint32_t)(now_us - e->started_us) >= e->timeout_us)
         return fail(e, DTP_I2C_TIMEOUT, 1);
-    if ((e->control & 0x80) ||
-        ((e->phase == DTP_I2C_ADDRESS_TX || e->phase == DTP_I2C_ADDRESS_RX) && (e->state & 0x10)))
+    if ((e->control & 0x80) || (!e->torne_controls &&
+        (e->phase == DTP_I2C_ADDRESS_TX || e->phase == DTP_I2C_ADDRESS_RX) && (e->state & 0x10)))
         return fail(e, DTP_I2C_CONTROLLER_ERROR, 1);
-    /* 完了/進行通知の物理条件はHALの未解決部分。仮の時間待ちで代用しない。 */
+    if (completion_ready == -1) completion_ready = e->torne_controls && (e->control & 1);
     if (!completion_ready && e->phase != DTP_I2C_STOP) return DTP_I2C_PENDING;
+    /* ACK状態は完了後だけ有効。受信末尾のホストNACKとは区別する。 */
+    if (e->torne_controls && (e->state & 0x10)) {
+        if (e->phase == DTP_I2C_ADDRESS_TX || e->phase == DTP_I2C_ADDRESS_RX)
+            return fail(e, DTP_I2C_ADDRESS_NACK, 1);
+        if (e->phase == DTP_I2C_TX) return fail(e, DTP_I2C_DATA_NACK, 1);
+    }
     switch (e->phase) {
     case DTP_I2C_ADDRESS_TX:
         transmit_next(e);
