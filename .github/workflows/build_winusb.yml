@@ -244,6 +244,9 @@ jobs:
           python tools/check_rtlsdr_package.py
           if ($LASTEXITCODE -ne 0) { throw 'RTL-SDR package check failed' }
 
+          python tools/check_msi2500_package.py
+          if ($LASTEXITCODE -ne 0) { throw 'MSi2500 package check failed' }
+
           python tools/check_pxbcud_package.py
           if ($LASTEXITCODE -ne 0) { throw 'PX-BCUD package check failed' }
 
