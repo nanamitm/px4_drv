@@ -1,6 +1,6 @@
 # torne用I²C HAL
 
-`torne_hal.c/.h` はCECH-ZD1JのMB86H47向けに、共通の `i2c_engine.c` を接続する実験用C実装です。専用のWindows診断ツールからUSBレジスターアクセスを渡し、実機でDiB8096の識別と反復読み取りを確認しています。既存DriverHostやPAF1メールボックスからの呼び出しは未接続で、FR版の実機実行とCAPSのI²C機能ビット有効化は今後の段階です。
+`torne_hal.c/.h` はCECH-ZD1JのMB86H47向けに、共通の `i2c_engine.c` を接続する実験用C実装です。本書はWindows上の診断ツールから実行したHALの検証を扱います。別のPAF2診断では、同じHALをソース生成FRイメージへ接続し、torne上でのID読み取りも確認しています。FR版の時計・ABI・ロード/復元は [torne-fr-i2c.md](torne-fr-i2c.md) にあります。既存DriverHostやPAF1からの呼び出しは未接続です。
 
 ## 根拠とライセンス
 
@@ -87,4 +87,4 @@ python tools/check_capture.py '<prefix>_gr17_1.ts' --expected-tsid 31760 --disca
 
 保存データ検査は通常 `stable_interval_ok` を終了判定に使い、`--strict-zero-discard` を指定すると開始時も含めて破棄0を要求します。`tests/test_capture.py` は既知のPAT/CRCを含むfixtureと、同期・TEI・CC・CRC破損、TSID違い、末尾切断、破棄数不一致の拒否を確認します。
 
-NACK等の実機異常注入、物理波形、長時間転送、DT295固有部は未確認です。次はソース生成FRイメージにHALと機器側時計を接続し、メールボックス経由で同じID・選局を確認する段階です。
+NACK等の実機異常注入、物理波形、長時間転送、DT295固有部は未確認です。別の [PAF2診断](torne-fr-i2c.md) ではソース生成FRイメージへHALとホスト供給時計を接続し、メールボックス経由のID読み取りまで確認しています。新FR版経由の選局・TS受信は次の段階です。
