@@ -12,6 +12,7 @@ import random
 import struct
 import sys
 import unittest
+from fr_model import Machine
 
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
 import protocol as p
@@ -20,44 +21,12 @@ import protocol as p
 def execute(code, packet, null=False):
     memory=bytearray(packet)
     ptr=0x1000
-    regs=[0x12340000+i for i in range(16)]
-    regs[4]=0 if null else ptr
-    original=regs.copy()
-    pc=0
-    equal=False
-    def word(address, value=None):
-        if address&3 or not ptr<=address<=ptr+60:
-            raise AssertionError(f'out-of-packet or unaligned access {address:#x}')
-        off=address-ptr
-        if value is None:return int.from_bytes(memory[off:off+4],'big')
-        memory[off:off+4]=(value&0xffffffff).to_bytes(4,'big')
-    for steps in range(512):
-        if not 0<=pc<=len(code)-2 or pc&1:
-            raise AssertionError('invalid instruction address')
-        inst=int.from_bytes(code[pc:pc+2],'big')
-        top=inst>>8
-        i,j=(inst>>4)&15,inst&15
-        pc+=2
-        if inst==0x9720:
-            if regs[4:]!=original[4:]:raise AssertionError('callee modified preserved registers')
-            return bytes(memory),steps+1
-        if inst&0xfff0==0x9f80:
-            regs[j]=int.from_bytes(code[pc:pc+4],'big');pc+=4
-        elif inst&0xf000==0xc000:regs[j]=(inst>>4)&255
-        elif top==0x8b:regs[j]=regs[i]
-        elif top==0xa0:regs[j]=(regs[j]+i)&0xffffffff
-        elif top==0xa1:regs[j]=(regs[j]+i-16)&0xffffffff
-        elif top==0xa8:equal=regs[j]==i
-        elif top==0xaa:equal=regs[j]==regs[i]
-        elif top==0x04:regs[j]=word(regs[i])
-        elif top==0x14:word(regs[i],regs[j])
-        elif top==0x92:regs[j]|=regs[i]
-        elif top in (0xe0,0xe2,0xe3):
-            disp=inst&255
-            if disp&128:disp-=256
-            if top==0xe0 or (top==0xe2 and equal) or (top==0xe3 and not equal):pc+=disp*2
-        else:raise AssertionError(f'unsupported instruction {inst:04x} at {pc-2:#x}')
-    raise AssertionError('core exceeded finite instruction budget')
+    machine=Machine({0x80380000:code},{ptr:memory})
+    machine.regs[4]=0 if null else ptr
+    original=machine.regs.copy()
+    _,steps=machine.run(0x80380000)
+    if machine.regs[4:]!=original[4:]:raise AssertionError('callee modified preserved registers')
+    return bytes(memory),steps
 
 
 class CoreTests(unittest.TestCase):

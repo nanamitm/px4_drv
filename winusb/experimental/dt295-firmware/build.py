@@ -25,14 +25,30 @@ def main():
     subprocess.run([args.objcopy, '-O', 'binary', str(out/'resident.elf'), str(out/'resident.bin')], check=True)
     with (out/'resident.asm').open('wb') as stream:
         subprocess.run([args.objdump, '-d', str(out/'resident.elf')], stdout=stream, check=True)
+    subprocess.run([args.assembler, '-o', str(out/'bootstrap.o'), str(ROOT/'bootstrap.s')], check=True)
+    subprocess.run([args.linker, '-T', str(ROOT/'bootstrap.ld'), '-o', str(out/'bootstrap.elf'), str(out/'bootstrap.o')], check=True)
+    # ELFの配置間隔をパディングした巨大なrawイメージとして出力しない。
+    for section, name in [('.text','bootstrap.bin'),('.hook','boot-hook.bin')]:
+        subprocess.run([args.objcopy, '-O', 'binary', '--only-section='+section,
+                        str(out/'bootstrap.elf'), str(out/name)], check=True)
+    with (out/'bootstrap.asm').open('wb') as stream:
+        subprocess.run([args.objdump, '-d', str(out/'bootstrap.elf')], stdout=stream, check=True)
+    if not 0 < (out/'resident.bin').stat().st_size <= 0x1000 or \
+            not 0 < (out/'bootstrap.bin').stat().st_size <= 0x800 or \
+            (out/'boot-hook.bin').stat().st_size != 8:
+        raise ValueError('invalid extracted firmware segment size')
     versions = {name: subprocess.check_output([tool, '--version'], text=True).splitlines()[0]
                 for name, tool in [('as',args.assembler),('ld',args.linker),('objcopy',args.objcopy),('objdump',args.objdump)]}
     digest = lambda p: hashlib.sha256(p.read_bytes()).hexdigest()
     manifest = dict(schema=1, target='PIX-DT295', entry='0x80380000', format='raw-fr-big-endian',
-                    stage='protocol-core-only', deployable=False, features=[], tools=versions,
-                    sources={name:digest(ROOT/name) for name in ['resident.s','resident.ld','build.py']},
+                    stage='diagnostic-bootstrap-unverified', deployable=False, features=[], tools=versions,
+                    sources={name:digest(ROOT/name) for name in ['resident.s','resident.ld','bootstrap.s','bootstrap.ld','build.py']},
                     binary=dict(file='resident.bin', size=(out/'resident.bin').stat().st_size,
-                                sha256=digest(out/'resident.bin')))
+                                sha256=digest(out/'resident.bin')),
+                    bootstrap=dict(file='bootstrap.bin',address='0x000e1000',
+                                   size=(out/'bootstrap.bin').stat().st_size,sha256=digest(out/'bootstrap.bin')),
+                    hook=dict(file='boot-hook.bin',address='0x000ea6fc',
+                              size=(out/'boot-hook.bin').stat().st_size,sha256=digest(out/'boot-hook.bin')))
     (out/'manifest.json').write_text(json.dumps(manifest, indent=2)+'\n', encoding='utf-8')
     print(json.dumps(manifest, indent=2))
 
