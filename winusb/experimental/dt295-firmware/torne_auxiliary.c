@@ -27,8 +27,9 @@ static void finish(struct dtp_torne_aux *c, uint32_t status, enum dtp_i2c_result
 {
     volatile struct dtp_torne_mailbox *m=c->mailbox;
     uint32_t i;
+    const int transfer=c->pending==1 || c->pending==3;
     for (i=0;i<40;++i) m->rx[i]=(status==DTP_TA_OK && c->pending==1 && i<c->hal.engine.rx_completed) ? c->hal.engine.rx[i] : 0;
-    m->tx_completed=c->pending==1 ? c->hal.engine.tx_completed : 0;
+    m->tx_completed=transfer ? c->hal.engine.tx_completed : 0;
     m->rx_completed=c->pending==1 && status==DTP_TA_OK ? c->hal.engine.rx_completed : 0;
     m->state=c->hal.engine.state;
     m->control=c->hal.engine.control;
@@ -79,7 +80,25 @@ void dtp_torne_aux_step(struct dtp_torne_aux *c)
             if ((uint32_t)(now-c->wait_started)>=c->wait_budget) finish(c,DTP_TA_OK,DTP_I2C_OK);
             return;
         }
+        if (c->pending==3) {
+            uint32_t state=0x80;
+            /* STOP要求は非同期。失敗を公開する前に最大500msで静止を確認する。
+             * 期限を越えた場合も元の失敗とbusy状態を返し、再利用は許可しない。 */
+            if (!c->hal.bus.exclusive(c->hal.bus.opaque,1)) {
+                abort_transfer(c,DTP_TA_REVOKED); return;
+            }
+            if (!c->hal.bus.read32(c->hal.bus.opaque,0xfd8fe0,&state)) {
+                finish(c,DTP_TA_TRANSFER_FAILED,DTP_I2C_IO_ERROR); return;
+            }
+            c->hal.engine.state=state;
+            if (!(state&0x80) || (uint32_t)(now-c->wait_started)>=500000u)
+                finish(c,DTP_TA_TRANSFER_FAILED,c->hal.engine.result);
+            return;
+        }
         r=dtp_torne_poll(&c->hal);
+        if (r!=DTP_I2C_PENDING && r!=DTP_I2C_OK && c->hal.engine.stop_requested && c->hal.fault==DTP_I2C_OK) {
+            c->pending=3; c->wait_started=now; return;
+        }
         if (r!=DTP_I2C_PENDING) finish(c,r==DTP_I2C_OK ? DTP_TA_OK : DTP_TA_TRANSFER_FAILED,r);
         return;
     }

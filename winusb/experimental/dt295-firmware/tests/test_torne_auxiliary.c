@@ -83,9 +83,24 @@ int main(void)
     dtp_torne_aux_step(&f.c); assert(f.m.status==DTP_TA_CLOCK_STALLED && f.control==0x40 && f.c.revoked);
     prepare(&f); f.m.host_us=0xfffffff0u; start(&f);
     f.m.host_us=0x3d8; /* 1000us後、wrapをまたぐ。 */
+    dtp_torne_aux_step(&f.c); assert(f.c.pending==3 && f.m.response_sequence!=f.m.request_sequence);
     dtp_torne_aux_step(&f.c); assert(f.m.status==DTP_TA_TRANSFER_FAILED && f.m.result==DTP_I2C_TIMEOUT && f.m.features==2);
     prepare(&f); start(&f); f.state=0x10; f.control|=1;
+    dtp_torne_aux_step(&f.c); assert(f.c.pending==3);
     dtp_torne_aux_step(&f.c); assert(f.m.result==DTP_I2C_ADDRESS_NACK && f.m.rx_completed==0 && !f.m.rx[0]);
+    prepare(&f); start(&f); f.state=0x80; f.m.host_us+=1000;
+    dtp_torne_aux_step(&f.c); assert(f.c.pending==3);
+    f.m.host_us+=1000; dtp_torne_aux_step(&f.c);
+    assert(f.c.pending==3 && f.m.response_sequence!=f.m.request_sequence);
+    f.state=0; dtp_torne_aux_step(&f.c);
+    assert(!f.c.pending && f.m.result==DTP_I2C_TIMEOUT && !(f.m.state&0x80) && f.m.features==2);
+    prepare(&f); start(&f); f.state=0x80; f.m.host_us+=1000;
+    dtp_torne_aux_step(&f.c); f.m.host_us+=499999; dtp_torne_aux_step(&f.c); assert(f.c.pending==3);
+    f.m.host_us++; dtp_torne_aux_step(&f.c);
+    assert(!f.c.pending && f.m.result==DTP_I2C_TIMEOUT && (f.m.state&0x80) && f.m.features==2);
+    prepare(&f); start(&f); f.state=0x80; f.m.host_us+=1000;
+    dtp_torne_aux_step(&f.c); calls=f.calls; f.m.lease=18; dtp_torne_aux_step(&f.c);
+    assert(f.m.status==DTP_TA_REVOKED && f.calls==calls);
     prepare(&f); start(&f); f.m.request_sequence++;
     dtp_torne_aux_step(&f.c); assert(f.m.status==DTP_TA_REVOKED && f.c.revoked);
     prepare(&f); f.c.clock_feature=DTP_TA_FEATURE_DEVICE_CLOCK;

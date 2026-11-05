@@ -141,8 +141,10 @@ private:
                     std::printf("PAF2 seq=%u operation=%u status=%u result=%u features=%u tx_done=%u rx_done=%u state=%08x control=%08x\n",
                         sequence_,operation,status,result,ReadWord(response.data()+28),ReadWord(response.data()+144),
                         ReadWord(response.data()+148),ReadWord(response.data()+152),ReadWord(response.data()+156));
+                const auto done_tx=ReadWord(response.data()+144),done_rx=ReadWord(response.data()+148);
                 const bool counts=operation!=DTP_TA_I2C ||
-                    (ReadWord(response.data()+144)==tx.size() && ReadWord(response.data()+148)==reads);
+                    (done_tx<=tx.size() && done_rx<=reads &&
+                     ((status!=DTP_TA_OK || result!=DTP_I2C_OK) || (done_tx==tx.size() && done_rx==reads)));
                 if (!counts) std::printf("PAF2 malformed completion counts seq=%u\n",sequence_);
                 return status==DTP_TA_OK && result==DTP_I2C_OK && counts;
             }
@@ -342,7 +344,7 @@ static bool Receive(Client &client,MemoryAccess &memory,WinUsbControl &control,B
     return ok && strict && runs==3 && alive;
 }
 
-static bool Run(HANDLE file,WINUSB_INTERFACE_HANDLE usb,HANDLE cancel,std::vector<uint8_t> image,const std::wstring &prefix,bool receive)
+static bool Run(HANDLE file,WINUSB_INTERFACE_HANDLE usb,HANDLE cancel,std::vector<uint8_t> image,const std::wstring &prefix,bool receive,unsigned fault)
 {
     NativeControlIo native;
     WinUsbControl control(file,usb,cancel,native);
@@ -413,10 +415,26 @@ static bool Run(HANDLE file,WINUSB_INTERFACE_HANDLE usb,HANDLE cancel,std::vecto
             }
             std::printf("FR REPEAT pairs=%u target=100 ok=%d\n",pairs,ok);
             if (ok && receive) ok=Receive(client,memory,control,bootstrap,file,usb,cancel,prefix);
+            if (ok && fault) {
+                // 固定した1アドレスだけを読む。NACKは未使用0x7f、timeoutは既知のvendorレジスター。
+                const bool completed=fault==1 ? client.Command(DTP_TA_I2C,{},1,0x7f) :
+                    client.Command(DTP_TA_I2C,{3,0x80},40,9,1);
+                const auto expected=fault==1 ? DTP_I2C_ADDRESS_NACK : DTP_I2C_TIMEOUT;
+                uint32_t sequence=0,held=0,state=0;
+                const bool captured=memory.Read32(mailbox+12,sequence)==MemoryResult::ok;
+                const bool rejected=!client.Command(DTP_TA_PING);
+                const bool unchanged=memory.Read32(mailbox+12,held)==MemoryResult::ok && sequence==held;
+                const bool idle=memory.Read32(0xfd8fe0,state)==MemoryResult::ok && !(state&0x80);
+                ok=!completed && !client.healthy && ReadWord(client.response.data()+24)==DTP_TA_TRANSFER_FAILED &&
+                    ReadWord(client.response.data()+60)==static_cast<uint32_t>(expected) && captured && rejected && unchanged && idle;
+                std::printf("EXPECTED FAULT kind=%u status=%u result=%u poisoned=%d no_resend=%d idle=%d ok=%d\n",fault,
+                    ReadWord(client.response.data()+24),ReadWord(client.response.data()+60),!client.healthy,rejected&&unchanged,idle,ok);
+            }
             // 品質判定で失敗しても、通信が正常ならQUIESCEする。通信失敗時は再送せず停止へ。
-            const bool quiet=client.healthy && client.Command(DTP_TA_QUIESCE);
+            const bool quiet=fault ? ok : client.healthy && client.Command(DTP_TA_QUIESCE);
             ok=ok && quiet;
-            std::printf("FR QUIESCE ok=%d\n",quiet);
+            if(fault)std::printf("FR QUIESCE skipped after expected fault; proceeding to core halt ok=%d\n",quiet);
+            else std::printf("FR QUIESCE ok=%d\n",quiet);
         }
     }
     // イメージ実行に失敗しても、別の期限で停止・復元・再開を試みる。
@@ -456,8 +474,10 @@ int wmain(int argc,wchar_t **argv)
     std::setvbuf(stdout,nullptr,_IONBF,0);
     if (argc==2 && !std::wcscmp(argv[1],L"--self-test")) return SelfTest() ? 0 : 1;
     const bool receive=argc==6 && !std::wcscmp(argv[1],L"--receive");
-    if (argc!=6 || (!receive && std::wcscmp(argv[1],L"--run"))) {
-        std::puts("Usage: torne_aux_probe --run|--receive <exact device path> <FR binary> <expected SHA256> <backup/TS prefix>");
+    const unsigned fault=argc==6 && !std::wcscmp(argv[1],L"--nack") ? 1u :
+        argc==6 && !std::wcscmp(argv[1],L"--timeout") ? 2u : 0u;
+    if (argc!=6 || (!receive && !fault && std::wcscmp(argv[1],L"--run"))) {
+        std::puts("Usage: torne_aux_probe --run|--receive|--nack|--timeout <exact device path> <FR binary> <expected SHA256> <backup/TS prefix>");
         return 2;
     }
     std::ifstream input(std::filesystem::path(argv[3]),std::ios::binary|std::ios::ate);
@@ -485,7 +505,7 @@ int wmain(int argc,wchar_t **argv)
         ok=WinUsb_GetDescriptor(usb,USB_DEVICE_DESCRIPTOR_TYPE,0,0,reinterpret_cast<PUCHAR>(&d),sizeof(d),&count) &&
             count==sizeof(d) && d.idVendor==0x054c && d.idProduct==0x04b2;
         std::printf("IDENTITY vid=%04x pid=%04x exact_match=%d exclusive=1\n",d.idVendor,d.idProduct,ok);
-        if (ok) ok=Run(file,usb,cancel,image,argv[5],receive);
+        if (ok) ok=Run(file,usb,cancel,image,argv[5],receive,fault);
     }
     if (usb) WinUsb_Free(usb);
     if (cancel) CloseHandle(cancel);
