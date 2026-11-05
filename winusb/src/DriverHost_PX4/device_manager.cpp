@@ -15,6 +15,7 @@
 #include "torne/experimental_device.hpp"
 #include "pxbcud/device.hpp"
 #include "rtlsdr/device.hpp"
+#include "msi2500/device.hpp"
 #include "siano/device.hpp"
 
 namespace px4 {
@@ -67,6 +68,8 @@ DeviceManager::DeviceManager(const px4::DeviceDefinitionSet &device_defs, px4::R
 			type = DeviceType::SIANO;
 		else if (it->first == L"RTLSDR")
 			type = DeviceType::RTLSDR;
+		else if (it->first == L"MSI2500")
+			type = DeviceType::MSI2500;
 
 		if (type == DeviceType::UNKNOWN)
 			continue;
@@ -160,6 +163,14 @@ void DeviceManager::Add(const std::wstring &path, const std::pair<DeviceType, px
 		const int ret = dev->Init();
 		if (!ret) devices_.emplace(path, std::move(dev));
 		else msg_err("RTL-SDR: device initialization failed ret=%d\n", ret);
+		break;
+	}
+	case px4::DeviceType::MSI2500:
+	{
+		auto dev = std::make_shared<px4::msi2500::Device>(path, def.second, ++index_, receiver_manager_);
+		const int ret = dev->Init();
+		if (!ret) devices_.emplace(path, std::move(dev));
+		else msg_err("MSi2500: device initialization failed ret=%d\n", ret);
 		break;
 	}
 	case px4::DeviceType::PXBCUD:

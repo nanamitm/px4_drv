@@ -274,6 +274,7 @@
     <ClCompile Include="device_manager.cpp" />
     <ClCompile Include="pxbcud\device.cpp" />
     <ClCompile Include="rtlsdr\rtl_device.cpp" />
+    <ClCompile Include="msi2500\msi2500_device.cpp" />
     <ClCompile Include="pxbcud\frontend.cpp" />
     <ClCompile Include="siano\device.cpp">
       <ObjectFileName>$(IntDir)siano_device.obj</ObjectFileName>
@@ -334,6 +335,7 @@
     <ClInclude Include="device_manager.hpp" />
     <ClInclude Include="pxbcud\device.hpp" />
     <ClInclude Include="rtlsdr\device.hpp" />
+    <ClInclude Include="msi2500\device.hpp" />
     <ClInclude Include="siano\device.hpp" />
     <ClInclude Include="siano\capture_gate.hpp" />
     <ClInclude Include="siano\firmware_path.hpp" />
