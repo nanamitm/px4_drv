@@ -255,15 +255,21 @@ fn fec_loop(rx: Receiver<SymMsg>, mut out: Option<Box<dyn Write + Send>>, stats:
                 dec.push(&syms, &mut ts);
                 if !ts.is_empty() {
                     check.push(&ts);
+                    {
+                        // serve は TS のフレームの品質 (DriverHost の信号レベル) を RS の統計から求め、BonDriver の利用側は
+                        // 最初の TS の時点で信号レベルが 0 でないことを期待する。統計を TS より先に反映し、最初の TS で RS の結果が見えるようにする
+                        let mut s = stats.lock().unwrap();
+                        s.fec = dec.stats.clone();
+                        (s.ts_packets, s.tei, s.cc_errors) = (check.packets, check.tei, check.cc_errors);
+                        if s.first_ts_s.is_none() {
+                            s.first_ts_s = Some(t0.elapsed().as_secs_f64());
+                        }
+                    }
                     if let Some(w) = out.as_mut() {
                         if w.write_all(&ts).is_err() {
                             out = None;
                             stats.lock().unwrap().write_failed = true;
                         }
-                    }
-                    let mut s = stats.lock().unwrap();
-                    if s.first_ts_s.is_none() {
-                        s.first_ts_s = Some(t0.elapsed().as_secs_f64());
                     }
                     ts.clear();
                 }
