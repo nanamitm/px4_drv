@@ -6,8 +6,8 @@ ITU-T J.83 Annex B (256QAM、5.6 Msps) を復調し、BonDriver から TS とし
 DriverHost への組み込みを土台にする。
 
 2.1〜2.4 節の測定値は、試作ツールによる取り込みとオフライン復調の結果である。2.5 節は helper の Rust 実装
-(J1、オフライン) で同じ取り込みを復調した結果、2.6 節は helper の実時間の受信 (J2) の結果である。
-DriverHost への組み込みはまだない。
+(J1、オフライン) で同じ取り込みを復調した結果、2.6 節は helper の実時間の受信 (J2)、2.7 節は DriverHost と
+BonDriver を経由した受信 (J3) の結果である。
 
 ## 検証環境
 
@@ -150,6 +150,19 @@ helper の `qam.rs` と `j83b.rs` で、2.3 節と同じ取り込みを先頭か
   再試験では保留も TS の誤りもなかった。
 - 処理系の開始から最初の TS までは 0.26 秒だった。うち約 0.19 秒は、USB の開始区間 (4,096 ブロック) を捨てる時間である。
 
+### 2.7 BonDriver 経由の受信 (J3)
+
+`tests/msi2500_bondriver_live.ps1 -J83B -Channel 7 -AlternateChannel 6 -Cycles 4 -Seconds 30 -IsolatedHost` (x64) で、
+同じ接続の中で H008 と H007 を交互に 4 回選局した。各回の TS は 30 秒で、同期の誤り、TEI、CC の途切れ、PAT の誤り、
+3 秒を超える空白はいずれも 0、PAT の TSID で前の搬送波の混入がないことも確かめた。品質は各回 100 だった。
+
+- 選局 (`SetChannel`) から戻るまでの時間は、2 回目以降が 421〜438 ms (前の helper の停止を含む) で、
+  `ReceiverBase::TuneIsdbC` のロックまでの上限 1 秒に収まった。新しい実行ファイルを初めて起動した 1 回目は 1,422 ms で、
+  上限は helper の起動 (`SetFrequency`) から戻った後のロックまでに掛かるため、選局は成功した。
+- 最初の TS の時点で信号レベルが 0 になり、試験の取得側が旧チャンネルの TS と判定する問題があった。
+  helper の誤り訂正の統計を 16 回に 1 回だけ反映していたためで、TS を出す前に反映するように改めた。
+- 同じ構成の ISDB-T (UHF の空間、非同期の選局) も、2 回の各 20 秒で誤りがなかった。
+
 ## 3. 構成
 
 ```
@@ -195,14 +208,18 @@ helper の起動形式は `serve --system j83b --frequency HZ` とし、標準�
 
 ## 6. DriverHost と BonDriver
 
-- `msi2500::Device` の受信機を `ISDB-T` と `J.83B` の両方に対応させ、`params_.system` に応じて helper の起動引数を変える。
-  J.83B の周波数はチャンネル定義の中心周波数 (kHz) をそのまま使い、93〜770 MHz の範囲を受け付ける。
-- 利得は系統ごとに設定する (`GainDb` と `GainDbJ83B`)。2.1 節のとおり、J.83B には地上デジタル放送より大きい値が要る。
-- `ReceiverBase::TuneIsdbC` は、ロックまでを 1 秒で打ち切る。helper の起動 (約 0.15〜0.3 秒)、USB の開始と開始区間
-  (約 0.2 秒)、等化器の収束を合わせた時間を J2 で測り、1 秒を超える場合は MSi2500 の受信機の待ち方を別に決める。
-- `BonDriver_MSI2500.ini` に `J.83B` のチューニング空間を加える。
-- 試験用の BonDriver クライアント (`rtlsdr_bondriver_live`) はワンセグの PMT (PID 0x1FC8) を必須にしているため、
-  J.83B の試験では判定を切り替える。
+- `msi2500::Device` の受信機は、DriverHost_PX4.ini の `System` に `J.83B` を書いた場合だけ J.83B を受け付け
+  (`ISDB-T` は必須)、`params_.system` に応じて helper へ `--system j83b` を渡す。J.83B の周波数はチャンネル定義の
+  中心周波数 (kHz) をそのまま使い、地域によるずれを含めて 90〜775 MHz を受け付ける。
+- 利得は系統ごとに設定する (`GainDb` と `GainDbJ83B`)。`GainDbJ83B` の既定値は、2.6 節で飽和がなく誤りもなかった 46 とした。
+- J.83B の選局は `ReceiverBase::TuneIsdbC` を通り、ロックまでを 1 秒で打ち切る。2.7 節のとおり、2 回目以降の選局は
+  helper の停止と起動を含めて約 0.44 秒で収まったため、MSi2500 の受信機の待ち方は変えなかった。`AsyncTune` は
+  ISDB-T の選局 (`CheckTuneComplete`) だけに効く。
+- TS のリングバッファは、J.83B の TS (約 4.85 MB/s) でも約 3 秒分になる 188 × 81,920 バイトを、系統によらず確保する。
+- `BonDriver_MSI2500.ini` に `J.83B` のチューニング空間を加え、チャンネル定義は PX-MLT 系と共通の
+  `BonDriver_PX4-J83B.ChSet.txt` を配布物へ同梱する。チューニング空間は UHF が 0、J.83B が 1 になる。
+- 試験用の BonDriver クライアント (`rtlsdr_bondriver_live`) は、環境変数で選局する空間と基準のチャンネル、
+  ワンセグの PMT の確認の有無を切り替えられる。`msi2500_bondriver_live.ps1 -J83B` がこれを設定する。
 
 ## 7. 段階的な実装
 
