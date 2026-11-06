@@ -44,15 +44,18 @@ using px4::rtlsdr::Frames;
 
 class Receiver final: public ReceiverBase {
 public:
-    Receiver(std::wstring device_path,std::uintptr_t index,const Config &config)
-        :ReceiverBase(0),device_path_(std::move(device_path)),index_(index),helper_(config.Get(L"HelperPath",L"msi2500\\msi2500_frontend.exe"))
+    Receiver(std::wstring device_path,std::uintptr_t index,const Config &config,bool j83b)
+        :ReceiverBase(0),device_path_(std::move(device_path)),index_(index),helper_(config.Get(L"HelperPath",L"msi2500\\msi2500_frontend.exe")),j83b_(j83b)
     {
         if(helper_.size()<2 || helper_[1]!=L':') helper_=px4::util::path::GetDir()+L"\\"+helper_;
         // 利得は MSi001 の LNA・ミキサー・IF の合計 (dB)。helper の --gain と同じ 0〜102
         if(config.Exists(L"GainDb")) gain_=px4::util::wtoi(config.Get(L"GainDb"));
+        // J.83B はケーブルの入力レベルが地上波のアンテナ入力と異なるため、別の値を持つ。
+        // 検証環境では 58 で ADC が飽和して RS の訂正が急増し、46〜52 で誤りがなかった
+        if(config.Exists(L"GainDbJ83B")) gain_j83b_=px4::util::wtoi(config.Get(L"GainDbJ83B"));
         if(config.Exists(L"ViterbiThreads")) viterbi_threads_=px4::util::wtoi(config.Get(L"ViterbiThreads"));
         async_tune_=px4::util::wtob(config.Get(L"AsyncTune",L"false"));
-        if(gain_<0 || gain_>102) throw DeviceError("MSi2500: invalid gain");
+        if(gain_<0 || gain_>102 || gain_j83b_<0 || gain_j83b_>102) throw DeviceError("MSi2500: invalid gain");
         if(viterbi_threads_<0 || viterbi_threads_>64) throw DeviceError("MSi2500: invalid Viterbi thread count");
     }
     ~Receiver() override
@@ -97,9 +100,10 @@ public:
         if(!open_ || !available_)return -ECANCELED;
         if(!capture){capture_=false;StopHelper();stream_buf_->Stop();return 0;}
         if(capture_)return -EALREADY;
-        // フルセグの TS は約 2.1 MB/s。helper の出力は再多重化で約 1 フレーム (0.23 秒) ごとにまとまって届くため、
-        // 約 3 秒分を確保する
-        if(!stream_buf_->Alloc(188*32768))return -ENOMEM;
+        // フルセグの TS は約 2.1 MB/s で、helper の出力は再多重化で約 1 フレーム (0.23 秒) ごとにまとまって届く。
+        // J.83B (256QAM、5.6 Msps) の TS は約 4.85 MB/s。選局の前に確保するため、J.83B でも約 3 秒分になる大きさを
+        // どちらの系統にも確保する (フルセグでは約 7 秒分)
+        if(!stream_buf_->Alloc(188*81920))return -ENOMEM;
         stream_buf_->SetDiscardNullPacketsOnOutput(false);
         stream_buf_->SetThresholdSize(188*64);stream_buf_->Start();capture_=true;
         const int result=frequency_?StartHelper():0;
@@ -111,7 +115,7 @@ public:
         bool locked=false;const int result=CheckLock(locked);value=0;
         if(result)return result;
         if(type!=command::StatType::CNR)return -ENOSYS;
-        // RTL-SDR と同じ 0〜100 の品質点 (B 階層の RS 復号の成功割合)。校正した RF C/N ではない。
+        // RTL-SDR と同じ 0〜100 の品質点 (ISDB-T は B 階層、J.83B は全ブロックの RS 復号の成功割合)。校正した RF C/N ではない。
         if(locked)value=static_cast<std::int32_t>(quality_.load()*10);
         return 0;
     }
@@ -132,12 +136,21 @@ protected:
     int SetFrequency() override
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        if(!open_ || !available_ || params_.system!=SystemType::ISDB_T)return -EINVAL;
-        if(params_.freq<473143 || params_.freq>707143 || (params_.freq-473143)%6000)return -EINVAL;
+        if(!open_ || !available_)return -EINVAL;
+        std::uint32_t frequency=0;
+        if(params_.system==SystemType::ISDB_T) {
+            if(params_.freq<473143 || params_.freq>707143 || (params_.freq-473143)%6000)return -EINVAL;
+            frequency=473142857+((params_.freq-473143)/6000)*6000000;
+        } else if(params_.system==SystemType::J83B && j83b_) {
+            // J.83B はチャンネル定義の中心周波数 (kHz) をそのまま使う。地域によって H001〜H105 からずれた周波数があるため、
+            // 6.5 MHz 刻みに限らず helper の受け付ける範囲 (90〜775 MHz) で受ける
+            if(params_.freq<90000 || params_.freq>775000)return -EINVAL;
+            frequency=params_.freq*1000;
+        } else return -EINVAL;
         StopHelper();
         // 旧 helper の書き込み停止後に世代を切り替え、前チャンネルの復調状態も破棄する。
         if(!stream_buf_->AdvanceEpoch())return -EIO;
-        frequency_=473142857+((params_.freq-473143)/6000)*6000000;
+        frequency_=frequency;system_j83b_=params_.system==SystemType::J83B;
         return StartHelper();
     }
     int SetStreamId() override {return 0;}
@@ -179,8 +192,10 @@ private:
         HANDLE inherited[]={child_input.Get(),child_output.Get(),child_error.Get()};
         const bool attr_ok=UpdateProcThreadAttribute(startup.lpAttributeList,0,PROC_THREAD_ATTRIBUTE_HANDLE_LIST,inherited,sizeof(inherited),nullptr,nullptr)!=FALSE;
         // 個体は DriverHost が列挙したデバイスインターフェースのパスで指定する
-        std::wstring command=Quote(helper_)+L" serve --path "+Quote(device_path_)+L" --frequency "+std::to_wstring(frequency_)+L" --gain "+std::to_wstring(gain_);
-        if(viterbi_threads_)command+=L" --viterbi-threads "+std::to_wstring(viterbi_threads_);
+        std::wstring command=Quote(helper_)+L" serve --path "+Quote(device_path_)+L" --frequency "+std::to_wstring(frequency_)
+            +L" --gain "+std::to_wstring(system_j83b_ ? gain_j83b_ : gain_);
+        if(system_j83b_)command+=L" --system j83b";
+        else if(viterbi_threads_)command+=L" --viterbi-threads "+std::to_wstring(viterbi_threads_);
         PROCESS_INFORMATION process{};
         const BOOL created=attr_ok && CreateProcessW(helper_.c_str(),command.data(),nullptr,nullptr,TRUE,
             CREATE_NO_WINDOW|CREATE_SUSPENDED|EXTENDED_STARTUPINFO_PRESENT,nullptr,nullptr,&startup.StartupInfo,&process);
@@ -195,7 +210,7 @@ private:
         // 子への出力書込端を親が残すと、子の終了を EOF として検出できなくなる。
         child_input.Set(nullptr);child_output.Set(nullptr);child_error.Set(nullptr);
         worker_=std::thread([this]{ReadHelper();});
-        msg_info("MSi2500: started device=%llu frequency=%u\n",static_cast<unsigned long long>(index_),frequency_);
+        msg_info("MSi2500: started device=%llu system=%s frequency=%u\n",static_cast<unsigned long long>(index_),system_j83b_ ? "J.83B" : "ISDB-T",frequency_);
         return 0;
     }
     void StopHelper()
@@ -260,6 +275,10 @@ private:
     std::wstring helper_;
     bool async_tune_=false;
     int gain_=40;
+    int gain_j83b_=46;
+    // 受信機定義で J.83B を受け付けるか (Device::Init で設定する) と、起動中の helper の系統
+    bool j83b_=false;
+    bool system_j83b_=false;
     int viterbi_threads_=0;
     std::uint32_t frequency_=0;
     std::mutex mutex_;std::condition_variable closed_;
@@ -284,12 +303,16 @@ int Device::Init()
     if(receiver_)return -EALREADY;
     // Mirics MSi2500 (SDRplay RSP1 と互換機)。シリアル番号は空の個体があるため条件に含めない
     if(usb_dev_.descriptor.idVendor!=0x1df7 || usb_dev_.descriptor.idProduct!=0x2500)return -ENODEV;
-    if(device_def_.receivers.size()!=1 || device_def_.receivers[0].systems!=SystemType::ISDB_T)return -EINVAL;
-    receiver_=std::make_unique<Receiver>(device_path_,index_,device_def_.configs);
+    // 受信機は 1 つで、ISDB-T を必須とし、J.83B は ini の System に書いた場合だけ受け付ける
+    if(device_def_.receivers.size()!=1)return -EINVAL;
+    const auto systems=device_def_.receivers[0].systems;
+    constexpr auto supported=SystemType::ISDB_T|SystemType::J83B;
+    if((systems&SystemType::ISDB_T)!=SystemType::ISDB_T || (systems|supported)!=supported)return -EINVAL;
+    receiver_=std::make_unique<Receiver>(device_path_,index_,device_def_.configs,(systems&SystemType::J83B)==SystemType::J83B);
     const auto &definition=device_def_.receivers[0];command::ReceiverInfo info{};
     wcscpy_s(info.device_name,device_def_.name.c_str());info.device_guid=device_def_.guid;
     wcscpy_s(info.receiver_name,definition.name.c_str());info.receiver_guid=definition.guid;
-    info.systems=SystemType::ISDB_T;info.index=definition.index;
+    info.systems=systems;info.index=definition.index;
     if(!receiver_manager_.Register(info,receiver_.get(),GetDeviceIdentity())){receiver_.reset();return -EIO;}
     return 0;
 }

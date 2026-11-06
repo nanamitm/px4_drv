@@ -8,7 +8,9 @@
 //!     取り込みから OFDM 復調と A・B 階層の誤り訂正までを別スレッドで実時間に処理し、毎秒の統計と CPU 使用率を出す。
 //!     --ts は A・B 階層を多重フレームの位置に従って再多重した TS、--ts-a と --ts-b は階層ごとの TS。
 //!     --input を指定すると機器の代わりに capture の生ブロックファイルを読む。終了コード: 0 正常、2 引数の誤り、3 デバイスの失敗。
-//!   serve --path DEVICE_PATH|--index N --frequency HZ [--gain DB] [--viterbi-threads N]
+//!     --system j83b で J.83 Annex B (256QAM、5.6 Msps) を受信する。周波数は --freq HZ か --hch N (H001〜H105) で指定し、
+//!     --ts に TS を書き出す。--pll は判定帰還 PLL の帯域の倍率。
+//!   serve --path DEVICE_PATH|--index N --frequency HZ [--system isdbt|j83b] [--gain DB] [--viterbi-threads N]
 //!     DriverHost_PX4 から起動される形。標準出力へ RTL-SDR の helper と同じ形式のフレーム (hostproto) で
 //!     再多重した TS と状態を出し、標準入力の終わりで停止する。終了コード: 0 正常、1 失敗、2 引数の誤り。
 //!   demod RAW_BLOCKS_FILE [TS_OUT_B]
@@ -39,11 +41,31 @@ struct Args {
     viterbi_threads: usize,
     high_priority: bool,
     transfer: Transfer,
+    /// J.83 Annex B を受信する (live と serve)
+    j83b: bool,
+    /// J.83B の判定帰還 PLL の帯域の倍率
+    pll: f32,
 }
 
 /// UHF 13〜62ch の中心周波数 (473 + 1/7 MHz から 6 MHz 間隔)
 fn uhf_channel_hz(ch: u32) -> Option<u32> {
     (13..=62).contains(&ch).then(|| 473_142_857 + (ch - 13) * 6_000_000)
+}
+
+/// スカパー！プレミアムサービス光の H001〜H105 の中心周波数 (93.25 MHz から 6.5 MHz 間隔、BonDriver_PX4-J83B.ChSet.txt と同じ)
+fn hch_hz(ch: u32) -> Option<u32> {
+    (1..=105).contains(&ch).then(|| 93_250_000 + (ch - 1) * 6_500_000)
+}
+
+/// J.83B で受け付ける周波数 (H001〜H105 と、地域によるずれを含む範囲)
+const J83B_RANGE: std::ops::RangeInclusive<u32> = 90_000_000..=775_000_000;
+
+fn parse_system(v: &str) -> Result<bool, String> {
+    match v {
+        "isdbt" => Ok(false),
+        "j83b" => Ok(true),
+        x => Err(format!("unknown --system {x} (isdbt or j83b)")),
+    }
 }
 
 fn parse_transfer(v: &str) -> Result<Transfer, String> {
@@ -61,10 +83,18 @@ fn parse(mut it: impl Iterator<Item = String>) -> Result<Args, String> {
         viterbi_threads: std::thread::available_parallelism().map(|n| n.get().min(4)).unwrap_or(2),
         high_priority: false,
         transfer: Transfer::Isoch,
+        j83b: false,
+        pll: 1.0,
     };
     while let Some(k) = it.next() {
         let mut v = || it.next().ok_or(format!("{k} needs a value"));
         match k.as_str() {
+            "--system" => a.j83b = parse_system(&v()?)?,
+            "--hch" => {
+                let ch: u32 = v()?.parse().map_err(|e| format!("--hch: {e}"))?;
+                a.freq = hch_hz(ch).ok_or("--hch must be 1..105")?;
+            }
+            "--pll" => a.pll = v()?.parse().map_err(|e| format!("--pll: {e}"))?,
             "--seconds" => a.seconds = v()?.parse().map_err(|e| format!("--seconds: {e}"))?,
             "--out" => a.out = Some(v()?),
             "--freq" => a.freq = v()?.parse().map_err(|e| format!("--freq: {e}"))?,
@@ -100,6 +130,12 @@ fn parse(mut it: impl Iterator<Item = String>) -> Result<Args, String> {
     }
     if !(0..=102).contains(&a.gain) {
         return Err("--gain must be 0..102".into());
+    }
+    if a.j83b && !J83B_RANGE.contains(&a.freq) {
+        return Err("--system j83b needs --freq in 90..775 MHz or --hch".into());
+    }
+    if !(0.1..=20.0).contains(&a.pll) {
+        return Err("--pll must be 0.1..20".into());
     }
     Ok(a)
 }
@@ -416,6 +452,122 @@ fn run_live(a: Args) -> i32 {
     if device_error.is_some() { 3 } else { 0 }
 }
 
+/// J.83B の 1 行の統計
+fn j83b_line(s: &msi2500_frontend::live_j83b::J83bLiveStats) -> String {
+    let f = s.fec_total();
+    let q = &s.qam;
+    format!(
+        "signal={:7.2}s blocks={} lost={} gaps={} seg={} clip={:.1e} MER={:.1}dB dd={} restarts={} timing={:+.2}ppm carrier={:+.0}Hz | frames={} sync_loss={} acq={} ctrl_rej={} | RS blk={} corr={} unc={} | pkt={} cs_err={} pkt_sync_loss={} tei={} cc={}",
+        s.signal_s(), s.blocks, s.lost_samples, s.gaps, s.segments, s.clipped as f64 / s.samples.max(1) as f64,
+        q.mer_db, q.dd as u8, q.restarts, q.timing_ppm, q.carrier_hz,
+        f.frames, f.frame_sync_losses, f.acquisitions, f.control_word_rejects, f.rs_blocks, f.rs_corrected, f.rs_uncorrectable,
+        s.ts_packets, f.checksum_errors, f.packet_sync_losses, s.tei, s.cc_errors
+    )
+}
+
+/// J.83B の受信を取り込み (または録画ファイル) から TS まで実時間に処理する。
+fn run_live_j83b(a: Args) -> i32 {
+    use msi2500_frontend::live::process_usage;
+    use msi2500_frontend::live_j83b::{J83bLive, J83bLiveConfig};
+    let ts_out: Option<Box<dyn Write + Send>> = match &a.ts_mux {
+        None => None,
+        Some(p) => match std::fs::File::create(p) {
+            Ok(f) => Some(Box::new(std::io::BufWriter::with_capacity(1 << 20, f))),
+            Err(e) => {
+                eprintln!("[live] {p}: {e}");
+                return 2;
+            }
+        },
+    };
+    if a.ts_a.is_some() || a.ts_b.is_some() {
+        eprintln!("[live] --ts-a and --ts-b are for ISDB-T; use --ts with --system j83b");
+        return 2;
+    }
+    let cfg = J83bLiveConfig { raw_queue: 256, symbol_queue: 512, pll_scale: a.pll, ts_out };
+    let (live, mut feeder) = J83bLive::start(cfg);
+    let t0 = Instant::now();
+    let (cpu0, _, _) = process_usage();
+    let (mut last_t, mut last_cpu, mut next_report) = (0f64, cpu0, 1.0f64);
+    let mut max_cores = 0f64;
+    let mut max_ws = 0usize;
+    let mut report = |live: &J83bLive, force: bool| {
+        let el = t0.elapsed().as_secs_f64();
+        if !force && el < next_report {
+            return;
+        }
+        next_report = el.floor() + 1.0;
+        let (cpu, ws, _) = process_usage();
+        let cores = (cpu - last_cpu) / (el - last_t).max(1e-9);
+        (last_t, last_cpu) = (el, cpu);
+        max_cores = max_cores.max(cores);
+        max_ws = max_ws.max(ws);
+        let s = live.stats.lock().unwrap().clone();
+        eprintln!("[live] t={el:7.2}s {} overflow={} | cpu={cores:.2} ws={}MB", j83b_line(&s), live.overflow_chunks(), ws >> 20);
+    };
+
+    let mut device_error = None;
+    if let Some(path) = &a.input {
+        let f = match std::fs::File::open(path) {
+            Ok(f) => f,
+            Err(e) => {
+                eprintln!("[live] {path}: {e}");
+                return 2;
+            }
+        };
+        let mut r = std::io::BufReader::with_capacity(1 << 20, f);
+        let mut blk = vec![0u8; 1024];
+        while std::io::Read::read_exact(&mut r, &mut blk).is_ok() {
+            feeder.push_wait(&blk);
+            report(&live, false);
+        }
+    } else {
+        let setup = tuner_setup(&a);
+        let dev = match Device::open(&SDRPLAY_INTERFACE_GUID, a.index) {
+            Ok(d) => d,
+            Err(e) => {
+                eprintln!("[live] open failed: {e}");
+                return 3;
+            }
+        };
+        if a.high_priority {
+            use windows_sys::Win32::System::Threading::{GetCurrentThread, SetThreadPriority, THREAD_PRIORITY_HIGHEST};
+            unsafe { SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST) };
+        }
+        eprintln!("[live] {} system=j83b freq={} gain={} pll={} priority={} transfer={:?}", dev.path, a.freq, a.gain, a.pll,
+            if a.high_priority { "high" } else { "normal" }, a.transfer);
+        let mut stats = CaptureStats::default();
+        let mut first_block: Option<f64> = None;
+        let r = capture_with(a.transfer, &dev, &setup, &CaptureLimits::default(), &mut stats, |blk, _| {
+            if first_block.is_none() {
+                first_block = Some(t0.elapsed().as_secs_f64());
+            }
+            feeder.push(blk);
+            report(&live, false);
+            t0.elapsed().as_secs_f64() < a.seconds
+        });
+        if let Err(e) = r {
+            eprintln!("[live] capture stopped: {e}");
+            device_error = Some(e);
+        }
+        eprintln!("[live] usb: transfers={} packets={} bad_packets={} odd_packets={} transfer_errors={} last_error=0x{:x} unwritten_blocks={} first_block={:.3}s",
+            stats.transfers, stats.packets, stats.bad_packets, stats.odd_packets, stats.transfer_errors, stats.last_error, stats.unwritten_blocks,
+            first_block.unwrap_or(f64::NAN));
+    }
+    let wall_in = t0.elapsed().as_secs_f64();
+    let overflow = live.overflow_chunks();
+    let fin = live.finish(feeder);
+    let wall = t0.elapsed().as_secs_f64();
+    let (cpu, _, _) = process_usage();
+    let f = fin.fec_total();
+    eprintln!("[live] total: {}", j83b_line(&fin));
+    eprintln!("[live] rs: clean={} corrected={} ({} symbols) uncorrectable={} control_word={:?} control_word_rejects={} conj={} orientation_flips={}{}",
+        f.rs_clean, f.rs_corrected, f.rs_corrected_symbols, f.rs_uncorrectable, f.control_word, f.control_word_rejects, f.conj, f.orientation_flips,
+        if fin.write_failed { " (TS write failed)" } else { "" });
+    eprintln!("[live] done: input={wall_in:.2}s drain={:.2}s first_ts={:.3}s startup={} backward={} overflow_chunks={overflow} cpu_mean={:.2} cpu_max={max_cores:.2} ws_max={}MB",
+        wall - wall_in, fin.first_ts_s.unwrap_or(f64::NAN), fin.startup_blocks, fin.backward, (cpu - cpu0) / wall.max(1e-9), max_ws >> 20);
+    if device_error.is_some() { 3 } else { 0 }
+}
+
 enum OutMsg {
     Ready,
     Ts(Vec<u8>),
@@ -437,11 +589,37 @@ impl Write for ChannelWriter {
     }
 }
 
+/// serve の処理系 (系統ごと)
+enum Pipe {
+    Isdbt(msi2500_frontend::live::Live),
+    J83b(msi2500_frontend::live_j83b::J83bLive),
+}
+
+impl Pipe {
+    /// キューの残りを処理し終えるまで待ち、最終の統計の 1 行を返す
+    fn finish(self, feeder: msi2500_frontend::live::Feeder) -> String {
+        match self {
+            Pipe::Isdbt(live) => {
+                let fin = live.finish(feeder);
+                let (fa, fb) = (fin.layer_total(0), fin.layer_total(1));
+                format!("blocks={} lost={} gaps={} backward={} segments={} B blk={} unc={} | A blk={} unc={} | remux frames={} packets={} late={} forced={}",
+                    fin.blocks, fin.lost_samples, fin.gaps, fin.backward, fin.segments, fb.blocks, fb.uncorrectable, fa.blocks, fa.uncorrectable,
+                    fin.remux.frames, fin.remux.packets, fin.remux.late, fin.remux.forced)
+            }
+            Pipe::J83b(live) => {
+                let fin = live.finish(feeder);
+                format!("{} first_ts={:.3}s", j83b_line(&fin), fin.first_ts_s.unwrap_or(f64::NAN))
+            }
+        }
+    }
+}
+
 /// DriverHost_PX4 から起動される受信。標準出力へ hostproto の形式で TS と状態を出し、
 /// 標準入力の終わり (または 1 バイト) を停止要求として扱う。終了コード: 0 正常、1 失敗、2 引数の誤り。
 fn run_serve(mut it: impl Iterator<Item = String>) -> i32 {
     use msi2500_frontend::hostproto::{retain_valid_packets, write_frame, Kind, MAX_TS};
     use msi2500_frontend::live::{Live, LiveConfig};
+    use msi2500_frontend::live_j83b::{J83bLive, J83bLiveConfig};
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::mpsc::{sync_channel, RecvTimeoutError};
     use std::sync::Arc;
@@ -453,6 +631,8 @@ fn run_serve(mut it: impl Iterator<Item = String>) -> i32 {
         viterbi_threads: std::thread::available_parallelism().map(|n| n.get().min(4)).unwrap_or(2),
         high_priority: false,
         transfer: Transfer::Isoch,
+        j83b: false,
+        pll: 1.0,
     };
     let mut path: Option<String> = None;
     let parsed: Result<(), String> = (|| {
@@ -460,6 +640,8 @@ fn run_serve(mut it: impl Iterator<Item = String>) -> i32 {
             let v = it.next().ok_or(format!("{k} needs a value"))?;
             match k.as_str() {
                 "--path" => path = Some(v),
+                "--system" => a.j83b = parse_system(&v)?,
+                "--pll" => a.pll = v.parse().map_err(|e| format!("--pll: {e}"))?,
                 "--index" => a.index = v.parse().map_err(|e| format!("--index: {e}"))?,
                 "--frequency" => a.freq = v.parse().map_err(|e| format!("--frequency: {e}"))?,
                 "--gain" => a.gain = v.parse().map_err(|e| format!("--gain: {e}"))?,
@@ -468,8 +650,15 @@ fn run_serve(mut it: impl Iterator<Item = String>) -> i32 {
                 x => return Err(format!("unknown argument {x}")),
             }
         }
-        if !(470_000_000..=770_000_000).contains(&a.freq) {
+        if a.j83b {
+            if !J83B_RANGE.contains(&a.freq) {
+                return Err("--frequency must be in 90..775 MHz for --system j83b".into());
+            }
+        } else if !(470_000_000..=770_000_000).contains(&a.freq) {
             return Err("--frequency must be a UHF channel centre in Hz".into());
+        }
+        if !(0.1..=20.0).contains(&a.pll) {
+            return Err("--pll must be 0.1..20".into());
         }
         if !(0..=102).contains(&a.gain) {
             return Err("--gain must be 0..102".into());
@@ -494,15 +683,32 @@ fn run_serve(mut it: impl Iterator<Item = String>) -> i32 {
         });
     }
     let (otx, orx) = sync_channel::<OutMsg>(256);
-    let cfg = LiveConfig {
-        viterbi_threads: a.viterbi_threads.max(1),
-        raw_queue: 256,
-        symbol_queue: 512,
-        ts_out: [None, None],
-        ts_mux: Some(Box::new(ChannelWriter(otx.clone()))),
+    // 品質の元になる RS の成功数と失敗数 (ISDB-T は B 階層、J.83B は全 RS ブロック)
+    let (pipe, mut feeder, rs_counts): (Pipe, _, Box<dyn Fn() -> (u64, u64)>) = if a.j83b {
+        let cfg = J83bLiveConfig { raw_queue: 256, symbol_queue: 512, pll_scale: a.pll, ts_out: Some(Box::new(ChannelWriter(otx.clone()))) };
+        let (live, feeder) = J83bLive::start(cfg);
+        let st = live.stats.clone();
+        let counts = move || {
+            let f = st.lock().unwrap().fec_total();
+            (f.rs_clean + f.rs_corrected, f.rs_uncorrectable)
+        };
+        (Pipe::J83b(live), feeder, Box::new(counts))
+    } else {
+        let cfg = LiveConfig {
+            viterbi_threads: a.viterbi_threads.max(1),
+            raw_queue: 256,
+            symbol_queue: 512,
+            ts_out: [None, None],
+            ts_mux: Some(Box::new(ChannelWriter(otx.clone()))),
+        };
+        let (live, feeder) = Live::start(cfg);
+        let st = live.stats.clone();
+        let counts = move || {
+            let b = st.lock().unwrap().layer_total(1);
+            (b.clean + b.corrected, b.uncorrectable)
+        };
+        (Pipe::Isdbt(live), feeder, Box::new(counts))
     };
-    let (live, mut feeder) = Live::start(cfg);
-    let stats = live.stats.clone();
     let capture_thread = {
         let otx = otx.clone();
         let stop = stop.clone();
@@ -516,11 +722,12 @@ fn run_serve(mut it: impl Iterator<Item = String>) -> i32 {
                 Ok(d) => d,
                 Err(e) => {
                     let _ = otx.send(OutMsg::Error(format!("open failed: {e}")));
-                    live.finish(feeder);
+                    pipe.finish(feeder);
                     return;
                 }
             };
-            eprintln!("[serve] {} freq={} gain={} viterbi_threads={}", dev.path, a.freq, a.gain, a.viterbi_threads);
+            eprintln!("[serve] {} system={} freq={} gain={} viterbi_threads={}", dev.path, if a.j83b { "j83b" } else { "isdbt" },
+                a.freq, a.gain, a.viterbi_threads);
             let mut cs = CaptureStats::default();
             let mut ready = false;
             let r = capture_with(a.transfer, &dev, &setup, &CaptureLimits::default(), &mut cs, |blk, _| {
@@ -533,11 +740,7 @@ fn run_serve(mut it: impl Iterator<Item = String>) -> i32 {
             });
             eprintln!("[serve] usb: transfers={} packets={} bad_packets={} odd_packets={} transfer_errors={} last_error=0x{:x} unwritten_blocks={}",
                 cs.transfers, cs.packets, cs.bad_packets, cs.odd_packets, cs.transfer_errors, cs.last_error, cs.unwritten_blocks);
-            let fin = live.finish(feeder);
-            let (fa, fb) = (fin.layer_total(0), fin.layer_total(1));
-            eprintln!("[serve] done: blocks={} lost={} gaps={} backward={} segments={} B blk={} unc={} | A blk={} unc={} | remux frames={} packets={} late={} forced={}",
-                fin.blocks, fin.lost_samples, fin.gaps, fin.backward, fin.segments, fb.blocks, fb.uncorrectable, fa.blocks, fa.uncorrectable,
-                fin.remux.frames, fin.remux.packets, fin.remux.late, fin.remux.forced);
+            eprintln!("[serve] done: {}", pipe.finish(feeder));
             let _ = otx.send(match r {
                 Err(e) if !stop.load(Ordering::Relaxed) => OutMsg::Error(format!("capture stopped: {e}")),
                 _ => OutMsg::Done,
@@ -562,11 +765,7 @@ fn run_serve(mut it: impl Iterator<Item = String>) -> i32 {
                 stop.store(true, Ordering::Relaxed);
             }
         };
-        let (acc, rej) = {
-            let s = stats.lock().unwrap();
-            let b = s.layer_total(1);
-            (b.clean + b.corrected, b.uncorrectable)
-        };
+        let (acc, rej) = rs_counts();
         match m {
             Ok(OutMsg::Ready) => write(Kind::Ready, &[], 0, acc, rej),
             Ok(OutMsg::Ts(mut ts)) => {
@@ -639,6 +838,7 @@ fn main() {
         },
         Some("serve") => run_serve(args),
         Some("live") => match parse(args) {
+            Ok(a) if a.j83b => run_live_j83b(a),
             Ok(a) => run_live(a),
             Err(e) => {
                 eprintln!("{e}");
@@ -648,6 +848,8 @@ fn main() {
         _ => {
             eprintln!("usage: msi2500_frontend capture [--seconds N] [--out PATH|-] [--freq HZ|--channel N] [--gain DB] [--bw HZ] [--frontend default|sdrplay] [--index N] [--transfer isoch|bulk]");
             eprintln!("       msi2500_frontend live [--seconds N] [--freq HZ|--channel N] [--gain DB] [--index N] [--input RAW_BLOCKS_FILE] [--ts PATH] [--ts-a PATH] [--ts-b PATH] [--viterbi-threads N] [--priority normal|high] [--transfer isoch|bulk]");
+            eprintln!("       msi2500_frontend live --system j83b [--seconds N] [--freq HZ|--hch N] [--gain DB] [--index N] [--input RAW_BLOCKS_FILE] [--ts PATH] [--pll X] [--priority normal|high]");
+            eprintln!("       msi2500_frontend serve --path DEVICE_PATH|--index N --frequency HZ [--system isdbt|j83b] [--gain DB] [--viterbi-threads N] [--pll X]");
             eprintln!("       msi2500_frontend demod RAW_BLOCKS_FILE [TS_OUT_B]");
             2
         }

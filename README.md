@@ -14,6 +14,7 @@ PLEX 社の [Webサイト](http://plex-net.co.jp) にて配布されている公
 
 - RTL2838UHIDIR（USB ID `0BDA:2838`）向けに、受信用 Interface 0 の WinUSB INF、機器診断・I/Q 収録ツールと、独立したソフトウェア復調 helper を使うワンセグ BonDriver を追加（Windows WinUSB 版のみ、実験的）。[診断・収録手順](winusb/tools/rtlsdr/README.md)と[導入手順](docs/rtlsdr-install.md)と[技術資料・検証記録](winusb/docs/rtlsdr-bondriver.md)を参照。
 - SDRplay RSP1 の互換機（Mirics MSi2500 + MSi001、USB ID `1DF7:2500`）向けに、ソフトウェアで OFDM 復調・誤り訂正・A/B 階層の再多重を行う helper を使うフルセグ BonDriver を追加（Windows WinUSB 版のみ、実験的。USB ドライバーは SDRplay のものを使用）。USB の等時転送の遅れで数分〜十数分に 1 回、約 2 秒の欠落が起きることがあり、32 ビット版の実機受信・USB の抜き差し・長時間受信は未確認です。[導入手順](docs/msi2500-install.md)と[技術資料・検証記録](winusb/docs/msi2500-fullseg-design.md)を参照。
+- 同じ `BonDriver_MSI2500` に、スカパー！プレミアムサービス光の ITU-T J.83 Annex B（256QAM、5.6 Msps）をソフトウェアで復調するチューニング空間を追加（実験的）。検証環境では H007・H008 を受信でき、MER が約 23 dB の H004・H005 と UHF の搬送波は受信できる帯域として扱っていません。64 ビット版の TVTest での選局と視聴を確認済みで、32 ビット版の実機受信と長時間の視聴は未確認です。[導入手順](docs/msi2500-install.md#j83b-の受信)と[技術資料・検証記録](winusb/docs/msi2500-j83b-design.md)を参照。
 - PLEX PX-BCUD に実験的に対応（Windows WinUSB版のみ、アンテナへの外部給電が必要）。通常配布に専用BonDriverとINFを同梱します。BS/CS受信、チャンネル切り替え、TVTestでのチャンネルスキャン・視聴、USBの抜き差しを確認済み。長時間録画とスリープ復帰後の動作は未確認です。導入方法と検証範囲は[PX-BCUD対応の詳細](docs/px-bcud-winusb.md)を参照。
 - Sony torne CECH-ZD1J に実験的に対応（Windows WinUSB版のみ）。復調と内蔵カードリーダーの制御を `DriverHost_PX4.exe` に統合。現行の統合版と配布設定の組み合わせは実機未検証です。過去の別設定・旧実装での実測結果とは区別し、検証範囲と導入方法は[統合手順](winusb/docs/cech-zd1j-integration.md)を参照。
 - 最新coaxの選局改善、複数台管理、初回ロック待ちと自動復帰の設定は[統合版の保守情報](winusb/docs/torne-integration-notes.md)、DLL・EXEの署名と信頼登録は[アプリケーション署名](winusb/docs/application-signing.md)を参照。

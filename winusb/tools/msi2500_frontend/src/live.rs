@@ -91,6 +91,11 @@ pub struct Feeder {
 }
 
 impl Feeder {
+    /// 別の処理系 (J.83B) が同じ投入口を使うための生成
+    pub(crate) fn new(tx: SyncSender<Vec<u8>>, overflow: Arc<AtomicU64>) -> Self {
+        Self { tx, buf: Vec::with_capacity(CHUNK_BLOCKS * BLOCK), overflow }
+    }
+
     pub fn push(&mut self, blk: &[u8]) {
         self.buf.extend_from_slice(blk);
         if self.buf.len() >= CHUNK_BLOCKS * BLOCK {
@@ -113,7 +118,7 @@ impl Feeder {
         }
     }
 
-    fn flush_wait(&mut self) {
+    pub(crate) fn flush_wait(&mut self) {
         if !self.buf.is_empty() {
             let _ = self.tx.send(std::mem::take(&mut self.buf));
         }
