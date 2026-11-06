@@ -79,6 +79,11 @@ foreach($arch in $Architecture){
         $technical=Get-Content -LiteralPath (Join-Path $winusbRoot 'docs\msi2500-fullseg-design.md') -Raw -Encoding UTF8
         [IO.File]::WriteAllText((Join-Path $destination 'README.md'),$guide.Replace('(../winusb/docs/msi2500-fullseg-design.md)','(TECHNICAL.md)'),[Text.UTF8Encoding]::new($false))
         [IO.File]::WriteAllText((Join-Path $destination 'TECHNICAL.md'),$technical.Replace('(../../docs/msi2500-install.md)','(README.md)'),[Text.UTF8Encoding]::new($false))
+        # J.83B の技術資料は README.md (導入手順) から TECHNICAL-J83B.md として参照する
+        $guideText=[IO.File]::ReadAllText((Join-Path $destination 'README.md'),[Text.Encoding]::UTF8)
+        [IO.File]::WriteAllText((Join-Path $destination 'README.md'),$guideText.Replace('(../winusb/docs/msi2500-j83b-design.md)','(TECHNICAL-J83B.md)'),[Text.UTF8Encoding]::new($false))
+        $technicalJ83b=Get-Content -LiteralPath (Join-Path $winusbRoot 'docs\msi2500-j83b-design.md') -Raw -Encoding UTF8
+        [IO.File]::WriteAllText((Join-Path $destination 'TECHNICAL-J83B.md'),$technicalJ83b.Replace('(msi2500-fullseg-design.md)','(TECHNICAL.md)'),[Text.UTF8Encoding]::new($false))
         Copy-Item -LiteralPath (Join-Path $winusbRoot '..\LICENSE') -Destination (Join-Path $destination 'LICENSE') -Force
         # GPL の helper を再ビルドできるよう、helper と isdbt-dsp のソースと Cargo の依存をオフライン用に同梱する。
         # isdbt-dsp は Cargo.toml の相対パス (../rtlsdr_frontend/vendor/isdbt-dsp) と同じ位置へ置く。

@@ -32,8 +32,10 @@ def check_package(folder, bits):
         require(dll in SYSTEM_DLLS or dll.startswith(("api-ms-win-", "ext-ms-win-")), f"Unbundled helper dependency: {dll}")
     require((runtime / "COPYING.frontend").read_bytes() == (FRONTEND / "LICENSE").read_bytes(), "Incorrect frontend license")
     require((folder / "LICENSE").read_bytes() == (WINUSB.parent / "LICENSE").read_bytes(), "Incorrect driver license")
-    for name in ("README.md", "TECHNICAL.md", "BonDriver_MSI2500.ChSet.txt", "BonDriver_PX4-J83B.ChSet.txt", "it930x-firmware.bin"):
+    for name in ("README.md", "TECHNICAL.md", "TECHNICAL-J83B.md", "BonDriver_MSI2500.ChSet.txt", "BonDriver_PX4-J83B.ChSet.txt", "it930x-firmware.bin"):
         require((folder / name).is_file(), f"Missing MSi2500 package file: {folder / name}")
+    require("(TECHNICAL-J83B.md)" in (folder / "README.md").read_text(encoding="utf-8"), "Broken packaged J.83B design link")
+    require("(TECHNICAL.md)" in (folder / "TECHNICAL-J83B.md").read_text(encoding="utf-8"), "Broken packaged full-seg design link")
     require((folder / "BonDriver_PX4-J83B.ChSet.txt").read_bytes() == (WINUSB / "pkg/BonDriver_PX4/BonDriver_PX4-J83B.ChSet.txt").read_bytes(),
             "J.83B ChSet differs from the source")
     require("(TECHNICAL.md)" in (folder / "README.md").read_text(encoding="utf-8"), "Broken packaged installation guide link")
