@@ -64,7 +64,8 @@ foreach($arch in $Architecture){
         foreach ($file in @('DriverHost_PX4.exe','WinSCard.dll')) {
             Copy-Item -LiteralPath (Join-Path $native $file) -Destination $destination -Force
         }
-        foreach($file in @('BonDriver_MSI2500.ini','BonDriver_MSI2500.ChSet.txt')){
+        # J.83B のチャンネル定義は PX-MLT 系と共通のファイルを使う
+        foreach($file in @('BonDriver_MSI2500.ini','BonDriver_MSI2500.ChSet.txt','BonDriver_PX4-J83B.ChSet.txt')){
             Copy-Item -LiteralPath (Join-Path $winusbRoot "pkg\BonDriver_PX4\$file") -Destination $destination -Force
         }
         foreach($file in @('DriverHost_PX4.ini','it930x-firmware.bin')){

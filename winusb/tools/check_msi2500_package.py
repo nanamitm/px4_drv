@@ -32,14 +32,18 @@ def check_package(folder, bits):
         require(dll in SYSTEM_DLLS or dll.startswith(("api-ms-win-", "ext-ms-win-")), f"Unbundled helper dependency: {dll}")
     require((runtime / "COPYING.frontend").read_bytes() == (FRONTEND / "LICENSE").read_bytes(), "Incorrect frontend license")
     require((folder / "LICENSE").read_bytes() == (WINUSB.parent / "LICENSE").read_bytes(), "Incorrect driver license")
-    for name in ("README.md", "TECHNICAL.md", "BonDriver_MSI2500.ChSet.txt", "it930x-firmware.bin"):
+    for name in ("README.md", "TECHNICAL.md", "BonDriver_MSI2500.ChSet.txt", "BonDriver_PX4-J83B.ChSet.txt", "it930x-firmware.bin"):
         require((folder / name).is_file(), f"Missing MSi2500 package file: {folder / name}")
+    require((folder / "BonDriver_PX4-J83B.ChSet.txt").read_bytes() == (WINUSB / "pkg/BonDriver_PX4/BonDriver_PX4-J83B.ChSet.txt").read_bytes(),
+            "J.83B ChSet differs from the source")
     require("(TECHNICAL.md)" in (folder / "README.md").read_text(encoding="utf-8"), "Broken packaged installation guide link")
 
     bon = configuration(folder / "BonDriver_MSI2500.ini")
-    require(bon["BonDriver"]["system"].strip('"') == "ISDB-T", "Incorrect MSi2500 system")
+    require(bon["BonDriver"]["system"].strip('"') == "ISDB-T,J.83B", "Incorrect MSi2500 system")
     require(bon["BonDriver"].getboolean("framedstream"), "MSi2500 requires framed stream epochs")
     require(bon["BonDriver.ISDB-T"]["chsetpath"].strip('"') == "BonDriver_MSI2500.ChSet.txt", "Incorrect MSi2500 ChSet path")
+    require(bon["BonDriver.J.83B"]["chsetpath"].strip('"') == "BonDriver_PX4-J83B.ChSet.txt", "Incorrect MSi2500 J.83B ChSet path")
+    require(bon["ReceiverDefinition0"]["system"].strip('"') == "ISDB-T,J.83B", "Incorrect MSi2500 receiver systems")
     host = configuration(folder / "DriverHost_PX4.ini")
     devices = [section for section in host if re.fullmatch(r"DeviceDefinition\d+", section)
                and host[section].get("type", "").strip('"') == "MSI2500"]
@@ -50,6 +54,8 @@ def check_package(folder, bits):
     require(host[device]["deviceinterfaceguid"].strip('"').lower() == "{2d93e8f2-bc67-4f7d-8891-574830aa637d}",
             "Unexpected MSi2500 interface GUID")
     require(host[device + ".Config"]["helperpath"].strip('"') == r"msi2500\msi2500_frontend.exe", "Incorrect helper path")
+    require(0 <= int(host[device + ".Config"]["gaindbj83b"]) <= 102, "Incorrect MSi2500 J.83B gain")
+    require(host[device + ".Receiver0"]["system"].strip('"') == "ISDB-T,J.83B", "Incorrect MSi2500 DriverHost receiver systems")
 
     sources = folder / "Sources"
     frontend = sources / "winusb/tools/msi2500_frontend"

@@ -4,7 +4,10 @@ param(
     [Parameter(Mandatory=$true)][string]$FrontendPath,
     [ValidateRange(1,600)][int]$Seconds=30,
     [ValidateRange(1,5)][int]$Cycles=2,
-    [ValidateRange(0,39)][int]$AlternateChannel=0,
+    [ValidateRange(0,199)][int]$AlternateChannel=0,
+    # -J83B では J.83B のチューニング空間 (空間 1) を選局する。Channel はその空間のチャンネル番号 (7 が H008)
+    [switch]$J83B,
+    [ValidateRange(0,199)][int]$Channel=0,
     [switch]$IsolatedHost
 )
 # RSP1 互換機 (MSi2500) を BonDriver_PX4 と DriverHost_PX4 から受信する実機試験。
@@ -27,7 +30,7 @@ New-Item -ItemType Directory -Force -Path $run,(Join-Path $run 'msi2500'),$outpu
 Copy-Item -LiteralPath (Join-Path $hostNative 'DriverHost_PX4.exe') -Destination $run
 Copy-Item -LiteralPath (Join-Path $hostNative 'BonDriver_PX4.dll') -Destination (Join-Path $run 'BonDriver_MSI2500.dll')
 Copy-Item -LiteralPath $FrontendPath -Destination (Join-Path $run 'msi2500\msi2500_frontend.exe')
-foreach($file in @('BonDriver_MSI2500.ini','BonDriver_MSI2500.ChSet.txt')){
+foreach($file in @('BonDriver_MSI2500.ini','BonDriver_MSI2500.ChSet.txt','BonDriver_PX4-J83B.ChSet.txt')){
     Copy-Item -LiteralPath (Join-Path $root "pkg\BonDriver_PX4\$file") -Destination $run
 }
 # DriverHost_PX4.ini は日本語のコメントを含む Shift_JIS のため、その文字コードで読み、ASCII の定義部分だけを取り出す
@@ -48,8 +51,16 @@ try{
     $prefix=Join-Path $output "bon-$Architecture"
     $clientArgs=@(('"'+(Join-Path $run 'BonDriver_MSI2500.dll')+'"'),('"'+$prefix+'"'),$Seconds,$Cycles)
     if($AlternateChannel){if($Cycles -lt 2){throw 'Channel switch test needs at least two cycles.'};$clientArgs+=@($AlternateChannel)}
-    # 配布設定は AsyncTune=true のため、選局要求の受付が 500 ms 以内で、その時点で未ロックであることも確かめる
-    $env:RTLSDR_EXPECT_ASYNC_TUNE='1'
+    $env:BONDRIVER_LIVE_CHANNEL="$Channel"
+    if($J83B){
+        # J.83B は ReceiverBase::TuneIsdbC でロックまで待つため、非同期の選局の確認は対象外。
+        # ワンセグの PMT もないため確認から外す
+        $env:BONDRIVER_LIVE_SPACE='1'
+        $env:BONDRIVER_LIVE_ONESEG_PMT='0'
+    }else{
+        # 配布設定は AsyncTune=true のため、選局要求の受付が 500 ms 以内で、その時点で未ロックであることも確かめる
+        $env:RTLSDR_EXPECT_ASYNC_TUNE='1'
+    }
     $client=Start-Process -FilePath (Join-Path $native 'rtlsdr_bondriver_live.exe') -ArgumentList $clientArgs -WindowStyle Hidden -PassThru -RedirectStandardOutput "$prefix.log" -RedirectStandardError "$prefix.stderr.log"
     $null=$client.Handle
     $limit=$Cycles*($Seconds+55)+30
@@ -61,7 +72,9 @@ try{
     Start-Sleep -Milliseconds 500
     if(Get-Process msi2500_frontend -ErrorAction SilentlyContinue){throw 'Frontend process remained after CloseTuner.'}
 }finally{
-    Remove-Item Env:\RTLSDR_EXPECT_ASYNC_TUNE -ErrorAction SilentlyContinue
+    foreach($name in @('RTLSDR_EXPECT_ASYNC_TUNE','BONDRIVER_LIVE_SPACE','BONDRIVER_LIVE_CHANNEL','BONDRIVER_LIVE_ONESEG_PMT')){
+        Remove-Item "Env:\$name" -ErrorAction SilentlyContinue
+    }
     if($client){if(-not $client.HasExited){$client.Kill();$client.WaitForExit()};$client.Dispose()}
     if($hostProcess){
         if(-not $hostProcess.HasExited -and -not $hostProcess.WaitForExit(8000)){$hostProcess.Kill();$hostProcess.WaitForExit()}
