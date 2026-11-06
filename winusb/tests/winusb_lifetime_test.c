@@ -11,6 +11,7 @@ static ULONG mock_maximum = 4096;
 static USHORT mock_packet = 512;
 static bool fail_restore, fail_submission, short_write, stuck_transfer;
 static LONG fail_submission_at;
+static DWORD startup_delay_ms;
 static BOOL WINAPI mock_read(WINUSB_INTERFACE_HANDLE h, UCHAR ep, PUCHAR b, ULONG n, PULONG r, LPOVERLAPPED ol)
 {
     (void)h; (void)b; (void)n; (void)r;
@@ -49,6 +50,7 @@ static BOOL WINAPI mock_reset(WINUSB_INTERFACE_HANDLE h, UCHAR ep)
 static BOOL WINAPI mock_set(WINUSB_INTERFACE_HANDLE h, UCHAR ep, ULONG policy, ULONG n, PVOID value)
 {
     (void)h; (void)ep; (void)n;
+    if (policy == RAW_IO && *(UCHAR *)value && startup_delay_ms) Sleep(startup_delay_ms);
     if (policy == RAW_IO && !*(UCHAR *)value && fail_restore) { SetLastError(ERROR_BAD_COMMAND); return FALSE; }
     return TRUE;
 }
@@ -74,6 +76,7 @@ static BOOL WINAPI mock_pipe(WINUSB_INTERFACE_HANDLE h, UCHAR alt, UCHAR index, 
 int msg_printf(const char *format, ...) { (void)format; return 0; }
 static int checks;
 #define CHECK(x) do { if (!(x)) { fprintf(stderr, "FAIL line %d: %s\n", __LINE__, #x); ++checks; } } while (0)
+#define CHECK_RESULT(call, expected) do { int actual = (call); if (actual != (expected)) { fprintf(stderr, "FAIL line %d: %s returned %d, expected %d\n", __LINE__, #call, actual, (expected)); ++checks; } } while (0)
 static int stream(void *context, void *data, uint32_t n)
 {
     struct itedtv_usb_context *ctx = context;
@@ -88,7 +91,8 @@ int main(void)
     struct itedtv_bus bus = {0};
     usb.descriptor.bcdUSB = 0x0200;
     bus.type = ITEDTV_BUS_USB; bus.dev = &log; bus.usb.dev = &usb;
-    bus.usb.ctrl_timeout = 10; bus.usb.streaming.urb_num = 4;
+    /* 起動完了待ちにはスレッドのスケジューリング時間も含まれるため、CI の負荷を許容する。 */
+    bus.usb.ctrl_timeout = 5000; bus.usb.streaming.urb_num = 4;
     CHECK(itedtv_bus_init(&bus) == 0);
     CHECK(bus.usb.max_bulk_size == 512);
     struct itedtv_usb_context *ctx = bus.usb.priv;
@@ -98,7 +102,10 @@ int main(void)
     bus.usb.streaming.urb_buffer_size = UINT32_MAX;
     CHECK(itedtv_usb_start_streaming(&bus, stream, ctx) == -EMSGSIZE);
     bus.usb.streaming.urb_buffer_size = 513;
-    CHECK(itedtv_usb_start_streaming(&bus, stream, ctx) == 0);
+    /* 従来の 10ms を超える起動遅延でも、転送投入に成功すれば開始できることを確認する。 */
+    startup_delay_ms = 50;
+    CHECK_RESULT(itedtv_usb_start_streaming(&bus, stream, ctx), 0);
+    startup_delay_ms = 0;
     CHECK(ctx->works[0].size == 1024);
     CHECK(itedtv_usb_stop_streaming(&bus) == 0);
     CHECK(outstanding == 0 && aborts > 0);
@@ -108,11 +115,14 @@ int main(void)
     CHECK(outstanding == 0);
     fail_submission = false;
     fail_submission_at = submissions + 2;
-    CHECK(itedtv_usb_start_streaming(&bus, stream, ctx) == 0);
+    CHECK_RESULT(itedtv_usb_start_streaming(&bus, stream, ctx), 0);
     CHECK(itedtv_usb_stop_streaming(&bus) == 0 && outstanding == 0);
     fail_submission_at = 0;
     unsigned char response[8]; int len = sizeof(response);
+    /* 応答のない制御転送だけは短い待機でタイムアウトを検証する。 */
+    bus.usb.ctrl_timeout = 10;
     CHECK(itedtv_usb_ctrl_rx(&bus, response, &len) == -ETIMEDOUT);
+    bus.usb.ctrl_timeout = 5000;
     CHECK(outstanding == 0);
     len = -1;
     CHECK(itedtv_usb_ctrl_rx(&bus, response, &len) == -EINVAL);
@@ -132,7 +142,7 @@ int main(void)
     SetLastError(ERROR_DEVICE_NOT_CONNECTED);
     CHECK(winerr_to_errno(&log) == ENODEV);
     fail_restore = true;
-    CHECK(itedtv_usb_start_streaming(&bus, stream, ctx) == 0);
+    CHECK_RESULT(itedtv_usb_start_streaming(&bus, stream, ctx), 0);
     CHECK(itedtv_usb_stop_streaming(&bus) == -EIO);
     CHECK(outstanding == 0 && ctx->policy_failed);
     CHECK(itedtv_usb_start_streaming(&bus, stream, ctx) == -EIO);
@@ -140,11 +150,13 @@ int main(void)
     /* 中止しても完了しない模擬IRPは、再利用・解放せず有限時間で隔離する。 */
     fail_restore = false; stuck_transfer = true;
     bus.type = ITEDTV_BUS_USB; bus.dev = &log; bus.usb.dev = &usb;
-    bus.usb.ctrl_timeout = 10; bus.usb.streaming.urb_num = 2;
+    bus.usb.ctrl_timeout = 5000; bus.usb.streaming.urb_num = 2;
     bus.usb.streaming.urb_buffer_size = 512;
     CHECK(itedtv_bus_init(&bus) == 0);
     ctx = bus.usb.priv;
-    CHECK(itedtv_usb_start_streaming(&bus, stream, ctx) == 0);
+    CHECK_RESULT(itedtv_usb_start_streaming(&bus, stream, ctx), 0);
+    /* 中止後も完了しない転送の隔離は、起動待ちと分けて短い期限で検証する。 */
+    bus.usb.ctrl_timeout = 10;
     ULONGLONG before_stop = GetTickCount64();
     CHECK(itedtv_usb_stop_streaming(&bus) == -EIO && ctx->quarantined);
     CHECK(GetTickCount64() - before_stop < 2000);
