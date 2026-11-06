@@ -8,6 +8,7 @@ pub mod hostproto;
 pub mod j83b;
 pub mod j83b_tx;
 pub mod live;
+pub mod live_j83b;
 pub mod ofdm;
 pub mod qam;
 pub mod raw384;

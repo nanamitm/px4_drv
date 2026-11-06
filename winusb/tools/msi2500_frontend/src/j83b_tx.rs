@@ -34,6 +34,8 @@ pub struct J83bTx {
     yp: u8,
     /// C7..C0 からレベルの番号 (I, Q) への逆写像
     inv: [(u8, u8); 256],
+    /// 次のフレームの同期トレーラーだけに入れる制御語 (受信側の誤りへの耐性の試験用。インターリーブは変えない)
+    ctrl_override: Option<u8>,
 }
 
 impl J83bTx {
@@ -46,7 +48,12 @@ impl J83bTx {
                 inv[c as usize] = (ii as u8, qi as u8);
             }
         }
-        Self { ctrl, i, j, fifos, k: 0, mpeg: Vec::new(), prev: vec![0u8; 187], enc_x: BccEncoder::default(), enc_y: BccEncoder::default(), xp: 0, yp: 0, inv }
+        Self { ctrl, i, j, fifos, k: 0, mpeg: Vec::new(), prev: vec![0u8; 187], enc_x: BccEncoder::default(), enc_y: BccEncoder::default(), xp: 0, yp: 0, inv, ctrl_override: None }
+    }
+
+    /// 次に組み上がるフレームの同期トレーラーの制御語だけを ctrl にする
+    pub fn corrupt_next_control_word(&mut self, ctrl: u8) {
+        self.ctrl_override = Some(ctrl & 15);
     }
 
     /// TS パケット (188 バイト単位、先頭 0x47) を入れ、組み上がったフレームのシンボル (レベル ±1..±15) を out へ追加する
@@ -93,8 +100,9 @@ impl J83bTx {
         for k in (0..32).rev() {
             sync.push(((SYNC_WORD >> k) & 1) as u8);
         }
+        let ctrl = self.ctrl_override.take().unwrap_or(self.ctrl);
         for k in (0..4).rev() {
-            sync.push((self.ctrl >> k) & 1);
+            sync.push((ctrl >> k) & 1);
         }
         sync.extend_from_slice(&[0, 0, 0, 0]);
         let mut fi = 0usize;

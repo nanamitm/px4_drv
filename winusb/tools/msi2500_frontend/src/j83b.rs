@@ -695,6 +695,8 @@ pub struct J83bStats {
     pub orientation_flips: u64,
     /// 同期トレーラーの制御語
     pub control_word: Option<u8>,
+    /// 同期語が一致したフレームで、制御語だけが現在の値と異なり反映を保留した回数
+    pub control_word_rejects: u64,
 }
 
 /// 受信した配置の 90 度単位の回転は、復号した X と Y の入れ替えと反転として現れる
@@ -780,6 +782,8 @@ struct Run {
     pkt_misses: u32,
     first_blocks: u32,
     first_bad: u32,
+    /// 前のフレームで受けた、現在と異なる制御語 (次のフレームでも同じなら反映する)
+    ctrl_pending: Option<u8>,
 }
 
 enum State {
@@ -996,6 +1000,7 @@ impl Run {
             pkt_misses: 0,
             first_blocks: 0,
             first_bad: 0,
+            ctrl_pending: None,
         }
     }
 
@@ -1105,13 +1110,23 @@ impl Run {
             }
         } else {
             self.frame_misses = 0;
-            if stats.control_word != Some(ctrl) || self.deint.is_none() {
-                // 制御語が変わったらインターリーブの解除を作り直す (遅延分のデータは失われる)
+            let current = if self.deint.is_some() { stats.control_word } else { None };
+            if current == Some(ctrl) {
+                self.ctrl_pending = None;
+            } else if current.is_none() || self.ctrl_pending == Some(ctrl) {
+                // 最初のフレームか、2 フレーム続けて同じ値へ変わった制御語で、インターリーブの解除を作り直す
+                // (遅延分のデータは失われる)
                 stats.control_word = Some(ctrl);
                 self.deint = interleave_params(ctrl).map(|(i, j)| Deinterleaver::new(i, j));
                 self.rs_buf.clear();
                 self.msg_acc = 0;
                 self.msg_n = 0;
+                self.ctrl_pending = None;
+            } else {
+                // 1 フレームだけ違う制御語は、同期語が一致していても制御語のビットの誤りの可能性がある。
+                // そのまま作り直すと、正しい値へ戻るまでに 2 回データを捨てて TS がずれるため、次のフレームで確かめる
+                self.ctrl_pending = Some(ctrl);
+                stats.control_word_rejects += 1;
             }
         }
         let pn = pn_frame();

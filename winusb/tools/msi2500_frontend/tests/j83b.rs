@@ -164,6 +164,30 @@ fn round_trip_with_rotations_and_spectral_inversion() {
 }
 
 #[test]
+fn single_corrupted_control_word_does_not_break_the_stream() {
+    // 同期語が一致したフレームで制御語だけが誤っても、インターリーブの解除を作り直さずに TS を出し続ける
+    let mut rng = Rng(0xc0de);
+    let ts = make_ts(600, &mut rng);
+    let mut tx = J83bTx::new(0b0101);
+    let mut levels = Vec::new();
+    tx.push_packets(&ts[..300 * 188], &mut levels);
+    tx.corrupt_next_control_word(0b0111);
+    tx.push_packets(&ts[300 * 188..], &mut levels);
+    let syms: Vec<Complex32> = levels.iter().map(|&z| (z / LEVEL_SCALE).conj()).collect();
+    let mut dec = J83bDecoder::new();
+    let mut out = Vec::new();
+    for chunk in syms.chunks(7777) {
+        dec.push(chunk, &mut out);
+    }
+    let n = check_output(&ts, &out);
+    let s = &dec.stats;
+    assert!(n > 450, "only {n} packets: {s:?}");
+    assert_eq!((s.rs_uncorrectable, s.checksum_errors, s.packet_sync_losses), (0, 0, 0), "{s:?}");
+    assert_eq!(s.control_word, Some(0b0101));
+    assert_eq!(s.control_word_rejects, 1);
+}
+
+#[test]
 fn round_trip_recovers_from_wrong_initial_orientation() {
     // 反転していない入力では、受信側が最初の RS ブロックから向きの誤りを検出し、共役を外して捕捉し直す
     let n = run(1, false, 0.016, 0xabcdef);
