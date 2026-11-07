@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-2.0-only
-"""Verify PIX-DT295 terrestrial retuning and sustained reception over one WinUSB handle."""
+"""Verify PIX-DT295 terrestrial and satellite retuning and sustained reception over one WinUSB handle."""
 import argparse
 from bisect import bisect_right
 from collections import Counter
@@ -18,6 +18,7 @@ from aux_probe import image, run
 from boot_contract import inspect_build
 from boot_probe import open_device
 from protocol import OK, request, response
+from satellite_tune import frequency as satellite_frequency
 from terrestrial_tune import transfers
 from ts_ring import RING_SIZE, capture
 
@@ -34,18 +35,27 @@ MAX_GAP_SECONDS = .250
 class Channel:
     channel: int
     tsid: int
+    system: str = 'gr'
+
+    @property
+    def label(self):
+        return f'{self.system.upper()}{self.channel:02d}'
 
 
 def channel_arg(value):
     try:
-        channel, tsid = value.split(':')
-        result = Channel(int(channel), int(tsid, 0))
-        # This diagnostic uses the tuner settings for frequencies below 700 MHz.
-        if 13 <= result.channel <= 50 and 0 <= result.tsid <= 0xffff:
+        physical, tsid = value.lower().split(':')
+        system = physical[:2] if physical[:2] in ('gr', 'bs', 'cs') else 'gr'
+        channel = int(physical[2:] if physical.startswith(system) else physical)
+        result = Channel(channel, int(tsid, 0), system)
+        if system != 'gr':
+            satellite_frequency(system, channel)
+        # 地デジは700 MHz未満向けのRF設定を使う。
+        if (system != 'gr' or 13 <= channel <= 50) and 0 <= result.tsid <= 0xffff:
             return result
     except ValueError:
         pass
-    raise argparse.ArgumentTypeError('expected physical channel 13–50 and TSID, e.g. 13:0x7c11')
+    raise argparse.ArgumentTypeError('expected 13:31761, BS01:16400 or CS02:24608')
 
 
 def pump(control, dest, seconds, start_ring):
@@ -218,7 +228,7 @@ def analyze(dest, channel, samples, seconds, tune_seconds, tune_to_capture):
     errors = [name for name in ('sync_errors', 'tei', 'malformed', 'cc_errors') if steady[name]]
     # Last data can be in the pipe when the requested pump interval ends.
     duration_ok = elapsed[-1] + MAX_GAP_SECONDS >= seconds
-    report = dict(channel=channel.channel, expected_tsid=channel.tsid, bytes=offsets[-1],
+    report = dict(channel=channel.channel, system=channel.system, expected_tsid=channel.tsid, bytes=offsets[-1],
                   sync_offset=offset, requested_seconds=seconds, bulk_elapsed=elapsed[-1],
                   tune_to_lock_seconds=tune_seconds, first_usb_seconds=elapsed[0],
                   first_target_pat_seconds=first_pat,
@@ -282,11 +292,11 @@ def main():
             samples = capture(control, args.bulk_build, dest, receive)
             return dest, channel, samples, seconds, tuned, setup_seconds
 
-        short_capture = segment(f'{index:02d}-gr{channel.channel}', args.seconds, tune_seconds)
+        short_capture = segment(f'{index:02d}-{channel.label.lower()}', args.seconds, tune_seconds)
         if not analyze(*short_capture):
             raise OSError(f'{short_capture[0].name} failed TS validation')
         if index == len(args.channels) and args.long_seconds:
-            long_capture = segment(f'long-gr{channel.channel}', args.long_seconds, None)
+            long_capture = segment(f'long-{channel.label.lower()}', args.long_seconds, None)
 
     with open_device(args.interface, bulk_input=True) as control:
         run(control, auxiliary, args.evidence, 7,

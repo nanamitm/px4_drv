@@ -149,3 +149,11 @@ python bulk_validate.py $interface $auxiliaryBuild $bulkBuild $initTrace $eviden
 ```
 
 TSIDは受信地域の値を指定します。各短区間のPATを照合してから次へ進み、最後に同じ選局のまま固定受信します。選局中はTSエンジンを停止し、次の区間で起動します。`analysis.json` はTSエンジン起動後1秒の前後を分け、PATのTSID、同期、TEI、CC、形式異常、USB読み取りの空白時間を記録します。想定外の有効PATは起動直後でも失敗として扱います。PATを含まないパケットの送出元までは判定できません。`bulk-timing.csv` は64 KiB単位のUSB完了時刻です。30分で約7 GBの生データを保存します。RAM・リング等の復元結果は標準出力に記録します。
+
+### BS/CS選局
+
+同じ診断経路で `BS01:16400` や `CS02:24608` のように物理チャンネルとTSIDを指定できます。BSは奇数の01～23、CSは偶数の02～24です。衛星を指定すると、地デジ初期化に続いて `op=2` の衛星初期化を含むJSONLが必要です。衛星復調器のロックと選択TSIDを読み戻した後、受信したTSのPATでもTSIDを照合します。アンテナは外部から給電されている環境が前提です。
+
+```powershell
+python bulk_validate.py $interface $auxiliaryBuild $bulkBuild $initTrace $evidence --channels BS01:16400 CS02:24608 13:31761 BS01:16400 --seconds 5
+```
