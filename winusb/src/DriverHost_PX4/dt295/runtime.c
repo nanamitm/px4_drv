@@ -126,6 +126,14 @@ int dt295_close(struct dt295_runtime *r)
     if(!rc)r->touched=0;
     return rc;
 }
+int dt295_close_restore(struct dt295_runtime *r)
+{
+    if(!r || !r->touched)return 0;
+    if(r->loader.adopted)return -EOPNOTSUPP;
+    int rc=mb86H_loader_restore(&r->loader,&r->loader_ops,r);
+    r->started=0;if(!rc)r->touched=0;
+    return rc;
+}
 void dt295_destroy(struct dt295_runtime *r)
 {
     if(!r)return;
@@ -180,4 +188,16 @@ void dt295_input_stats(const struct dt295_runtime *r,uint64_t *discarded,uint64_
 {
     if(discarded)*discarded=r?r->input.framer.discarded_bytes:0;
     if(desyncs)*desyncs=r?r->input.framer.desyncs:0;
+}
+
+/* 診断専用。生産・消費位置を含む16 bytesだけを読み、window.cの検証付き復元を使う。 */
+int dt295_diagnostic_ring(struct dt295_runtime *r, uint32_t words[4])
+{
+    if(!r || !words || r->rf_mask!=3u || !r->session.streaming)return -EINVAL;
+    struct usb_native_window_profile profile=*r->window;
+    profile.memory_base=0x01902020u;profile.memory_bytes=16u;
+    uint8_t bytes[16];
+    int rc=usb_native_window(&native_ops,r,&profile,0x01902020u,bytes,sizeof(bytes),false,r->block_writes);
+    if(!rc)for(unsigned i=0;i<4;i++)words[i]=(uint32_t)bytes[4*i]<<24|(uint32_t)bytes[4*i+1]<<16|(uint32_t)bytes[4*i+2]<<8|bytes[4*i+3];
+    return rc;
 }

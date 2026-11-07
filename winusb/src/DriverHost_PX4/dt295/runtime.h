@@ -26,11 +26,15 @@ int dt295_create_target(struct dt295_runtime **, const uint8_t *, size_t,
     const struct dt295_io *, enum dt295_target);
 int dt295_start(struct dt295_runtime *);
 int dt295_close(struct dt295_runtime *);
+/* Diagnostic cleanup requires this owner's original snapshots; adoption is refused. */
+int dt295_close_restore(struct dt295_runtime *);
 /* destroy frees host storage only; caller first closes or records failed cleanup. */
 void dt295_destroy(struct dt295_runtime *);
 int dt295_tune(struct dt295_runtime *, unsigned source, uint32_t frequency_khz, uint32_t tsid);
 int dt295_capture(struct dt295_runtime *, int enable);
 int dt295_service(struct dt295_runtime *);
+/* Diagnostic only: fixed TS ring MMIO read, caller holds the command lock. */
+int dt295_diagnostic_ring(struct dt295_runtime *, uint32_t words[4]);
 int dt295_locked(struct dt295_runtime *, int *);
 int dt295_feed(struct dt295_runtime *, const uint8_t *, size_t,
     int (*packet)(void *, const uint8_t *), void *);

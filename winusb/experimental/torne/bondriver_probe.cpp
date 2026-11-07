@@ -111,17 +111,25 @@ int wmain(int argc, wchar_t **argv)
 		argc -= 2;
 	}
 	if (argc < 3 || (wcscmp(argv[2], L"--list") && wcscmp(argv[2], L"--receive"))) {
-		std::fprintf(stderr, "Usage: torne_bondriver_probe.exe <absolute-dll-path> --list | --receive <channel-index>...\n");
+		std::fprintf(stderr, "Usage: torne_bondriver_probe.exe <absolute-dll-path> --list | --receive <channel-index|space:channel-index>...\n");
 		return 2;
 	}
 	const bool list = !wcscmp(argv[2], L"--list");
 	if ((list && argc != 3) || (!list && (argc < 4 || argc > 20))) return 2;
 	std::array<DWORD, 17> channels{};
+	std::array<DWORD, 17> spaces{};
 	for (int i = 3; i < argc; ++i) {
 		wchar_t *end = nullptr;
 		errno = 0;
-		const auto value = wcstoul(argv[i], &end, 10);
-		if (errno || !argv[i][0] || argv[i][0] == L'-' || !end || *end || value > 255) return 2;
+		auto value = wcstoul(argv[i], &end, 10);
+		if (errno || !argv[i][0] || argv[i][0] == L'-' || !end || end==argv[i] || value > 255) return 2;
+		if (*end==L':') {
+			spaces[static_cast<std::size_t>(i-3)]=value;
+			const auto next=end+1;
+			value=wcstoul(next,&end,10);
+			if(errno || !*next || *next==L'-' || end==next || value>255)return 2;
+		}
+		if(*end)return 2;
 		channels[static_cast<std::size_t>(i - 3)] = value;
 	}
 	Module module;
@@ -133,16 +141,18 @@ int wmain(int argc, wchar_t **argv)
 	driver.value = static_cast<IBonDriver2 *>(create());
 	if (!driver.value) { std::fprintf(stderr, "FAIL: CreateBonDriver\n"); return 1; }
 	if (list) {
-		for (DWORD index = 0; index < 256; ++index) {
-			const auto *name = driver.value->EnumChannelName(0, index);
-			if (!name) break;
-			std::wprintf(L"space=0 index=%lu name=%ls\n", index, name);
+		for (DWORD space=0;space<256 && driver.value->EnumTuningSpace(space);++space) {
+			for (DWORD index = 0; index < 256; ++index) {
+				const auto *name = driver.value->EnumChannelName(space, index);
+				if (!name) break;
+				std::wprintf(L"space=%lu index=%lu name=%ls\n", space,index, name);
+			}
 		}
 		std::wprintf(L"LIST ONLY: OpenTuner was not called.\n");
 		return 0;
 	}
 	for (int i = 3; i < argc; ++i) {
-		if (!driver.value->EnumChannelName(0, channels[static_cast<std::size_t>(i - 3)])) {
+		if (!driver.value->EnumChannelName(spaces[static_cast<std::size_t>(i-3)], channels[static_cast<std::size_t>(i - 3)])) {
 			std::fprintf(stderr, "FAIL: undefined channel index\n"); return 2;
 		}
 	}
@@ -153,8 +163,9 @@ int wmain(int argc, wchar_t **argv)
 	bool passed = true;
 	for (int i = 3; i < argc; ++i) {
 		const auto index = channels[static_cast<std::size_t>(i - 3)];
+		const auto space = spaces[static_cast<std::size_t>(i - 3)];
 		const auto begin = Clock::now();
-		const bool tuned = !!driver.value->SetChannel(0, index);
+		const bool tuned = !!driver.value->SetChannel(space, index);
 		const auto tune_ms = std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now() - begin).count();
 		if (!tuned) { passed = false; std::printf("FAIL: tune index=%lu tune_ms=%lld\n", index, tune_ms); continue; }
 		driver.value->PurgeTsStream();
@@ -163,7 +174,8 @@ int wmain(int argc, wchar_t **argv)
 		wchar_t capture_dir[MAX_PATH]{};
 		const auto capture_length=GetEnvironmentVariableW(L"TORNE_PROBE_CAPTURE_DIR",capture_dir,MAX_PATH);
 		if(capture_length && capture_length<MAX_PATH){
-			const auto capture_path=std::wstring(capture_dir)+L"\\channel-"+std::to_wstring(index+13)+L"-run"+std::to_wstring(i-3)+L".ts";
+			const auto stem=space ? L"space-"+std::to_wstring(space)+L"-channel-"+std::to_wstring(index) : L"channel-"+std::to_wstring(index+13);
+			const auto capture_path=std::wstring(capture_dir)+L"\\"+stem+L"-run"+std::to_wstring(i-3)+L".ts";
 			if(_wfopen_s(&capture,capture_path.c_str(),L"wb")){std::fprintf(stderr,"FAIL: capture open\n");return 1;}
 		}
 		const auto metrics = Measure(*driver.value, measure_ms, capture);
@@ -173,8 +185,8 @@ int wmain(int argc, wchar_t **argv)
 		const bool good = metrics.packets && live && !metrics.sync && !metrics.tei && !metrics.cc && !metrics.malformed && !metrics.read_failed;
 		std::printf("LIVENESS last_ts_ms=%lld max_gap_ms=%lld tail_ms=%lld result=%s\n",metrics.last_ms,metrics.max_gap_ms,metrics.tail_ms,live ? "PASS" : "FAIL");
 		passed = passed && good;
-		std::printf("index=%lu tune_ms=%lld first_ts_ms=%lld packets=%llu sync=%llu tei=%llu cc_anomalies=%llu malformed=%llu empty_reads=%llu scrambled=%llu status_reads=%u read_failed=%d signal=%.3f result=%s\n",
-			index, tune_ms, metrics.first_ms, static_cast<unsigned long long>(metrics.packets),
+		std::printf("space=%lu index=%lu tune_ms=%lld first_ts_ms=%lld packets=%llu sync=%llu tei=%llu cc_anomalies=%llu malformed=%llu empty_reads=%llu scrambled=%llu status_reads=%u read_failed=%d signal=%.3f result=%s\n",
+			space,index, tune_ms, metrics.first_ms, static_cast<unsigned long long>(metrics.packets),
 			static_cast<unsigned long long>(metrics.sync), static_cast<unsigned long long>(metrics.tei),
 			static_cast<unsigned long long>(metrics.cc), static_cast<unsigned long long>(metrics.malformed),
 			static_cast<unsigned long long>(metrics.empty_reads), static_cast<unsigned long long>(metrics.scrambled), metrics.status_reads, metrics.read_failed, driver.value->GetSignalLevel(), good ? "PASS" : "FAIL");

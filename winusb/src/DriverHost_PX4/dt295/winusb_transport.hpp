@@ -5,6 +5,7 @@
 #include <winusb.h>
 #include <chrono>
 #include <string>
+#include <array>
 
 namespace px4::dt295 {
 class ControlIo {
@@ -28,7 +29,9 @@ public:
         :file_(file),removed_(removed),usb_(usb),io_(io?*io:native_) {}
     void Begin(unsigned milliseconds) { deadline_=Clock::now()+std::chrono::milliseconds(milliseconds); }
     dt295_io Callbacks();
+    const std::array<uint32_t,10> &Telemetry() const { return telemetry_; }
     DWORD LastError() const { return last_error_; }
+    void ReportTiming(const char *stage);
     void SetSnapshotPath(std::wstring path) { snapshot_path_=std::move(path);snapshot_started_=false; }
 private:
     static int Control(void *,uint8_t,uint8_t,uint16_t,uint16_t,void *,uint16_t,unsigned);
@@ -47,5 +50,9 @@ private:
     int failed_=0;
     std::wstring snapshot_path_;
     bool snapshot_started_=false;
+    std::array<uint32_t,10> telemetry_{};
+    uint64_t transfers_=0,control_us_=0,max_control_us_=0,in_=0,out_=0;
+    uint64_t in_us_=0,out_us_=0;
+    uint64_t delays_=0,requested_delay_us_=0,delay_us_=0;
 };
 }

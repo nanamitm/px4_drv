@@ -4,6 +4,8 @@
 #include "msg.h"
 #include "util.hpp"
 #include "ts_continuity.hpp"
+#include "../torne/frontend_wait.hpp"
+#include <algorithm>
 #include <array>
 #include <condition_variable>
 #include <cstdio>
@@ -60,6 +62,9 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         if(open_)return -EBUSY;
         if(!parent_.available_ || !stop_.value)return -ENODEV;
+        UCHAR speed=0;ULONG speed_size=sizeof(speed);
+        if(WinUsb_QueryDeviceInformation(parent_.usb_dev_.winusb,DEVICE_SPEED,&speed_size,&speed))
+            msg_info("mAgicVISION: USB speed code=%u (1=low 2=full 3=high)\n",speed);
         auto io=transport_.Callbacks();
         int rc=dt295_create_target(&runtime_,firmware_.data(),firmware_.size(),&io,
             parent_.torne_?DT295_TARGET_TORNE:DT295_TARGET_PIX_DT295);
@@ -110,6 +115,7 @@ protected:
                 std::to_wstring(GetCurrentProcessId())+L"-"+std::to_wstring(GetTickCount64())+L".bin");
             msg_info("mAgicVISION: initializing resident target=%s\n",parent_.torne_?"torne":"DT295");
             transport_.Begin(parent_.torne_?180000:120000);const int initialized=dt295_start(runtime_);
+            transport_.ReportTiming("initialize");
             if(initialized){
                 msg_err("mAgicVISION: initialize failed result=%d win32=%lu\n",initialized,transport_.LastError());
                 failed_=true;return initialized;
@@ -126,6 +132,7 @@ protected:
             transport_.Begin(parent_.torne_?90000:20000);
             msg_info("mAgicVISION: tune target=%s frequency_khz=%u tsid=%x\n",parent_.torne_?"torne":"DT295",params_.freq,params_.stream_id);
             rc=dt295_tune(runtime_,params_.system==px4::SystemType::ISDB_S?1u:0u,params_.freq,params_.stream_id);
+            transport_.ReportTiming("tune");
         }
         if(!rc){tuned_=true;if(capture_)rc=StartReader();}
         if(rc)msg_err("mAgicVISION: tune system=%u frequency_khz=%u tsid=%x result=%d\n",
@@ -135,7 +142,10 @@ protected:
 private:
     void Cleanup(){
         if(!runtime_)return;
-        transport_.Begin(parent_.torne_?120000:20000);const int rc=dt295_close(runtime_);
+        const bool restore=GetEnvironmentVariableW(L"DT295_STREAM_TRACE_RESTORE",nullptr,0)>0;
+        transport_.Begin(restore?180000:parent_.torne_?120000:20000);
+        const int rc=restore?dt295_close_restore(runtime_):dt295_close(runtime_);
+        transport_.ReportTiming("close");
         if(rc)msg_err("mAgicVISION: close failed result=%d; physical reconnection may be required\n",rc);
         dt295_destroy(runtime_);runtime_=nullptr;
     }
@@ -143,6 +153,12 @@ private:
         if(worker_.joinable())return worker_error_?-EIO:0;
         if(!stream_buf_->AdvanceEpoch())return -EIO;
         worker_error_=0;deliver_=false;armed_=false;
+        wchar_t trace_path[MAX_PATH]{};
+        const DWORD trace_size=GetEnvironmentVariableW(L"DT295_STREAM_TRACE_DIR",trace_path,MAX_PATH);
+        trace_dir_=trace_size && trace_size<MAX_PATH?trace_path:L"";
+        ring_trace_=!parent_.torne_ && GetEnvironmentVariableW(L"DT295_STREAM_TRACE_RING",nullptr,0)>0;
+        service_trace_.clear();bulk_trace_.clear();trace_bytes_=0;trace_cc_=0;
+        trace_origin_=Clock::now();++trace_epoch_;
         ResetEvent(stop_.value);stream_buf_->Start();
         // STOP後のホスト側パイプ残留を捨て、新世代の読出しをTUNE前に投入する。
         if(!WinUsb_FlushPipe(parent_.usb_dev_.winusb,0x81))return -EIO;
@@ -162,11 +178,36 @@ private:
         // input初期化が終わる前のUSBデータは破棄し、フレーマーとの競合を避ける。
         deliver_=true;
         try {service_worker_=std::thread([this]{
-            while(WaitForSingleObject(stop_.value,1)==WAIT_TIMEOUT && parent_.available_ && !worker_error_){
+            uint64_t calls=0,total_gap_us=0,max_gap_us=0,max_call_us=0;
+            auto previous=Clock::now();
+            while(parent_.available_ && !worker_error_){
+                // SERVICEはTS送出も進める。1msをWindows tickへ丸めて約16ms遅らせない。
+                const auto wait=px4::torne::WaitFrontendDelay(stop_.value,Clock::now()+std::chrono::seconds(2),1000000,parent_.removed_);
+                if(wait==ERROR_OPERATION_ABORTED)break;
+                if(wait){worker_error_=-EIO;break;}
                 std::lock_guard<std::mutex> command(command_mutex_);
+                const auto begin=Clock::now();
+                const auto gap=static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(begin-previous).count());
+                total_gap_us+=gap;max_gap_us=(std::max)(max_gap_us,gap);previous=begin;++calls;
                 transport_.Begin(2000);const int rc=dt295_service(runtime_);
+                const auto completed=Clock::now();
+                if(!trace_dir_.empty() && service_trace_.size()<100000){
+                    ServiceTrace row{};row.begin=TraceTime(begin);row.end=TraceTime(completed);
+                    row.bytes=trace_bytes_.load();row.cc=trace_cc_.load();row.rc=rc;row.telemetry=transport_.Telemetry();
+                    if(ring_trace_ && !rc){
+                        transport_.Begin(2000);row.ring_begin=TraceTime(Clock::now());
+                        row.ring_rc=dt295_diagnostic_ring(runtime_,row.ring.data());
+                        row.ring_end=TraceTime(Clock::now());
+                        if(row.ring_rc)worker_error_=row.ring_rc;
+                    }
+                    service_trace_.push_back(row);
+                }
+                max_call_us=(std::max)(max_call_us,static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(Clock::now()-begin).count()));
                 if(rc)worker_error_=rc;
             }
+            msg_info("mAgicVISION: service calls=%llu mean_gap_us=%llu max_gap_us=%llu max_call_us=%llu\n",
+                static_cast<unsigned long long>(calls),static_cast<unsigned long long>(calls?total_gap_us/calls:0),
+                static_cast<unsigned long long>(max_gap_us),static_cast<unsigned long long>(max_call_us));
         });}catch(...){StopReader();return -ENOMEM;}
         return 0;
     }
@@ -174,9 +215,11 @@ private:
         deliver_=false;SetEvent(stop_.value);
         if(service_worker_.joinable())service_worker_.join();
         if(worker_.joinable())worker_.join();
+        SaveTrace();
         if(!runtime_ || !tuned_)return 0;
         std::lock_guard<std::mutex> command(command_mutex_);
         transport_.Begin(20000);const int rc=dt295_capture(runtime_,0);
+        transport_.ReportTiming("capture-stop");
         if(rc)failed_=true;
         return rc;
     }
@@ -186,23 +229,26 @@ private:
     }
     void ReadLoop() noexcept {
         px4::TsContinuityMonitor::Counters counts{};
-        uint64_t input_bytes=0;
+        uint64_t input_bytes=0,max_read_gap_us=0;
         try {
             auto quality=std::make_unique<px4::TsContinuityMonitor>();
             std::array<std::unique_ptr<Read>,4> reads;
             for(auto &read:reads){read=std::make_unique<Read>(parent_.usb_dev_.dev,parent_.usb_dev_.winusb);if(auto error=read->Submit()){worker_error_=-EIO;break;}}
             {std::lock_guard<std::mutex> state(state_mutex_);armed_=!worker_error_;}changed_.notify_all();
-            size_t head=0;auto last=Clock::now();auto warning=last;
+            size_t head=0;auto last=Clock::now();auto warning=last;auto previous_read=last;
             std::vector<uint8_t> output;output.reserve(32768);
             while(!worker_error_){
                 auto &read=*reads[head];HANDLE events[]{stop_.value,parent_.removed_,read.event.value};
                 const DWORD wait=WaitForMultipleObjects(3,events,FALSE,1);
                 if(wait==WAIT_OBJECT_0 || wait==WAIT_OBJECT_0+1)break;
                 if(wait==WAIT_OBJECT_0+2){
+                    const auto observed=Clock::now();
+                    max_read_gap_us=(std::max)(max_read_gap_us,static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(observed-previous_read).count()));
+                    previous_read=observed;
                     ULONG bytes=0;
                     BOOL ok=WinUsb_GetOverlappedResult(parent_.usb_dev_.winusb,&read.operation,&bytes,TRUE);read.pending=false;
                     if(!ok || bytes>read.bytes.size()){worker_error_=-EIO;break;}
-                    input_bytes+=bytes;
+                    input_bytes+=bytes;trace_bytes_=input_bytes;
                     if(deliver_){
                         output.clear();int rc=dt295_feed(runtime_,read.bytes.data(),bytes,Packet,&output);
                         if(rc){worker_error_=rc;break;}
@@ -217,6 +263,10 @@ private:
                             stream_buf_->NotifyWrite();last=Clock::now();
                         }
                     }else last=Clock::now();
+                    if(!trace_dir_.empty() && bulk_trace_.size()<100000){
+                        const auto current=quality->Counts();trace_cc_=current.cc_jump+current.repeat_changed;
+                        bulk_trace_.push_back({TraceTime(observed),TraceTime(Clock::now()),bytes,trace_cc_.load()});
+                    }
                     if(read.Submit()){worker_error_=-EIO;break;}head=(head+1)%reads.size();
                 }else if(wait!=WAIT_TIMEOUT){worker_error_=-EIO;break;}
                 if(!deliver_)last=Clock::now();
@@ -229,14 +279,40 @@ private:
             counts=quality->Counts();
         }catch(...){worker_error_=-ENOMEM;}
         uint64_t discarded=0,desyncs=0;dt295_input_stats(runtime_,&discarded,&desyncs);
-        msg_info("mAgicVISION: reader end errno=%d raw_bytes=%llu packets=%llu framing_desync=%llu discarded=%llu tei=%llu cc_jump=%llu same_cc_changed=%llu malformed=%llu\n",
+        msg_info("mAgicVISION: reader end errno=%d raw_bytes=%llu packets=%llu framing_desync=%llu discarded=%llu tei=%llu cc_jump=%llu same_cc_changed=%llu malformed=%llu max_read_gap_us=%llu\n",
             worker_error_.load(),static_cast<unsigned long long>(input_bytes),static_cast<unsigned long long>(counts.packets),
             static_cast<unsigned long long>(desyncs),static_cast<unsigned long long>(discarded),
             static_cast<unsigned long long>(counts.tei),static_cast<unsigned long long>(counts.cc_jump),
-            static_cast<unsigned long long>(counts.repeat_changed),static_cast<unsigned long long>(counts.malformed));
+            static_cast<unsigned long long>(counts.repeat_changed),static_cast<unsigned long long>(counts.malformed),
+            static_cast<unsigned long long>(max_read_gap_us));
         if(worker_error_){msg_err("mAgicVISION: stream failed errno=%d\n",worker_error_.load());stream_buf_->StopRequest();}
         changed_.notify_all();
     }
+    struct ServiceTrace {int64_t begin=0,end=0,ring_begin=0,ring_end=0;uint64_t bytes=0,cc=0;int rc=0,ring_rc=0;std::array<uint32_t,4> ring{};std::array<uint32_t,10> telemetry{};};
+    struct BulkTrace {int64_t completed,processed;uint64_t bytes,cc;};
+    int64_t TraceTime(Clock::time_point t)const{return std::chrono::duration_cast<std::chrono::microseconds>(t-trace_origin_).count();}
+    // CSV出力は受信終了後。各スレッドの専用vectorへ追記し、受信経路でファイルを待たない。
+    void SaveTrace(){
+        if(trace_dir_.empty() || (service_trace_.empty() && bulk_trace_.empty()))return;
+        const auto stem=trace_dir_+L"\\epoch-"+std::to_wstring(trace_epoch_);
+        FILE *f=nullptr;
+        if(!_wfopen_s(&f,(stem+L"-service.csv").c_str(),L"wb")){
+            std::fputs("begin_us,end_us,bulk_bytes,cc,rc,ring_begin_us,ring_end_us,ring_rc,base,size,producer,consumer,t_magic,t_pre_producer,t_pre_consumer,t_post_producer,t_post_consumer,t_attempts,t_success,t_fifo_busy,t_size,t_fifo_calls\n",f);
+            for(const auto &r:service_trace_){std::fprintf(f,"%lld,%lld,%llu,%llu,%d,%lld,%lld,%d,%u,%u,%u,%u",(long long)r.begin,(long long)r.end,(unsigned long long)r.bytes,(unsigned long long)r.cc,r.rc,(long long)r.ring_begin,(long long)r.ring_end,r.ring_rc,r.ring[0],r.ring[1],r.ring[2],r.ring[3]);for(auto word:r.telemetry)std::fprintf(f,",%u",word);std::fputc('\n',f);}
+            std::fclose(f);
+        }
+        if(!_wfopen_s(&f,(stem+L"-bulk.csv").c_str(),L"wb")){
+            std::fputs("completed_us,processed_us,bytes,cc\n",f);
+            for(const auto &r:bulk_trace_)std::fprintf(f,"%lld,%lld,%llu,%llu\n",(long long)r.completed,(long long)r.processed,(unsigned long long)r.bytes,(unsigned long long)r.cc);
+            std::fclose(f);
+        }
+        msg_info("mAgicVISION: diagnostic trace service=%zu bulk=%zu ring=%u epoch=%u\n",service_trace_.size(),bulk_trace_.size(),ring_trace_,trace_epoch_);
+        service_trace_.clear();bulk_trace_.clear();
+    }
+    std::wstring trace_dir_;bool ring_trace_=false;unsigned trace_epoch_=0;
+    Clock::time_point trace_origin_{};
+    std::vector<ServiceTrace> service_trace_;std::vector<BulkTrace> bulk_trace_;
+    std::atomic<uint64_t> trace_bytes_{0},trace_cc_{0};
     Device &parent_;
     std::vector<uint8_t> firmware_;
     Transport transport_;

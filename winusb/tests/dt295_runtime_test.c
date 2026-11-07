@@ -14,7 +14,8 @@ struct mock {
     uint8_t tune[40];
     uint32_t now,generation,source;
     unsigned initialized,ready,streaming,controls,tunes,packets;
-    int fail,stale;
+    int fail,stale,ring_read_error;
+    unsigned ring_reads;uint8_t ring_mmio[16];
 };
 static void dispatch(struct mock *m,const uint8_t request[64],uint8_t response[64])
 {
@@ -85,6 +86,11 @@ static int control(void *opaque,uint8_t type,uint8_t request,uint16_t value,uint
         const uint32_t bank=mb86H_debug_u32be_get(m->native+window);
         if(bank!=0xf00000){uint32_t physical=bank+(address&0x1ffff);
             if(physical>=MB86H_RESIDENT_BASE && physical+length<=MB86H_RESIDENT_END)memory=m->resident+physical-MB86H_RESIDENT_BASE;
+            else if(physical==0x01902020u && length==16){
+                CHECK(!m->torne && type==0xc0);++m->ring_reads;
+                if(m->ring_read_error){int rc=m->ring_read_error;m->ring_read_error=0;return rc;}
+                memory=m->ring_mmio;
+            }
             else {CHECK(m->torne && physical>=MB86H_TORNE_TS_RING_BASE && physical+length<=MB86H_TORNE_TS_RING_BASE+MB86H_TORNE_TS_RING_BYTES);memory=m->ring+physical-MB86H_TORNE_TS_RING_BASE;}
         }
     }
@@ -107,20 +113,36 @@ int main(int argc,char **argv)
     CHECK(!dt295_start(r));CHECK(m->initialized);
     CHECK(!dt295_tune(r,0,539143,UINT32_MAX));CHECK(mb86H_debug_u32be_get(m->tune)==539143);CHECK(m->tune[6]==0xe0);
     CHECK(!dt295_capture(r,1));CHECK(m->streaming && m->tune[7]);
+    uint32_t ring_words[4];
+    if(torne){unsigned controls=m->controls;CHECK(dt295_diagnostic_ring(r,ring_words)==-EINVAL);CHECK(m->controls==controls);}
+    else{
+        const uint32_t values[4]={0x0138ec00,0x30000,0x20000,0x10000};
+        for(unsigned i=0;i<4;i++)mb86H_debug_u32be_put(m->ring_mmio+4*i,values[i]);
+        CHECK(!dt295_diagnostic_ring(r,ring_words));CHECK(!memcmp(ring_words,values,sizeof(values)) && m->ring_reads==1);
+        CHECK(mb86H_debug_u32be_get(m->native+MB86H_DT295_BOOT0_READ_WINDOW)==0xf00000);
+        m->ring_read_error=-EIO;CHECK(dt295_diagnostic_ring(r,ring_words)==-EIO);
+        CHECK(mb86H_debug_u32be_get(m->native+MB86H_DT295_BOOT0_READ_WINDOW)==0xf00000);
+    }
     uint8_t ts[188*4];memset(ts,0xff,sizeof(ts));for(unsigned i=0;i<4;++i)ts[i*188]=0x47;
     CHECK(!dt295_feed(r,ts,91,packet,m));CHECK(!dt295_feed(r,ts+91,sizeof(ts)-91,packet,m));CHECK(m->packets>=2);
     CHECK(!dt295_service(r));int locked=0;CHECK(!dt295_locked(r,&locked) && locked);
     m->stale=1;CHECK(!dt295_locked(r,&locked) && !locked);m->stale=0;
     CHECK(!dt295_capture(r,0));CHECK(!m->streaming);
+    {unsigned controls=m->controls;CHECK(dt295_diagnostic_ring(r,ring_words)==-EINVAL);CHECK(m->controls==controls);}
     if(!torne){
     CHECK(!dt295_tune(r,1,1318000,0x40f1));CHECK(mb86H_debug_u32be_get(m->tune)==11996000);
     CHECK(m->tune[4]==0x40 && m->tune[5]==0xf1 && m->tune[8]==1);
     unsigned tunes=m->tunes;CHECK(dt295_tune(r,1,1318000,0x10000)==-EINVAL);CHECK(m->tunes==tunes);
     CHECK(!dt295_capture(r,1));m->packets=0;CHECK(!dt295_feed(r,ts,sizeof(ts),packet,m));CHECK(m->packets>=2);
     }else {unsigned tunes=m->tunes;CHECK(dt295_tune(r,1,1318000,0x40f1)==-EINVAL);CHECK(m->tunes==tunes);}
+    if(!torne){
+        CHECK(!dt295_close_restore(r));CHECK(!m->initialized);dt295_destroy(r);
+        CHECK(!dt295_create_target(&r,firmware,n,&io,DT295_TARGET_PIX_DT295));CHECK(!dt295_start(r));
+    }
     CHECK(!dt295_close(r));CHECK(!m->initialized);dt295_destroy(r);
     // 保持された正確な常駐イメージへ再接続する経路も、同じ実バイナリーで検証する。
     CHECK(!dt295_create_target(&r,firmware,n,&io,torne?DT295_TARGET_TORNE:DT295_TARGET_PIX_DT295));CHECK(!dt295_start(r));CHECK(m->initialized);
+    if(!torne)CHECK(dt295_close_restore(r)==-EOPNOTSUPP);
     CHECK(!dt295_close(r));dt295_destroy(r);free(m);free(firmware);
     puts(torne?"TORNE real bundle + mock USB: initialize/GR/capture/TS/stale generation/restore/reopen passed":"DT295 real bundle + mock USB: initialize/GR/BS/capture/TS/stale generation/close/reopen passed");return 0;
 }

@@ -45,10 +45,24 @@ int Transport::Control(void *ctx,uint8_t type,uint8_t request,uint16_t value,uin
 uint32_t Transport::Now(void *) { return GetTickCount(); }
 void Transport::Delay(void *ctx,unsigned ms) {
     auto &self=*static_cast<Transport *>(ctx);
+    const auto begin=Clock::now();
     const auto left=std::chrono::duration_cast<std::chrono::milliseconds>(self.deadline_-Clock::now()).count();
     if(left>0)WaitForSingleObject(self.removed_,static_cast<DWORD>((std::min<long long>)(left,ms)));
+    ++self.delays_;self.requested_delay_us_+=static_cast<uint64_t>(ms)*1000;
+    self.delay_us_+=static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(Clock::now()-begin).count());
 }
-void Transport::Observe(void *,const uint8_t *request,const uint8_t *response,int rc) {
+void Transport::ReportTiming(const char *stage) {
+    msg_info("mAgicVISION: transport stage=%s transfers=%llu in=%llu out=%llu in_us=%llu out_us=%llu control_us=%llu mean_control_us=%llu max_control_us=%llu delays=%llu requested_delay_us=%llu actual_delay_us=%llu\n",
+        stage,transfers_,in_,out_,in_us_,out_us_,control_us_,transfers_?control_us_/transfers_:0,max_control_us_,
+        delays_,requested_delay_us_,delay_us_);
+    transfers_=control_us_=max_control_us_=in_=out_=delays_=requested_delay_us_=delay_us_=0;
+    in_us_=out_us_=0;
+}
+void Transport::Observe(void *ctx,const uint8_t *request,const uint8_t *response,int rc) {
+    auto &self=*static_cast<Transport *>(ctx);self.telemetry_={};
+    // DTS1は計測用FWのSERVICEだけが返す。追加制御要求を使わず同じ応答から採取する。
+    if(!rc && response && !Be32(response+8) && Be32(request+12)==0x24 && Be32(response+24)==0x44545331)
+        for(size_t i=0;i<self.telemetry_.size();++i)self.telemetry_[i]=Be32(response+24+4*i);
     if(rc || (response && Be32(response+8)))
         msg_err("mAgicVISION: command seq=%u op=%u command=%x result=%d status=%u detail=%d\n",
             Be32(request+4),Be32(request+8),Be32(request+12),rc,
@@ -77,6 +91,7 @@ int Transport::Transfer(uint8_t type,uint8_t request,uint16_t value,uint16_t ind
     if(!operation.hEvent){last_error_=GetLastError();return failed_=Error(last_error_);}
     WINUSB_SETUP_PACKET setup{type,request,value,index,size};
     ULONG actual=0;
+    const auto begin=Clock::now();
     DWORD code=io_.Submit(usb_,setup,static_cast<PUCHAR>(data),size,actual,operation);
     if(code==ERROR_IO_PENDING) {
         HANDLE events[]{removed_,operation.hEvent};
@@ -89,6 +104,9 @@ int Transport::Transfer(uint8_t type,uint8_t request,uint16_t value,uint16_t ind
         DWORD collected=io_.Collect(usb_,operation,actual);
         if(!code)code=collected;
     }
+    const auto elapsed=static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(Clock::now()-begin).count());
+    ++transfers_;if(type&0x80){++in_;in_us_+=elapsed;}else{++out_;out_us_+=elapsed;}
+    control_us_+=elapsed;max_control_us_=(std::max)(max_control_us_,elapsed);
     CloseHandle(operation.hEvent);
     if(!code && actual!=size)code=ERROR_INVALID_DATA;
     if(code) {
