@@ -10,7 +10,7 @@ mAgicVISION の MIT 共有コードと上流の回帰試験を `dt295/upstream` 
 
 選局とTS受信は別スレッドです。選局前に旧受信を回収し、ストリーム世代と端数を破棄します。常駐ファームウェアの世代番号は上流セッションが検証し、USBの制御転送は個体ごとに直列化されます。受信停止後は上流 STOP の完了を確認し、通常終了は DT295 の常駐コードを保持する上流 loader_close の契約に従います。
 
-実機到着前の対象はファームウェア整合性、模擬転送、コマンドと状態遷移、TS分割入力、x86/x64 ビルドです。受信の実績、アンテナ給電、長時間安定性は未検証です。内蔵カードと CNR の公開は検証対象を受信へ絞るため対象外で、外部カードリーダーが必要です。
+ファームウェア整合性、模擬転送、コマンドと状態遷移、TS分割入力、x86/x64 ビルドに加え、PIX-DT295実機で初期化・地デジ/BS/CSの選局・TS受信・再Openを確認しています。開始・終了を含むCC異常と長時間安定性には未解決の条件があり、詳細は [2026-11-06の実機検証](pix-dt295-validation.md) を参照してください。アンテナ給電、内蔵カードと CNR は未検証で、復号には外部カードリーダーが必要です。
 
 ## ファームウェア
 
@@ -21,6 +21,28 @@ mAgicVISION の MIT 共有コードと上流の回帰試験を `dt295/upstream` 
 - Size: 289424 bytes; SBC2 v1; resident ABI 2; build ID `bd7efbdd5060f36c`
 
 上流 README はファームウェア成果物の再配布を認めています。収録ファイル名は `firmware/magicvision-dt295.bin` です。対応する常駐コードのソースは上流公開ツリーに含まれていません。
+
+## 送出上限256回のファームウェア
+
+CSや地デジの定常受信中にリングが詰まる条件では、送出上限を256回に増やしたPIX-DT295用イメージを `FirmwarePath` で選べます。生成器はmAgicVISION 0.1.1の `magicvision-dt295.bin` のSHA-256を検証し、計測版で実機確認した送出ループを組み込みます。生成に必要なのはPython 3です。
+
+リポジトリルートから、取得した0.1.1のイメージを指定します。
+
+```powershell
+python winusb/tools/build_dt295_stream256.py path/to/magicvision-dt295.bin magicvision-dt295-stream256.bin
+```
+
+生成ファイルを `DriverHost_PX4.exe` のあるフォルダーの `firmware` サブフォルダーに置き、PIX-DT295の機器定義を次のように設定します。
+
+```ini
+[DeviceDefinition19.Config]
+Experimental=true
+FirmwarePath="firmware\magicvision-dt295-stream256.bin"
+```
+
+切り替え時は対象機器の受信を終了し、旧イメージがRAMに残っている場合はPIX-DT295のUSBを抜き差ししてから、新しい設定でHostを起動します。元のイメージに戻す場合も同じ手順で `FirmwarePath` を変更します。
+
+生成したイメージでCS ND02、地デジ13ch、BS01/TS0を各30秒測定し、全保存TSでCC・同期・TEI異常が0件でした。CSのHost入力では開始後373.131 msまでにCC関連異常25件があり、その後は増えませんでした。模擬USB試験はx86/x64、実機試験はWindows x64で実施しました。送出上限の比較と、計測版での5分連続受信・繰り返し選局の結果も参照できます。[上限の比較](pix-dt295-budget-comparison.md) [連続受信と選局試験](pix-dt295-256-validation.md)
 
 ## ビルドとオフライン試験
 
