@@ -132,19 +132,22 @@ protected:
         if(rc){failed_=true;return rc;}
         if(!stream_buf_->AdvanceEpoch())return -EIO;
         stream_buf_->ResetInputPacketCount();worker_error_=0;
+        uint32_t tsid=0;
         {
             std::lock_guard<std::mutex> command(command_mutex_);
             transport_.Begin(parent_.torne_?90000:20000);
-            msg_info("mAgicVISION: tune target=%s frequency_khz=%u tsid=%x\n",parent_.torne_?"torne":"DT295",params_.freq,params_.stream_id);
             const bool satellite=params_.system==px4::SystemType::ISDB_S;
-            rc=source_?source_->Tune(satellite,params_.freq,params_.stream_id):
-                dt295_tune(runtime_,satellite?1u:0u,params_.freq,params_.stream_id);
+            // 地デジの要求はSTREAM_IDを持たず、params_には直前の衛星選局のTSIDが残る。地デジでは0を使う。
+            tsid=satellite?params_.stream_id:0;
+            msg_info("mAgicVISION: tune target=%s frequency_khz=%u tsid=%x\n",parent_.torne_?"torne":"DT295",params_.freq,tsid);
+            rc=source_?source_->Tune(satellite,params_.freq,tsid):
+                dt295_tune(runtime_,satellite?1u:0u,params_.freq,tsid);
             if(source_ && rc && rc!=-EINVAL)failed_=true;
             transport_.ReportTiming("tune");
         }
         if(!rc){tuned_=true;if(capture_)rc=StartReader();}
         if(rc)msg_err("mAgicVISION: tune system=%u frequency_khz=%u tsid=%x result=%d\n",
-            static_cast<unsigned>(params_.system),params_.freq,params_.stream_id,rc);
+            static_cast<unsigned>(params_.system),params_.freq,tsid,rc);
         return rc;
     }
 private:

@@ -530,8 +530,10 @@ int SourceFirmware::Tune(bool satellite, uint32_t khz, uint32_t tsid)
         do {
             if (IsLocked()) {
                 tuned_ = true;
-                msg_info("PIX-DT295 source-fr: locked system=%s IF_kHz=%u TSID=%u\n",
-                    satellite ? "ISDB-S" : "ISDB-T", khz, tsid);
+                if (satellite)
+                    msg_info("PIX-DT295 source-fr: locked system=ISDB-S IF_kHz=%u TSID=%u\n", khz, tsid);
+                else
+                    msg_info("PIX-DT295 source-fr: locked system=ISDB-T IF_kHz=%u\n", khz);
                 return 0;
             }
             Delay(100);
