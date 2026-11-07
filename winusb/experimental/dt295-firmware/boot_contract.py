@@ -22,11 +22,11 @@ def inspect_build(build):
     build = Path(build)
     manifest = json.loads((build/'manifest.json').read_text(encoding='utf-8'))
     if manifest.get('stage') != 'diagnostic-bootstrap-unverified' or manifest.get('deployable') is not False \
-            or manifest.get('features') != [] or manifest.get('entry') != '0x80380000':
+            or manifest.get('features') != [] or manifest.get('entry') != '0x000e1100':
         raise ValueError('expected the unverified diagnostic build manifest')
     result = {}
-    for key, name, address, limit in [('binary','resident.bin','0x80380000',0x1000),
-                                      ('bootstrap','bootstrap.bin','0x000e1000',0x800),
+    for key, name, address, limit in [('binary','resident.bin','0x000e1100',0x700),
+                                      ('bootstrap','bootstrap.bin','0x000e1000',0x100),
                                       ('hook','boot-hook.bin','0x000ea6fc',8)]:
         data = (build/name).read_bytes()
         record = manifest[key]
@@ -48,10 +48,10 @@ def plan(build, snapshot):
     return dict(schema=1, executable=False, reason='USB adapter and recovery are not hardware-validated',
                 target=dict(vid='0x06b8',pid='0x103b',boot_sha256=BOOT_SHA256), segments=segments,
                 prerequisites=['exclusive device ownership','idle boot state',
-                               'full RAM preimages and restoration path','checked native memory window'],
+                               'RAM preimages for all touched regions and restoration path','checked boot RAM regions'],
                 intended_order=['save all preimages','write and verify resident core',
                                 'write and verify bootstrap','install hook last and verify',
-                                'CAPS/PING only','restore hook first, drain execution, then restore RAM'],
+                                'CAPS/PING only','restore hook first, then code and staging RAM'],
                 diagnostic_exchange=dict(out=dict(request_type='0x40',request='0xbc',value='0x0c7e',
                                                  index='0x4620',bytes=64),
                                          read=dict(request_type='0xc0',request='0xbc',value='0x0c00',

@@ -22,6 +22,10 @@ dtp_entry:
         beq .Lok
         cmp #2,r0
         beq .Lok
+        .ifdef DTP_BULK
+        cmp #4,r0
+        beq .Lbulk
+        .endif
         cmp #3,r0
         beq .Lnot_ready
         ldi:8 #3,r2
@@ -78,6 +82,27 @@ dtp_entry:
         addn #4,r1
         ldi:32 #0x06b8103b,r0
         st r0,@r1
+        .ifdef DTP_BULK
+        bra .Lheader
+.Lbulk:
+        st rp,@-r15
+        st r4,@-r15
+        st r5,@-r15
+        st r6,@-r15
+        st r7,@-r15
+        st r12,@-r15
+        st r13,@-r15
+        ldi:32 #dtp_bulk_pump,r12
+        call @r12
+        ld @r15+,r13
+        ld @r15+,r12
+        ld @r15+,r7
+        ld @r15+,r6
+        ld @r15+,r5
+        ld @r15+,r4
+        ld @r15+,rp
+        ret
+        .endif
 .Lheader:
         ldi:32 #0x50494631,r0
         st r0,@r4

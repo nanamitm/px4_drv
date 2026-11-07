@@ -182,23 +182,57 @@ static void stop_completion_deadline(void)
     assert(dtp_i2c_poll(&e,10,0) == DTP_I2C_TIMEOUT);
 }
 
+static void fake_i2c_status(struct dtp_aux_i2c_status *i2c, uint32_t operation)
+{
+    i2c->state = 0x12;
+    i2c->control = 0x34;
+    i2c->irq_pending = 1;
+    i2c->irq_mask = 2;
+    i2c->system_gate = 3;
+    i2c->system_config = 4;
+    i2c->config_check = operation == DTP_AUX_I2C_CLOCK_CHECK ? 1u : 0u;
+}
+
 static void auxiliary_mailbox(void)
 {
     struct dtp_aux_mailbox m;
     memset(&m,0xaa,sizeof(m));
     dtp_aux_init(&m);
     assert(m.magic == DTP_AUX_MAGIC && m.abi == 1 && !m.features && !m.request_sequence && !m.response_sequence);
-    assert(!dtp_aux_step(&m) && m.heartbeat == 1);
+    assert(!dtp_aux_step(&m, NULL) && m.heartbeat == 1);
     m.operation = DTP_AUX_PING; m.request_sequence = 1;
-    assert(dtp_aux_step(&m) && m.response_sequence == 1 && m.status == DTP_AUX_OK);
+    assert(dtp_aux_step(&m, NULL) && m.response_sequence == 1 && m.status == DTP_AUX_OK);
     m.operation = DTP_AUX_I2C;
-    assert(!dtp_aux_step(&m)); /* 同一sequenceの要求を再実行しない。 */
+    assert(!dtp_aux_step(&m, NULL)); /* 同一sequenceの要求を再実行しない。 */
     m.request_sequence = 2;
-    assert(dtp_aux_step(&m) && m.status == DTP_AUX_NOT_READY && !m.features);
+    assert(dtp_aux_step(&m, NULL) && m.status == DTP_AUX_NOT_READY && !m.features);
     m.operation = 99; m.request_sequence = 3;
-    assert(dtp_aux_step(&m) && m.status == DTP_AUX_UNSUPPORTED);
+    assert(dtp_aux_step(&m, NULL) && m.status == DTP_AUX_UNSUPPORTED);
     m.magic = 0;
-    assert(!dtp_aux_step(&m) && m.response_sequence == 3);
+    assert(!dtp_aux_step(&m, NULL) && m.response_sequence == 3);
+    m.magic = DTP_AUX_MAGIC;
+    m.magic = DTP_AUX_MAGIC;
+    m.request_sequence = 4;
+    m.operation = DTP_AUX_I2C_STATUS;
+    assert(dtp_aux_step(&m, NULL) && m.status == DTP_AUX_NOT_READY);
+    assert(!m.i2c.state && !m.i2c.control && !m.features);
+    m.request_sequence = 5;
+    assert(dtp_aux_step(&m, fake_i2c_status) && m.status == DTP_AUX_OK);
+    assert(m.response_sequence == 5 && m.i2c.state == 0x12 && m.i2c.control == 0x34 && !m.features);
+    assert(m.i2c.irq_pending == 1 && m.i2c.irq_mask == 2 && m.i2c.system_gate == 3 && m.i2c.system_config == 4);
+    m.request_sequence = 6;
+    m.operation = DTP_AUX_PING;
+    assert(dtp_aux_step(&m, fake_i2c_status) && m.status == DTP_AUX_OK);
+    assert(!m.i2c.state && !m.i2c.control);
+    assert(!m.i2c.irq_pending && !m.i2c.irq_mask && !m.i2c.system_gate && !m.i2c.system_config);
+    m.request_sequence = 7;
+    m.operation = DTP_AUX_I2C_CLOCK_CHECK;
+    assert(dtp_aux_step(&m, fake_i2c_status) && m.status == DTP_AUX_OK && m.i2c.config_check == 1);
+    m.request_sequence = 8;
+    m.operation = DTP_AUX_TRANSFER;
+    assert(dtp_aux_step(&m, NULL) && m.status == DTP_AUX_NOT_READY);
+    m.request_sequence = 9;
+    assert(dtp_aux_step(&m, fake_i2c_status) && m.response_sequence == 9 && m.status == DTP_AUX_OK);
     dtp_aux_init(&m);
     assert(!m.request_sequence && !m.response_sequence);
 }

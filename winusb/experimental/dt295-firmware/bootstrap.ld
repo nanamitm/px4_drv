@@ -6,7 +6,7 @@ SECTIONS
 {
     . = 0x000e1000;
     .text : { *(.text*) }
-    ASSERT(SIZEOF(.text) <= 0x800, "bootstrap exceeds reserved development window")
+    ASSERT(SIZEOF(.text) <= 0x100, "bootstrap exceeds reserved development window")
     . = 0x000ea6fc;
     .hook : { *(.hook) }
     ASSERT(SIZEOF(.hook) == 8, "DT295 boot hook must be exactly 8 bytes")

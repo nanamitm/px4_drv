@@ -65,7 +65,7 @@ if __name__=='__main__':
     ap=argparse.ArgumentParser(description=__doc__)
     ap.add_argument('--build',type=Path,required=True)
     args,remaining=ap.parse_known_args()
-    CODE={0x80380000:(args.build/'resident.bin').read_bytes(),
+    CODE={0x000e1100:(args.build/'resident.bin').read_bytes(),
           0x000e1000:(args.build/'bootstrap.bin').read_bytes(),
           0x000ea6fc:(args.build/'boot-hook.bin').read_bytes()}
     unittest.main(argv=[sys.argv[0]]+remaining)

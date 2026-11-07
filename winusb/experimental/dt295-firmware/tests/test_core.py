@@ -21,10 +21,10 @@ import protocol as p
 def execute(code, packet, null=False):
     memory=bytearray(packet)
     ptr=0x1000
-    machine=Machine({0x80380000:code},{ptr:memory})
+    machine=Machine({0x000e1100:code},{ptr:memory})
     machine.regs[4]=0 if null else ptr
     original=machine.regs.copy()
-    _,steps=machine.run(0x80380000)
+    _,steps=machine.run(0x000e1100)
     if machine.regs[4:]!=original[4:]:raise AssertionError('callee modified preserved registers')
     return bytes(memory),steps
 
