@@ -255,7 +255,9 @@ def main():
 
     rows = [json.loads(line) for line in args.init_trace.read_text().splitlines()]
     auxiliary = image(args.auxiliary_build)
-    if 'bulk_pump.c' not in inspect_build(args.bulk_build).get('sources', {}):
+    inspect_build(args.bulk_build)
+    manifest = json.loads((args.bulk_build / 'manifest.json').read_text(encoding='utf-8'))
+    if 'bulk_pump.c' not in manifest.get('sources', {}):
         parser.error('bulk build must be generated with build.py --bulk')
     args.evidence.mkdir(parents=True)
     index = 0
