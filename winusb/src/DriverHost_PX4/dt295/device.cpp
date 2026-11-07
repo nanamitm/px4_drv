@@ -56,7 +56,11 @@ struct Read {
 
 class Device::Receiver final : public px4::ReceiverBase {
 public:
-    Receiver(Device &device,std::vector<uint8_t> firmware,std::unique_ptr<SourceFirmware> source):ReceiverBase(RECEIVER_SAT_SET_STREAM_ID_BEFORE_TUNE),
+    // PIX-DT295の復調器TC90532XBGは、地デジのロック直後に訂正前のTSを数十ms出力する。
+    // 同系統の復調器を持つ機種と同じく、ロックから350msまでの待機後に選局を完了し、BonDriverのPurgeで破棄させる。
+    // torneは復調器が異なり実機で必要性を確認していないため、従来の動作を維持する。
+    Receiver(Device &device,std::vector<uint8_t> firmware,std::unique_ptr<SourceFirmware> source):
+        ReceiverBase(RECEIVER_SAT_SET_STREAM_ID_BEFORE_TUNE|(device.torne_?0:RECEIVER_WAIT_AFTER_LOCK_TC_T)),
         parent_(device),firmware_(std::move(firmware)),source_(std::move(source)),transport_(device.usb_dev_.dev,device.usb_dev_.winusb,device.removed_) {}
     ~Receiver() override {Close();}
     int Open() override {
