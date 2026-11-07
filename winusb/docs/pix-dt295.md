@@ -90,3 +90,27 @@ torneで確認できるのはこの共通経路とtorne用プロファイルで�
 ## ソースからビルドするファームウェアの開発
 
 I²Cパススルーを機器側、初期化・選局をホスト側へ置く構成の実験実装は [`experimental/dt295-firmware`](../experimental/dt295-firmware/README.md) にあります。現段階は独立したFRプロトコルコアと診断用ブートアダプターのビルド・命令モデル検証で、ロード/復元、実機でのUSB接続、物理I²C、TSの実装・検証は残っています。通常の配布物や機器定義には接続されていないため、本ページのSBC2方式と置き換えて使える段階ではありません。
+
+### ソース生成版をBonDriverで試す
+
+対象は既知のブートRAMを持つPIX-DT295 Rev.01です。`build.py --bulk` と `build_auxiliary.py` の出力、および衛星初期化を含む地デジ・衛星JSONLから、DriverHost用のバンドルを生成します。生成器が表示するSHA-256を設定に使います。
+
+```powershell
+python winusb/experimental/dt295-firmware/build_host_bundle.py $auxiliaryBuild $bulkBuild $initTrace dt295-source-fr.bin
+```
+
+バンドルをDriverHostの `firmware` フォルダーに置き、既存のPIX-DT295定義を次のように設定します。`SourceFirmwareSha256` は生成器の出力に置き換えます。
+
+```ini
+[DeviceDefinition19.Config]
+Experimental=true
+FirmwareBackend=source-fr
+SourceFirmwarePath="firmware\dt295-source-fr.bin"
+SourceFirmwareSha256="<64桁のSHA-256>"
+```
+
+`BonDriver_DT295.ini` の `[BonDriver]` に `TuneTimeout=150000` を指定し、試験用DriverHostの `[DriverHost_PX4]` には `PipeTimeout=240000` を指定します。初回選局にはRAM前像の退避、Closeには復元が含まれます。ソース生成版は冷間状態から起動するため、別ファームウェアがRAMに残っている場合は対象機のUSBを抜き差ししてから試します。BS/CSは外部給電環境で `LNBPower=0` を指定します。
+
+BonDriverの選局・TS配信は既存のIPCを使います。衛星選局時には明示TSIDが必要です。`CheckLock` は選局完了時の検証結果を返します。RF状態の継続監視、CNR、内蔵B-CAS、アンテナ給電はこの経路の対象外です。CloseはTSエンジンを停止してからリング、RAM、システム設定を復元します。復元が完了しなかった場合はログに記録され、USBの電源再投入が必要です。
+
+Windows x64の隔離環境では、同じBonDriverのOpen中にGR13 → BS01 → CS02 → GR13を各6秒受信し、保存TSのPATでTSID 31761 → 16400 → 24608 → 31761を確認しました。各保存TSの同期・TEI・CC・形式異常は0件でした。DriverHostの一部の区間では192-byte入力の再同期が1件記録されました。Close後にUSB抜き差しなしで再Openし、BS01とCS02を各4秒受信して再度復元を確認しました。初回選局は約28～29秒、以降の切り替えは約4.5～5.3秒、終了時の復元は約31～33秒でした。

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 #include "device.hpp"
 #include "winusb_transport.hpp"
+#include "source_firmware.hpp"
 #include "msg.h"
 #include "util.hpp"
 #include "ts_continuity.hpp"
@@ -55,18 +56,18 @@ struct Read {
 
 class Device::Receiver final : public px4::ReceiverBase {
 public:
-    Receiver(Device &device,std::vector<uint8_t> firmware):ReceiverBase(RECEIVER_SAT_SET_STREAM_ID_BEFORE_TUNE),
-        parent_(device),firmware_(std::move(firmware)),transport_(device.usb_dev_.dev,device.usb_dev_.winusb,device.removed_) {}
+    Receiver(Device &device,std::vector<uint8_t> firmware,std::unique_ptr<SourceFirmware> source):ReceiverBase(RECEIVER_SAT_SET_STREAM_ID_BEFORE_TUNE),
+        parent_(device),firmware_(std::move(firmware)),source_(std::move(source)),transport_(device.usb_dev_.dev,device.usb_dev_.winusb,device.removed_) {}
     ~Receiver() override {Close();}
     int Open() override {
         std::lock_guard<std::mutex> lock(mutex_);
         if(open_)return -EBUSY;
-        if(!parent_.available_ || !stop_.value)return -ENODEV;
+        if(!parent_.available_ || !stop_.value || restore_failed_)return -ENODEV;
         UCHAR speed=0;ULONG speed_size=sizeof(speed);
         if(WinUsb_QueryDeviceInformation(parent_.usb_dev_.winusb,DEVICE_SPEED,&speed_size,&speed))
             msg_info("mAgicVISION: USB speed code=%u (1=low 2=full 3=high)\n",speed);
         auto io=transport_.Callbacks();
-        int rc=dt295_create_target(&runtime_,firmware_.data(),firmware_.size(),&io,
+        int rc=source_?0:dt295_create_target(&runtime_,firmware_.data(),firmware_.size(),&io,
             parent_.torne_?DT295_TARGET_TORNE:DT295_TARGET_PIX_DT295);
         if(!rc && !stream_buf_->Alloc(188u*65536u))rc=-ENOMEM;
         if(rc){Cleanup();msg_err("mAgicVISION: open/initialize failed result=%d win32=%lu\n",rc,transport_.LastError());return rc;}
@@ -94,7 +95,7 @@ public:
         if(!tuned_)return 0;
         std::lock_guard<std::mutex> command(command_mutex_);
         transport_.Begin(2000);int value=0;
-        const int rc=dt295_locked(runtime_,&value);locked=value!=0;
+        const int rc=source_?source_->Locked(value):dt295_locked(runtime_,&value);locked=value!=0;
         return rc;
     }
     int SetLnbVoltage(std::int32_t voltage) override {return voltage?-ENOSYS:0;}
@@ -113,15 +114,15 @@ protected:
             // 復元前像は最初の書換え前に保存し、途中失敗やプロセス異常終了後の調査に残す。
             transport_.SetSnapshotPath(px4::util::path::GetDir()+L"mAgicVISION-preimage-"+
                 std::to_wstring(GetCurrentProcessId())+L"-"+std::to_wstring(GetTickCount64())+L".bin");
-            msg_info("mAgicVISION: initializing resident target=%s\n",parent_.torne_?"torne":"DT295");
-            transport_.Begin(parent_.torne_?180000:120000);const int initialized=dt295_start(runtime_);
+            msg_info("DT295: initializing backend=%s\n",source_?"source-fr":parent_.torne_?"torne-resident":"magicvision");
+            transport_.Begin(parent_.torne_?180000:120000);const int initialized=source_?source_->Start(transport_.Callbacks()):dt295_start(runtime_);
             transport_.ReportTiming("initialize");
             if(initialized){
                 msg_err("mAgicVISION: initialize failed result=%d win32=%lu\n",initialized,transport_.LastError());
                 failed_=true;return initialized;
             }
             initialized_=true;
-            msg_info("mAgicVISION: resident initialized target=%s\n",parent_.torne_?"torne":"DT295");
+            msg_info("DT295: initialized backend=%s\n",source_?"source-fr":parent_.torne_?"torne-resident":"magicvision");
         }
         int rc=StopReader();tuned_=false;
         if(rc){failed_=true;return rc;}
@@ -131,7 +132,10 @@ protected:
             std::lock_guard<std::mutex> command(command_mutex_);
             transport_.Begin(parent_.torne_?90000:20000);
             msg_info("mAgicVISION: tune target=%s frequency_khz=%u tsid=%x\n",parent_.torne_?"torne":"DT295",params_.freq,params_.stream_id);
-            rc=dt295_tune(runtime_,params_.system==px4::SystemType::ISDB_S?1u:0u,params_.freq,params_.stream_id);
+            const bool satellite=params_.system==px4::SystemType::ISDB_S;
+            rc=source_?source_->Tune(satellite,params_.freq,params_.stream_id):
+                dt295_tune(runtime_,satellite?1u:0u,params_.freq,params_.stream_id);
+            if(source_ && rc && rc!=-EINVAL)failed_=true;
             transport_.ReportTiming("tune");
         }
         if(!rc){tuned_=true;if(capture_)rc=StartReader();}
@@ -141,6 +145,12 @@ protected:
     }
 private:
     void Cleanup(){
+        if(source_){
+            transport_.BeginRestore(120000);
+            restore_failed_=source_->Close()!=0;
+            transport_.ReportTiming("source-close");
+            return;
+        }
         if(!runtime_)return;
         const bool restore=GetEnvironmentVariableW(L"DT295_STREAM_TRACE_RESTORE",nullptr,0)>0;
         transport_.Begin(restore?180000:parent_.torne_?120000:20000);
@@ -156,7 +166,7 @@ private:
         wchar_t trace_path[MAX_PATH]{};
         const DWORD trace_size=GetEnvironmentVariableW(L"DT295_STREAM_TRACE_DIR",trace_path,MAX_PATH);
         trace_dir_=trace_size && trace_size<MAX_PATH?trace_path:L"";
-        ring_trace_=!parent_.torne_ && GetEnvironmentVariableW(L"DT295_STREAM_TRACE_RING",nullptr,0)>0;
+        ring_trace_=!source_ && !parent_.torne_ && GetEnvironmentVariableW(L"DT295_STREAM_TRACE_RING",nullptr,0)>0;
         service_trace_.clear();bulk_trace_.clear();trace_bytes_=0;trace_cc_=0;
         trace_origin_=Clock::now();++trace_epoch_;
         ResetEvent(stop_.value);stream_buf_->Start();
@@ -172,7 +182,7 @@ private:
         int rc=worker_error_.load()?-EIO:0;
         if(!rc){
             std::lock_guard<std::mutex> command(command_mutex_);
-            transport_.Begin(parent_.torne_?90000:20000);rc=dt295_capture(runtime_,1);
+            transport_.Begin(parent_.torne_?90000:20000);rc=source_?source_->Capture(true):dt295_capture(runtime_,1);
         }
         if(rc){StopReader();return rc;}
         // input初期化が終わる前のUSBデータは破棄し、フレーマーとの競合を避ける。
@@ -182,14 +192,16 @@ private:
             auto previous=Clock::now();
             while(parent_.available_ && !worker_error_){
                 // SERVICEはTS送出も進める。1msをWindows tickへ丸めて約16ms遅らせない。
-                const auto wait=px4::torne::WaitFrontendDelay(stop_.value,Clock::now()+std::chrono::seconds(2),1000000,parent_.removed_);
+                // PIF1はリング/FIFOの空きを機器側で待つため、ホスト側の1ms待機を重ねない。
+                const auto wait=source_?(WaitForSingleObject(stop_.value,0)==WAIT_OBJECT_0?ERROR_OPERATION_ABORTED:0):
+                    px4::torne::WaitFrontendDelay(stop_.value,Clock::now()+std::chrono::seconds(2),1000000,parent_.removed_);
                 if(wait==ERROR_OPERATION_ABORTED)break;
                 if(wait){worker_error_=-EIO;break;}
                 std::lock_guard<std::mutex> command(command_mutex_);
                 const auto begin=Clock::now();
                 const auto gap=static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(begin-previous).count());
                 total_gap_us+=gap;max_gap_us=(std::max)(max_gap_us,gap);previous=begin;++calls;
-                transport_.Begin(2000);const int rc=dt295_service(runtime_);
+                transport_.Begin(2000);const int rc=source_?source_->Service():dt295_service(runtime_);
                 const auto completed=Clock::now();
                 if(!trace_dir_.empty() && service_trace_.size()<100000){
                     ServiceTrace row{};row.begin=TraceTime(begin);row.end=TraceTime(completed);
@@ -216,9 +228,9 @@ private:
         if(service_worker_.joinable())service_worker_.join();
         if(worker_.joinable())worker_.join();
         SaveTrace();
-        if(!runtime_ || !tuned_)return 0;
+        if(!source_ && (!runtime_ || !tuned_))return 0;
         std::lock_guard<std::mutex> command(command_mutex_);
-        transport_.Begin(20000);const int rc=dt295_capture(runtime_,0);
+        transport_.Begin(20000);const int rc=source_?source_->Capture(false):dt295_capture(runtime_,0);
         transport_.ReportTiming("capture-stop");
         if(rc)failed_=true;
         return rc;
@@ -250,7 +262,8 @@ private:
                     if(!ok || bytes>read.bytes.size()){worker_error_=-EIO;break;}
                     input_bytes+=bytes;trace_bytes_=input_bytes;
                     if(deliver_){
-                        output.clear();int rc=dt295_feed(runtime_,read.bytes.data(),bytes,Packet,&output);
+                        output.clear();int rc=source_?source_->Feed(read.bytes.data(),bytes,Packet,&output):
+                            dt295_feed(runtime_,read.bytes.data(),bytes,Packet,&output);
                         if(rc){worker_error_=rc;break;}
                         if(!output.empty()){
                             quality->Feed(output.data(),output.size(),[](const px4::TsContinuityMonitor::Event &){});
@@ -278,7 +291,9 @@ private:
             }
             counts=quality->Counts();
         }catch(...){worker_error_=-ENOMEM;}
-        uint64_t discarded=0,desyncs=0;dt295_input_stats(runtime_,&discarded,&desyncs);
+        uint64_t discarded=0,desyncs=0;
+        if(source_)source_->InputStats(discarded,desyncs);
+        else dt295_input_stats(runtime_,&discarded,&desyncs);
         msg_info("mAgicVISION: reader end errno=%d raw_bytes=%llu packets=%llu framing_desync=%llu discarded=%llu tei=%llu cc_jump=%llu same_cc_changed=%llu malformed=%llu max_read_gap_us=%llu\n",
             worker_error_.load(),static_cast<unsigned long long>(input_bytes),static_cast<unsigned long long>(counts.packets),
             static_cast<unsigned long long>(desyncs),static_cast<unsigned long long>(discarded),
@@ -315,6 +330,7 @@ private:
     std::atomic<uint64_t> trace_bytes_{0},trace_cc_{0};
     Device &parent_;
     std::vector<uint8_t> firmware_;
+    std::unique_ptr<SourceFirmware> source_;
     Transport transport_;
     dt295_runtime *runtime_=nullptr;
     std::mutex mutex_,command_mutex_,state_mutex_;
@@ -324,7 +340,7 @@ private:
     std::thread worker_,service_worker_;
     std::atomic_bool deliver_{false};
     std::atomic_int worker_error_{0};
-    bool open_=false,capture_=false,tuned_=false,failed_=false,armed_=false,initialized_=false;
+    bool open_=false,capture_=false,tuned_=false,failed_=false,armed_=false,initialized_=false,restore_failed_=false;
 };
 
 Device::Device(const std::wstring &path,const px4::DeviceDefinition &definition,std::uintptr_t index,px4::ReceiverManager &manager)
@@ -348,12 +364,25 @@ int Device::Init(){
         stream|=p.PipeId==0x81 && p.PipeType==UsbdPipeTypeBulk;
     }
     if(!stream)return -EINVAL;
-    auto path=device_def_.configs.Get(L"FirmwarePath",L"firmware\\magicvision-dt295.bin");
-    if(path.empty())return -EINVAL;
-    if(!std::filesystem::path(path).is_absolute())path=px4::util::path::GetDir()+path;
-    std::vector<uint8_t> firmware;const int rc=LoadFirmware(path,firmware,torne_?DT295_TARGET_TORNE:DT295_TARGET_PIX_DT295);
-    if(rc){msg_err("mAgicVISION: firmware invalid/missing path=%ls result=%d\n",path.c_str(),rc);return rc;}
-    receiver_=std::make_unique<Receiver>(*this,std::move(firmware));
+    const auto backend=device_def_.configs.Get(L"FirmwareBackend",L"magicvision");
+    std::vector<uint8_t> firmware;
+    std::unique_ptr<SourceFirmware> source;
+    if(backend==L"source-fr" && pix){
+        auto path=device_def_.configs.Get(L"SourceFirmwarePath",L"");
+        const auto digest=device_def_.configs.Get(L"SourceFirmwareSha256",L"");
+        if(path.empty() || digest.size()!=64)return -EINVAL;
+        if(!std::filesystem::path(path).is_absolute())path=px4::util::path::GetDir()+path;
+        source=std::make_unique<SourceFirmware>();
+        const int rc=source->Load(path,digest);
+        if(rc)return rc;
+    }else if(backend==L"magicvision"){
+        auto path=device_def_.configs.Get(L"FirmwarePath",L"firmware\\magicvision-dt295.bin");
+        if(path.empty())return -EINVAL;
+        if(!std::filesystem::path(path).is_absolute())path=px4::util::path::GetDir()+path;
+        const int rc=LoadFirmware(path,firmware,torne_?DT295_TARGET_TORNE:DT295_TARGET_PIX_DT295);
+        if(rc){msg_err("mAgicVISION: firmware invalid/missing path=%ls result=%d\n",path.c_str(),rc);return rc;}
+    }else return -EINVAL;
+    receiver_=std::make_unique<Receiver>(*this,std::move(firmware),std::move(source));
     px4::command::ReceiverInfo info{};const auto &r=device_def_.receivers.front();
     wcscpy_s(info.device_name,device_def_.name.c_str());info.device_guid=device_def_.guid;
     wcscpy_s(info.receiver_name,r.name.c_str());info.receiver_guid=r.guid;

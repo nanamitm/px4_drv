@@ -28,6 +28,8 @@ public:
     Transport(HANDLE file,WINUSB_INTERFACE_HANDLE usb,HANDLE removed,ControlIo *io=nullptr)
         :file_(file),removed_(removed),usb_(usb),io_(io?*io:native_) {}
     void Begin(unsigned milliseconds) { deadline_=Clock::now()+std::chrono::milliseconds(milliseconds); }
+    // 失敗した要求を再送せず、保存済み前像を戻すときだけ通信を再開する。
+    void BeginRestore(unsigned milliseconds) { failed_=0; Begin(milliseconds); }
     dt295_io Callbacks();
     const std::array<uint32_t,10> &Telemetry() const { return telemetry_; }
     DWORD LastError() const { return last_error_; }
