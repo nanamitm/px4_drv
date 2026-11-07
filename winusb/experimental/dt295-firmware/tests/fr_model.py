@@ -55,6 +55,10 @@ class Machine:
             pc += 2
             if inst == 0x9720:
                 pc = self.rp
+            elif inst == 0x9f20:
+                delayed = self.rp
+            elif inst & 0xfff0 == 0x9f10:
+                self.rp, delayed = pc + 2, r[j]
             elif inst == 0x9fa0:
                 pass
             elif inst & 0xfff0 == 0x9710:
@@ -71,12 +75,37 @@ class Machine:
                 r[j] = (inst >> 4) & 255
             elif top == 0x8b:
                 r[j] = r[i]
+            elif top == 0x8f and not inst & 1:
+                # stm1 stores high registers in descending order.
+                for reg in range(14, 7, -1):
+                    if inst & (1 << (15 - reg)):
+                        r[15] -= 4
+                        self.store(r[15], r[reg])
+            elif top == 0x8d and not inst & 0x80:
+                for reg in range(8, 15):
+                    if inst & (1 << (reg - 8)):
+                        r[reg] = self.load(r[15], 4)
+                        r[15] += 4
+            elif inst == 0x1781:
+                r[15] -= 4
+                self.store(r[15], self.rp)
+            elif inst == 0x0781:
+                self.rp = self.load(r[15], 4)
+                r[15] += 4
+            elif inst & 0xfff0 == 0x0700 and j != 15:
+                r[j] = self.load(r[15], 4)
+                r[15] += 4
             elif top == 0xa0:
                 r[j] = (r[j]+i) & 0xffffffff
             elif top == 0xa1:
                 r[j] = (r[j]+i-16) & 0xffffffff
             elif top == 0xa2:
                 r[j] = (r[j]+r[i]) & 0xffffffff
+            elif top == 0xa3:
+                r[15] += 4 * (j + 16 * i - (256 if i & 8 else 0))
+            elif inst & 0xfff0 == 0x9780:
+                byte = r[j] & 255
+                r[j] = byte if byte < 128 else 0xffffff00 | byte
             elif top == 0xa8:
                 self.equal = r[j] == i
                 self.less = r[j] < i
@@ -85,6 +114,8 @@ class Machine:
                 self.less = r[j] < r[i]
             elif top == 0x04:
                 r[j] = self.load(r[i], 4)
+            elif top == 0x06:
+                r[j] = self.load(r[i], 1)
             elif top in (0x01, 0x02):
                 r[j] = self.load((r[13]+r[i]) & 0xffffffff, 2 if top == 0x01 else 1)
             elif top == 0x14:
@@ -95,13 +126,14 @@ class Machine:
                 self.ccr &= inst & 255
             elif top == 0x92:
                 r[j] |= r[i]
-            elif top in (0xe0, 0xe2, 0xe3, 0xee, 0xf0, 0xf2, 0xf3, 0xfe):
+            elif top in (0xe0, 0xe2, 0xe3, 0xee, 0xf0, 0xf2, 0xf3, 0xfe, 0xff):
                 disp = inst & 255
                 if disp & 128:
                     disp -= 256
                 condition = top & 15
                 take = condition == 0 or (condition == 2 and self.equal) or \
-                       (condition == 3 and not self.equal) or (condition == 14 and (self.less or self.equal))
+                       (condition == 3 and not self.equal) or (condition == 14 and (self.less or self.equal)) or \
+                       (condition == 15 and not (self.less or self.equal))
                 if take:
                     if top >= 0xf0:
                         delayed = pc+disp*2

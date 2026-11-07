@@ -10,6 +10,7 @@ import sys
 from fr_model import Machine
 
 MAILBOX = 0x000a3900
+STACK_TOP = 0x000a37fc
 
 
 def symbols(elf):
@@ -31,9 +32,14 @@ def symbols(elf):
 
 
 def call(name, mailbox):
-    machine=Machine({0xa0000:BINARY},{MAILBOX:mailbox})
-    machine.regs[4]=MAILBOX
-    machine.run(SYMBOLS[name],limit=2000)
+    stack = bytearray(256)
+    machine = Machine({0xa0000: BINARY}, {MAILBOX: mailbox, STACK_TOP - len(stack): stack})
+    machine.regs[4] = MAILBOX
+    machine.regs[5] = 0  # Optional I2C handler is absent in this mailbox-only test.
+    machine.regs[15] = STACK_TOP
+    machine.run(SYMBOLS[name], limit=2000)
+    if machine.regs[15] != STACK_TOP:
+        raise AssertionError('auxiliary routine did not restore the stack pointer')
     return machine
 
 
@@ -80,7 +86,7 @@ class AuxiliaryImageTests(unittest.TestCase):
             struct.pack_into('>I',mailbox,12,1)
             machine=call('dtp_aux_step',mailbox)
             self.assertEqual(machine.regs[4],0)
-            self.assertEqual(machine.writes,[])
+            self.assertFalse(any(MAILBOX <= addr < MAILBOX + len(mailbox) for addr in machine.writes))
 
 
 if __name__=='__main__':
