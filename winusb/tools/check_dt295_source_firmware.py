@@ -42,3 +42,31 @@ for manifest in (auxiliary, bulk):
         if hashlib.sha256((sources / name).read_bytes()).hexdigest() != sha:
             raise SystemExit('Firmware source changed; regenerate dt295-source-fr.bin: ' + name)
 print('PASS DT295 source-fr bundle ' + digest + ' matches its sources and manifests.')
+
+# direct-frのDTP3は補助CPUを使わないため、主CPU側の3区画だけを持つ。
+record = json.loads((firmware / 'dt295-direct-fr.json').read_text(encoding='utf-8'))
+bundle = (firmware / 'dt295-direct-fr.bin').read_bytes()
+digest = hashlib.sha256(bundle).hexdigest()
+if record['format'] != 'DTP3' or bundle[:4] != b'DTP3':
+    raise SystemExit('dt295-direct-fr.bin must be a DTP3 bundle')
+if record['bundle'] != dict(file='dt295-direct-fr.bin', bytes=len(bundle), sha256=digest):
+    raise SystemExit('dt295-direct-fr.bin differs from dt295-direct-fr.json')
+sizes = struct.unpack_from('>3I', bundle, 4)
+offset, sections = 16, []
+for size in sizes:
+    sections.append(bundle[offset:offset + size])
+    offset += size
+if offset != len(bundle):
+    raise SystemExit('DTP3 section sizes do not cover the bundle')
+direct = record['direct']
+for data, sha, name in ((sections[0], direct['binary']['sha256'], 'resident.bin'),
+                        (sections[1], direct['bootstrap']['sha256'], 'bootstrap.bin'),
+                        (sections[2], direct['hook']['sha256'], 'boot-hook.bin')):
+    if hashlib.sha256(data).hexdigest() != sha:
+        raise SystemExit('Bundle section differs from its manifest: ' + name)
+if 'direct_pump.c' not in direct['sources'] or direct['entry'] != '0x000e1060':
+    raise SystemExit('Bundle was not built with build.py --direct-usb')
+for name, sha in direct['sources'].items():
+    if hashlib.sha256((sources / name).read_bytes()).hexdigest() != sha:
+        raise SystemExit('Firmware source changed; regenerate dt295-direct-fr.bin: ' + name)
+print('PASS DT295 direct-fr bundle ' + digest + ' matches its sources and manifest.')

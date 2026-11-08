@@ -13,6 +13,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('build', type=Path)
     parser.add_argument('output', type=Path)
+    parser.add_argument('--provenance', type=Path,
+                        help='also write the build manifest and bundle digest as JSON')
     args = parser.parse_args()
     segments = inspect_build(args.build)
     manifest = json.loads((args.build / 'manifest.json').read_text(encoding='utf-8'))
@@ -21,9 +23,15 @@ def main():
     sections = [(args.build / name).read_bytes()
                 for name in ('resident.bin', 'bootstrap.bin', 'boot-hook.bin')]
     bundle = b'DTP3' + struct.pack('>3I', *(len(section) for section in sections)) + b''.join(sections)
+    digest = hashlib.sha256(bundle).hexdigest()
     with args.output.open('xb') as output:
         output.write(bundle)
-    print(f'SourceFirmwareSha256={hashlib.sha256(bundle).hexdigest()}')
+    if args.provenance:
+        record = dict(format='DTP3', bundle=dict(file=args.output.name, bytes=len(bundle), sha256=digest),
+                      direct=manifest)
+        with args.provenance.open('x', encoding='utf-8', newline='\n') as output:
+            output.write(json.dumps(record, indent=2) + '\n')
+    print(f'SourceFirmwareSha256={digest}')
 
 
 if __name__ == '__main__':
