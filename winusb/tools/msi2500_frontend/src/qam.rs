@@ -12,6 +12,7 @@ use std::arch::x86::*;
 #[cfg(target_arch = "x86_64")]
 use std::arch::x86_64::*;
 use std::f64::consts::PI;
+use std::sync::Arc;
 
 /// 日本のケーブルテレビの J.83 Annex B (256QAM) のシンボルレート
 pub const SYMBOL_RATE: f64 = 5.6e6;
@@ -210,12 +211,20 @@ fn slice(v: f32) -> f32 {
     (k - 7.5) * LEVEL_STEP
 }
 
+/// 復調した単位電力のシンボルと、最寄りの 256QAM の点との距離の 2 乗
+pub fn decision_error(z: Complex32) -> f32 {
+    (z - Complex32::new(slice(z.re), slice(z.im))).norm_sqr()
+}
+
+/// 複製は、PX-S1UD のブロック間の欠落の長さを試行して選ぶ用途 (s1ud.rs) で使う。
+/// 補間の係数表は共有し、複製の費用を状態の大きさに抑える
+#[derive(Clone)]
 pub struct QamDemod {
     fs: f64,
     pll_scale: f32,
     step0: f64,
     /// 位相 p (0..=PHASES) の係数 TAPS 個。table[p][j] = h(j - (HALF - 1) - p / PHASES)
-    table: Vec<[f32; TAPS]>,
+    table: Arc<Vec<[f32; TAPS]>>,
     dc: Complex32,
     dc_init: bool,
     /// 直流を除いた入力 (I、Q を交互に並べる)
@@ -252,6 +261,11 @@ pub struct QamDemod {
     sig_acc: f64,
     mer_n: u32,
     bad_windows: u32,
+    /// push_erased で受けた消失の区間 (buf の先頭からの入力サンプル数、[始め, 終わり))
+    erasures: Vec<(f64, f64)>,
+    /// 適応を止めておく残りのシンボル数と、直前のシンボルが消失にかかったか
+    frozen: u32,
+    prev_hit: bool,
     pub stats: QamStats,
 }
 
@@ -281,7 +295,7 @@ impl QamDemod {
             fs,
             pll_scale,
             step0: sps_in / 2.0,
-            table,
+            table: Arc::new(table),
             dc: Complex32::default(),
             dc_init: false,
             buf: Vec::new(),
@@ -311,6 +325,9 @@ impl QamDemod {
             sig_acc: 0.0,
             mer_n: 0,
             bad_windows: 0,
+            erasures: Vec::new(),
+            frozen: 0,
+            prev_hit: false,
             stats: QamStats::default(),
         };
         s.restart_equalizer();
@@ -344,6 +361,16 @@ impl QamDemod {
 
     /// 入力サンプル (任意の尺度) を入れ、復調したシンボル (単位電力) を out へ追加する
     pub fn push(&mut self, x: &[Complex32], out: &mut Vec<Complex32>) {
+        self.push_erased(x, 0..0, out);
+    }
+
+    /// push と同じだが、x の erased の範囲のサンプルを消失 (受信できず推定や 0 で埋めた値) として扱う。
+    /// 整合フィルターの窓が消失にかかるシンボルでは、直流と AGC の追従と Gardner の誤差を使わず、
+    /// その後、等化器の履歴から消失が抜けるまで等化器と PLL の適応と MER の評価を止める。
+    /// シンボルは出力し続け、誤り訂正から見たシンボルの並びを保つ。
+    /// PX-S1UD (s1ud.rs) はブロック間で落ちたサンプルを埋めて渡す。埋めた値で適応すると、
+    /// 落ちる長さが一定のときに同じ向きの乱れがブロックごとに積み重なった
+    pub fn push_erased(&mut self, x: &[Complex32], erased: std::ops::Range<usize>, out: &mut Vec<Complex32>) {
         if x.is_empty() {
             return;
         }
@@ -353,11 +380,17 @@ impl QamDemod {
             self.dc = x.iter().fold(Complex32::default(), |a, &v| a + v) / n;
             self.dc_init = true;
         }
+        if erased.start < erased.end {
+            let base = (self.buf.len() / 2) as f64;
+            self.erasures.push((base + erased.start as f64, base + erased.end.min(x.len()) as f64));
+        }
         // 直流の除去 (時定数 約 10 万サンプル = 12 ms)
         const DC_K: f32 = 1e-5;
         self.buf.reserve(2 * x.len());
-        for &v in x {
-            self.dc += (v - self.dc) * DC_K;
+        for (i, &v) in x.iter().enumerate() {
+            if !erased.contains(&i) {
+                self.dc += (v - self.dc) * DC_K;
+            }
             let u = v - self.dc;
             self.buf.push(u.re);
             self.buf.push(u.im);
@@ -370,21 +403,37 @@ impl QamDemod {
             }
             let m = self.interp(self.t);
             let y = self.interp(t_sym);
-            let (m, y) = self.agc(m, y);
+            let hit = !self.erasures.is_empty() && (self.erased_at(self.t) || self.erased_at(t_sym));
+            let (m, y) = self.agc(m, y, hit);
             // Gardner: 遅れて標本化すると中間点が次のシンボル側へずれ、e が負になる。
             // 誤差は 1 シンボル遅らせて反映する。次の補間の時刻が今の補間の結果を待たなくなり、
             // 連続したシンボルの計算を重ねて実行できる (ループの帯域に対して 1 シンボルの遅れは無視できる)
-            let e = std::mem::replace(&mut self.timing_e, ((self.y_prev - y) * m.conj()).re as f64);
+            // 消失したシンボルと、その直後のシンボル (前のシンボルが消失) では Gardner の誤差を使わない
+            let ted = if hit || self.prev_hit { 0.0 } else { ((self.y_prev - y) * m.conj()).re as f64 };
+            self.prev_hit = hit;
+            let e = std::mem::replace(&mut self.timing_e, ted);
             self.y_prev = y;
             self.step = (self.step + TIMING_KI * e).clamp(self.step0 * 0.999, self.step0 * 1.001);
             self.t = t_sym + self.step + TIMING_KP * e;
-            self.equalize(m, y, out);
+            if hit {
+                // 等化器の履歴 (NT 個 = NT / 2 シンボル) から消失のサンプルが抜けるまで適応を止める
+                self.frozen = (NT / 2) as u32 + 1;
+            }
+            let freeze = self.frozen > 0;
+            self.frozen = self.frozen.saturating_sub(1);
+            self.equalize(m, y, freeze, out);
         }
         // 窓の手前に必要な分だけを残す
         let keep_from = (self.t.floor() as usize).saturating_sub(HALF + 1);
         if keep_from > 0 {
             self.buf.drain(..2 * keep_from);
             self.t -= keep_from as f64;
+            let k = keep_from as f64;
+            self.erasures.retain_mut(|r| {
+                r.0 -= k;
+                r.1 -= k;
+                r.1 > 0.0
+            });
         }
         self.stats.timing_ppm = (self.step / self.step0 - 1.0) * 1e6;
         self.stats.carrier_hz = self.freq as f64 * SYMBOL_RATE / (2.0 * PI);
@@ -404,18 +453,33 @@ impl QamDemod {
         fir_interleaved(x, &self.table[p])
     }
 
-    /// 整合フィルター出力の電力を 1 へ揃える (始めの 4096 組は累積平均、以後は時定数 約 6 万組)
+    /// 時刻 t の整合フィルターの窓 (interp と同じ範囲) が消失にかかるか
     #[inline]
-    fn agc(&mut self, m: Complex32, y: Complex32) -> (Complex32, Complex32) {
-        let p = 0.5 * (m.norm_sqr() + y.norm_sqr());
-        self.agc_n += 1;
-        let k = if self.agc_n < 4096 { 1.0 / self.agc_n as f32 } else { 1.0 / 65536.0 };
-        self.agc_p += (p - self.agc_p) * k;
+    fn erased_at(&self, t: f64) -> bool {
+        let (lo, hi) = (t - HALF as f64, t + HALF as f64 + 1.0);
+        self.erasures.iter().any(|r| r.0 < hi && r.1 > lo)
+    }
+
+    /// 整合フィルター出力の電力を 1 へ揃える (始めの 4096 組は累積平均、以後は時定数 約 6 万組)。
+    /// erased のときは電力の推定を更新しない
+    #[inline]
+    fn agc(&mut self, m: Complex32, y: Complex32, erased: bool) -> (Complex32, Complex32) {
+        if erased && self.agc_n == 0 {
+            // 電力の推定がまだないときは尺度を変えない (0 の推定から極端な利得を掛けない)
+            return (m, y);
+        }
+        if !erased {
+            let p = 0.5 * (m.norm_sqr() + y.norm_sqr());
+            self.agc_n += 1;
+            let k = if self.agc_n < 4096 { 1.0 / self.agc_n as f32 } else { 1.0 / 65536.0 };
+            self.agc_p += (p - self.agc_p) * k;
+        }
         let g = 1.0 / self.agc_p.max(1e-20).sqrt();
         (m * g, y * g)
     }
 
-    fn equalize(&mut self, m: Complex32, y: Complex32, out: &mut Vec<Complex32>) {
+    /// freeze のときは等化器と PLL の適応、MER と出力電力の評価を止め、搬送波は推定済みの周波数で回し続ける
+    fn equalize(&mut self, m: Complex32, y: Complex32, freeze: bool, out: &mut Vec<Complex32>) {
         shift_in(&mut self.reg_re, y.re, m.re);
         shift_in(&mut self.reg_im, y.im, m.im);
         let n = self.stats.symbols;
@@ -433,14 +497,26 @@ impl QamDemod {
         match self.dd_since {
             None => {
                 // CMA は位相を区別しないため、CMA の間は位相を回さない
-                mu_g = z * (z.norm_sqr() - self.r2) * CMA_MU;
+                mu_g = if freeze { Complex32::default() } else { z * (z.norm_sqr() - self.r2) * CMA_MU };
                 let cma_n = n - self.cma_start;
                 if cma_n + FOURTH_N as u64 >= CMA_SYMBOLS {
+                    // 添字がシンボルの時刻を表すため、消失の間も 0 を入れて並びを保つ
                     let z2 = z * z;
-                    self.fourth.push(z2 * z2);
+                    self.fourth.push(if freeze { Complex32::default() } else { z2 * z2 });
                 }
                 if cma_n + 1 >= CMA_SYMBOLS {
                     self.start_dd(n + 1);
+                }
+            }
+            Some(since) if freeze => {
+                mu_g = Complex32::default();
+                // 位相誤差は使わず、推定済みの周波数で回転子を進める
+                let dphi = self.freq;
+                let r = self.rot * Complex32::new(1.0 - 0.5 * dphi * dphi, -dphi);
+                self.rot = r * (1.5 - 0.5 * r.norm_sqr());
+                if n >= since + SETTLE {
+                    out.push(z);
+                    self.stats.output_symbols += 1;
                 }
             }
             Some(since) => {
@@ -480,6 +556,9 @@ impl QamDemod {
             }
         }
         self.pend_g = mu_g;
+        if freeze {
+            return;
+        }
         // 出力の電力を 1 に保つ
         self.pow_acc += y0.norm_sqr();
         self.pow_n += 1;
