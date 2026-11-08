@@ -205,10 +205,9 @@ fn rrc(t: f64, a: f64) -> f64 {
     ((PI * t * (1.0 - a)).sin() + 4.0 * a * t * (PI * t * (1.0 + a)).cos()) / (PI * t * (1.0 - (4.0 * a * t).powi(2)))
 }
 
-/// 送信シンボルを RRC で波形にし、MSi2500 と同じ 8.127 MS/s で標本化する。
+/// 送信シンボルを RRC で波形にし、指定されたレートで標本化する。
 /// シンボルレートのずれ (ppm)、搬送波のずれ、直流、雑音を加え、検証環境と同じくスペクトルを反転する
-fn synthesize(syms: &[Complex32], ppm: f64, cfo_hz: f64, snr_db: f64, rng: &mut Rng) -> Vec<Complex32> {
-    let fs = 512e6 / 63.0;
+fn synthesize(syms: &[Complex32], fs: f64, ppm: f64, cfo_hz: f64, snr_db: f64, rng: &mut Rng) -> Vec<Complex32> {
     let rs = SYMBOL_RATE * (1.0 + ppm * 1e-6);
     let n_out = ((syms.len() as f64 - 20.0) / rs * fs) as usize;
     let delay = 0.37; // シンボル単位の端数の遅延
@@ -236,6 +235,20 @@ fn synthesize(syms: &[Complex32], ppm: f64, cfo_hz: f64, snr_db: f64, rng: &mut 
 
 #[test]
 fn qam_demodulator_and_fec_recover_synthetic_signal() {
+    check_qam_sample_rate(512e6 / 63.0, false);
+}
+
+#[test]
+fn qam_demodulator_and_fec_recover_synthetic_signal_at_12_msps() {
+    check_qam_sample_rate(12e6, false);
+}
+
+#[test]
+fn qam_demodulator_and_fec_recover_synthetic_signal_with_periodic_gaps() {
+    check_qam_sample_rate(12e6, true);
+}
+
+fn check_qam_sample_rate(fs: f64, periodic_gaps: bool) {
     // 検証環境のバンド III の MER (約 30 dB) に近い雑音、受信機の時計のずれ、搬送波のずれを与える
     let mut rng = Rng(0x0dd_ba11);
     let ts = make_ts(3000, &mut rng);
@@ -243,8 +256,14 @@ fn qam_demodulator_and_fec_recover_synthetic_signal() {
     let mut levels = Vec::new();
     tx.push_packets(&ts, &mut levels);
     let syms: Vec<Complex32> = levels.iter().map(|&z| z / LEVEL_SCALE).collect();
-    let x = synthesize(&syms, -25.0, 1500.0, 31.0, &mut rng);
-    let mut demod = QamDemod::new(512e6 / 63.0, 1.0);
+    let mut x = synthesize(&syms, fs, -25.0, 1500.0, 31.0, &mut rng);
+    if periodic_gaps {
+        // Model the six sample erasures reported for each PX-S1UD USB block.
+        for block in x.chunks_exact_mut(7366) {
+            block[1..7].fill(Complex32::default());
+        }
+    }
+    let mut demod = QamDemod::new(fs, 1.0);
     let mut dec = J83bDecoder::new();
     let (mut s, mut out) = (Vec::new(), Vec::new());
     for chunk in x.chunks(384 * 16) {
