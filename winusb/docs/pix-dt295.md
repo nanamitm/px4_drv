@@ -4,6 +4,8 @@
 
 PIX-DT295 (`06b8:103b`) の1受信機を DriverHost_PX4 が所有し、既存の BonDriver_PX4 と IPC から地デジ・BS・CSを切り替えて使用する構成です。既存の torne / PX 系の機器制御は独立したままです。
 
+配布設定の既定は、このリポジトリのソースから生成したファームウェア（`FirmwareBackend=source-fr`）です。mAgicVISIONの常駐ファームウェアは `FirmwareBackend=magicvision` で選べます。mAgicVISIONのファイルは、torneの常駐方式とソース生成版の初期化列の参照元として同梱を続けています。`FirmwareBackend` を持たない以前の配布物のINIでは、従来どおりmAgicVISION方式で動作します。
+
 mAgicVISION の MIT 共有コードと上流の回帰試験を `dt295/upstream` に固定版で収録し、C11 のローダー・セッション・フレーマーを C アダプター経由で利用します。上流の回帰試験にはルートの LICENSE も保持しています。出典と各ファイルの SHA-256 は `ORIGIN.json` に記載されています。WinUSB は操作全体の期限と抜去イベントを持ち、キャンセル後も OVERLAPPED の完了を回収してからメモリーを解放する契約です。
 
 受信機を開く処理はローカル検証とバッファ確保だけで、長いUSB初期化は最初の選局へ遅延し、ReceiverManagerの一覧ロックを占有しない構成です。
@@ -62,7 +64,7 @@ x86/x64 の上流 bootstrap / loader / session / USB window / stream input、Win
 2. `BonDriver_DT295_32bit` または `64bit` をアプリのビット数に合わせて配置します。ファームウェアは実際に起動するDriverHostと同じディレクトリの `firmware` 以下に必要です。
 3. `DriverHost_PX4.ini` の `[DeviceDefinition19.Config]` を `Experimental=true` へ変更します。初期設定はfalseのため受信機を登録せず、ファームウェアの転送もありません。
 4. 外部カードリーダーと外部アンテナ給電を用意します。BonDriverの `LNBPower=0` を維持し、未実装の内蔵カードや給電制御を前提にしない構成で確認します。
-5. 最初の選局にはRAMの読戻しとファームウェア配置を伴うため時間がかかります。ログの `mAgicVISION` 行でファイル不正、Win32転送エラー、常駐応答エラーを切り分けます。
+5. 既定のソース生成版は、最初の選局でRAM前像の退避と補助CPU・常駐コードの配置を行います（約2秒）。別のファームウェアがRAMに残っている場合や、ブートRAMが既知のRev.01の内容と一致しない場合は初期化が失敗します。mAgicVISION方式は正常終了後も常駐コードをRAMに残すため、方式を切り替えた直後はUSBを抜き差ししてから試します。それでも初期化に失敗する個体では `FirmwareBackend=magicvision` を指定します。ログの `PIX-DT295 source-fr` 行と `mAgicVISION` 行で、ファイル不正、Win32転送エラー、復調器のロック失敗を切り分けます。
 6. 地デジ、BS/CSのTSID指定、同一方式の選局反復、地デジと衛星の切替、閉じて再オープン、無信号、USB抜去・再接続、長時間録画を個別に確認します。sync / TEI / CC、TS量と無入力時間、終了の所要時間を記録します。
 
 USB応答不明のセッションは再送による二重実行を避けるため再利用できません。ログに物理的な再接続が必要と出た場合は、本体を接続し直してから確認します。通常終了では上流仕様に合わせ常駐コードがRAMに残ります。
@@ -89,11 +91,11 @@ torneで確認できるのはこの共通経路とtorne用プロファイルで�
 
 ## ソースからビルドするファームウェアの開発
 
-I²Cパススルーを機器側、初期化・選局をホスト側へ置く構成の実装は [`experimental/dt295-firmware`](../experimental/dt295-firmware/README.md) にあります。ソースから生成したバンドル `dt295-source-fr.bin` は、配布物の各 `firmware` フォルダーに同梱されています。既定の方式はmAgicVISIONのままで、ソース生成版は設定の切り替えで使います。対象は既知のブートRAMを持つPIX-DT295 Rev.01です。
+I²Cパススルーを機器側、初期化・選局をホスト側へ置く構成の実装は [`experimental/dt295-firmware`](../experimental/dt295-firmware/README.md) にあります。ソースから生成したバンドル `dt295-source-fr.bin` は、配布物の各 `firmware` フォルダーに同梱されています。配布設定では、ソース生成版を既定の方式にしています。対象は既知のブートRAMを持つPIX-DT295 Rev.01です。
 
 ### ソース生成版を使う
 
-`DriverHost_PX4.ini` の `[DeviceDefinition19.Config]` で `Experimental=true` と `FirmwareBackend=source-fr` を指定します。`SourceFirmwarePath` と `SourceFirmwareSha256` は同梱のバンドルに合わせて設定済みです。
+`DriverHost_PX4.ini` の `[DeviceDefinition19.Config]` で `Experimental=true` を指定します。`FirmwareBackend=source-fr`、`SourceFirmwarePath`、`SourceFirmwareSha256` は配布設定に含まれています。以前の配布物のINIを使い続ける場合は、次の値を追記します。
 
 ```ini
 [DeviceDefinition19.Config]
