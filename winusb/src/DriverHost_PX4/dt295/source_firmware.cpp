@@ -553,6 +553,22 @@ int SourceFirmware::Locked(int &locked)
     return 0;
 }
 
+int SourceFirmware::ReadCn(bool &satellite, uint32_t &raw)
+{
+    if (!ready_ || !tuned_)
+        return -EINVAL;
+    try {
+        satellite = satellite_;
+        // TC90532XBGはTC90522系と同じCN監視レジスターを持つ。地デジは0x8bから3 bytes、衛星は0xbcから2 bytes。
+        raw = satellite_ ? Be(I2c(Sat, {0xbc}, 2).data(), 2) : Be(I2c(Gr, {0x8b}, 3).data(), 3);
+        return 0;
+    } catch (int error) {
+        return Failure("CN read", error);
+    } catch (const std::bad_alloc &) {
+        return -ENOMEM;
+    }
+}
+
 int SourceFirmware::Capture(bool enable)
 {
     try {

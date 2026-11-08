@@ -8,6 +8,7 @@
 #include "../torne/frontend_wait.hpp"
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <condition_variable>
 #include <cstdio>
 #include <filesystem>
@@ -29,6 +30,21 @@ int LoadFirmware(const std::wstring &path,std::vector<uint8_t> &bytes,dt295_targ
     const bool ok=fread(bytes.data(),1,bytes.size(),file)==bytes.size();
     fclose(file);
     return ok?dt295_validate_target(bytes.data(),bytes.size(),target):-EIO;
+}
+// TC90522系の生値を0.001dB単位へ換算する。式と無信号の扱いはpx4_device.cppのPX4系受信機と同じ。
+std::int32_t CnrMilliDb(bool satellite,uint32_t raw)
+{
+    double cnr=0;
+    if(satellite){
+        if(raw<3000)return 0;
+        const double p=std::sqrt(static_cast<double>(raw-3000))/64;
+        cnr=(-1634.6*p*p*p*p*p)+(14341*p*p*p*p)-(50259*p*p*p)+(88977*p*p)-(89565*p)+58857;
+    }else{
+        if(!raw)return 0;
+        const double p=10*std::log10(5505024/static_cast<double>(raw));
+        cnr=(0.024*p*p*p*p)-(1.6*p*p*p)+(39.8*p*p)+(549.1*p)+3096.5;
+    }
+    return std::isnan(cnr)?0:static_cast<std::int32_t>(cnr);
 }
 struct Event {
     HANDLE value=CreateEventW(nullptr,TRUE,FALSE,nullptr);
@@ -103,7 +119,28 @@ public:
         return rc;
     }
     int SetLnbVoltage(std::int32_t voltage) override {return voltage?-ENOSYS:0;}
-    int ReadStat(px4::command::StatType,std::int32_t &value) override {value=0;return -ENOSYS;}
+    int ReadStat(px4::command::StatType type,std::int32_t &value) override {
+        value=0;
+        // mAgicVISIONの常駐コードは信号品質を返さないため、復調器を直接読めるsource-frだけが対象。
+        if(type!=px4::command::StatType::CNR || !source_)return -ENOSYS;
+        std::lock_guard<std::mutex> lock(mutex_);
+        if(!open_ || !parent_.available_ || failed_ || worker_error_)return -ECANCELED;
+        if(!tuned_)return 0;
+        // CNの読み出しは補助CPU経由のI²CでSERVICEを待たせる。失敗後は応答が残る可能性があるため、
+        // 受信を止めずに次の選局まで読み出しを止め、TS配信を統計取得より優先する。
+        if(cn_failed_)return -EIO;
+        bool satellite=false;uint32_t raw=0;
+        {
+            ++command_waiters_;
+            std::unique_lock<std::mutex> command(command_mutex_);
+            --command_waiters_;
+            transport_.Begin(2000);
+            const int rc=source_->ReadCn(satellite,raw);
+            if(rc){cn_failed_=true;return rc;}
+        }
+        value=CnrMilliDb(satellite,raw);
+        return 0;
+    }
 protected:
     int SetStreamId() override {return 0;} // TSIDはSetFrequencyのTUNEへ同梱する。
     int SetFrequency() override {
@@ -131,7 +168,7 @@ protected:
         int rc=StopReader();tuned_=false;
         if(rc){failed_=true;return rc;}
         if(!stream_buf_->AdvanceEpoch())return -EIO;
-        stream_buf_->ResetInputPacketCount();worker_error_=0;
+        stream_buf_->ResetInputPacketCount();worker_error_=0;cn_failed_=false;
         uint32_t tsid=0;
         {
             std::lock_guard<std::mutex> command(command_mutex_);
@@ -204,6 +241,10 @@ private:
                     px4::torne::WaitFrontendDelay(stop_.value,Clock::now()+std::chrono::seconds(2),1000000,parent_.removed_);
                 if(wait==ERROR_OPERATION_ABORTED)break;
                 if(wait){worker_error_=-EIO;break;}
+                // source-frのSERVICEは待機なしで連続するため、std::mutexの取り直しで統計要求が数秒待たされる。
+                // 待機中の要求があれば1回分だけ先に通し、CNの読み出しをSERVICE1回程度の遅れに収める。
+                while(command_waiters_.load() && !worker_error_ && WaitForSingleObject(stop_.value,0)!=WAIT_OBJECT_0)
+                    std::this_thread::yield();
                 std::lock_guard<std::mutex> command(command_mutex_);
                 const auto begin=Clock::now();
                 const auto gap=static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(begin-previous).count());
@@ -341,13 +382,14 @@ private:
     Transport transport_;
     dt295_runtime *runtime_=nullptr;
     std::mutex mutex_,command_mutex_,state_mutex_;
+    std::atomic<int> command_waiters_{0};
     std::condition_variable changed_,closed_;
     Event stop_;
     // SERVICEがUSB制御応答を待ってもBulk受信を回収し続けるため、workerを分離する。
     std::thread worker_,service_worker_;
     std::atomic_bool deliver_{false};
     std::atomic_int worker_error_{0};
-    bool open_=false,capture_=false,tuned_=false,failed_=false,armed_=false,initialized_=false,restore_failed_=false;
+    bool open_=false,capture_=false,tuned_=false,failed_=false,armed_=false,initialized_=false,restore_failed_=false,cn_failed_=false;
 };
 
 Device::Device(const std::wstring &path,const px4::DeviceDefinition &definition,std::uintptr_t index,px4::ReceiverManager &manager)

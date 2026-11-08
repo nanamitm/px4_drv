@@ -17,6 +17,7 @@ public:
     int Start(dt295_io io);
     int Tune(bool satellite, uint32_t khz, uint32_t tsid);
     int Locked(int &locked);
+    int ReadCn(bool &satellite, uint32_t &raw);
     int Capture(bool enable);
     int Service();
     int Close();
