@@ -1,14 +1,16 @@
 # CECH-ZD1JのソースビルドFRファームウェア経路
 
+このページは廃止された実験経路の検証記録です。現在のDriverHostで旧INIを使う場合は、CECH-ZD1Jの設定を `I2cBackend=native` に変更するか、その行を削除します。
+
 実験用の `I2cBackend="source-fr"` は、CECH-ZD1Jのcore1へ本リポジトリのCソースから生成したFRプログラムをロードし、PAF2メールボックスで物理I²C要求を転送する経路です。復調器・チューナーの初期化、選局、状態取得はDriverHost内の既存ネイティブ実装が担当します。通常のBonDriver APIとTS配信IPCを使うため、利用アプリ側に専用プロトコルは不要です。
 
 既定値は `native` です。PIX-DT295は別のHAL・フロントエンドを必要とするため、この設定で代用できません。
 
-## ビルドと設定
+## 当時のビルドと設定
 
 FRコンパイラー・アセンブラーを指定した [build_auxiliary.py](../experimental/dt295-firmware/build_auxiliary.py) に `--torne-i2c --torne-device-clock` を渡すと `auxiliary.bin` と `manifest.json` が生成されます。手順と時計の実測は [torne-device-clock.md](../experimental/dt295-firmware/torne-device-clock.md) を参照してください。成果物の `deployable=false` は実験段階を表す値です。
 
-通常のx86/x64 DriverHostビルドにはこの経路が含まれます。生成したバイナリーを配置し、`DriverHost_PX4.ini` のCECH-ZD1Jに対応する `.Config` 節へ次を指定します。SHA-256は使用する生成物から取得してください。
+検証当時のx86/x64 DriverHostビルドにはこの経路が含まれていました。生成したバイナリーを配置し、`DriverHost_PX4.ini` のCECH-ZD1Jに対応する `.Config` 節へ次を指定します。SHA-256は使用する生成物から取得してください。
 
 ```ini
 I2cBackend="source-fr"

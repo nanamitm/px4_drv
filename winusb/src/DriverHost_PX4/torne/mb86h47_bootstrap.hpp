@@ -27,7 +27,7 @@ enum class BootstrapResult {
 class Bootstrap final {
 public:
 	Bootstrap(MemoryAccess &memory, BootstrapWait &wait) noexcept : memory_(memory), wait_(wait) {}
-	BootstrapResult Initialize(std::uint32_t command_seed,bool quiesce_source=false);
+	BootstrapResult Initialize(std::uint32_t command_seed);
 	BootstrapResult ResetDemodulator();
 	BootstrapResult Result() const noexcept { return result_; }
 	MemoryResult LastMemoryResult() const noexcept { return memory_result_; }

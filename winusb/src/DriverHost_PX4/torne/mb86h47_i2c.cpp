@@ -36,11 +36,6 @@ I2cResult MailboxI2c::Transfer(std::uint8_t address, const std::uint8_t *write, 
 	}
 	if (clock_.Now() >= deadline)
 		return I2cResult::timeout;
-	if (external_) {
-		const auto result=external_(address,write,write_size,read,read_size,deadline);
-		if (result!=I2cResult::ok) ready_=false;
-		return result;
-	}
 	++sequence_;
 	if (!sequence_)
 		sequence_ = 1;
@@ -102,7 +97,6 @@ I2cResult MailboxI2c::Transfer(std::uint8_t address, const std::uint8_t *write, 
 // このアダプターには未回収の ring 要求がなく、job 開始前の drain は不要。
 I2cResult MailboxI2c::StartJob(std::uint32_t kind,const std::vector<std::uint32_t> &parameters,Clock::time_point deadline)
 {
-	if(external_)return I2cResult::not_ready;
 	if(parameters.size()>14)return I2cResult::invalid_argument;
 	if(!ready_ || !bootstrap_ || !bootstrap_->IsInitialized() || bootstrap_->Generation()!=generation_)return I2cResult::not_ready;
 	if(clock_.Now()>=deadline)return I2cResult::timeout;
@@ -123,7 +117,6 @@ I2cResult MailboxI2c::StartJob(std::uint32_t kind,const std::vector<std::uint32_
 I2cResult MailboxI2c::RunJob(std::uint32_t kind,const std::vector<std::uint32_t> &parameters,
 	unsigned expected_ms,std::array<std::uint32_t,3> &results,Clock::time_point deadline)
 {
-	if(external_)return I2cResult::not_ready;
 	results={};
 	const auto limit=(std::min)(deadline,clock_.Now()+std::chrono::milliseconds(expected_ms+500));
 	const auto started=StartJob(kind,parameters,limit);
@@ -194,7 +187,6 @@ I2cResult MailboxI2c::Captrim(std::uint8_t address,std::uint16_t lo4,std::uint32
 	int start,int step,int target,std::int64_t settle_write,std::int64_t settle_read,
 	int &best,int &diff,Clock::time_point deadline)
 {
-	if(external_)return I2cResult::not_ready;
 	if((address&1)||!key||settle_write<0||settle_read<0||settle_write>1000000000||settle_read>1000000000)return I2cResult::invalid_argument;
 	auto result=SpinRate(deadline);
 	if(result!=I2cResult::ok)return result;

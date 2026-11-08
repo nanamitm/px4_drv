@@ -53,7 +53,7 @@ channel_switch_stress.exe .\BonDriver_DT295.dll <space> <channel-a> <channel-b> 
 
 ## torneの旧設定
 
-`ResidentFirmware=true` が残っている場合は警告を出し、既存の `I2cBackend` 設定で起動します。旧常駐方式専用のINIを使っていた場合は通常のtorne用INIへ移行します。過去の測定結果は [torne常駐方式の実機記録](torne-resident-validation.md) にあります。
+`ResidentFirmware=true` が残っている場合は警告を出し、ネイティブ経路で起動します。旧 `I2cBackend=source-fr` は `native` に変更するか、その行を削除します。旧常駐方式専用のINIを使っていた場合は通常のtorne用INIへ移行します。過去の測定結果は [torne常駐方式の実機記録](torne-resident-validation.md) にあります。
 
 ## ソースからビルドするファームウェアの開発
 
