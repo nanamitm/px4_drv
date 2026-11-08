@@ -51,7 +51,7 @@ for platform in (('x86', 'x64') if args.platform == 'both' else (args.platform,)
             print(result.stderr.decode(errors='replace'))
             raise SystemExit('Build failed: ' + test + ' ' + platform)
         command = [str(out / ('dt295_' + test + '_test.exe'))]
-        if own_project:
+        if test in ('transport', 'runtime'):
             command.append(str(firmware))
         result = subprocess.run(command, capture_output=True)
         (out / ('dt295_' + test + '_run.log')).write_bytes(result.stdout + result.stderr)

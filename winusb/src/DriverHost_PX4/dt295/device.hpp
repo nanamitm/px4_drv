@@ -19,6 +19,5 @@ private:
     std::atomic_bool available_{true};
     HANDLE removed_=nullptr;
     bool registered_=false;
-    bool torne_=false;
 };
 }

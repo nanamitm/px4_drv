@@ -8,6 +8,7 @@ bundle, or when the bundle no longer matches the manifests recorded at generatio
 from pathlib import Path
 import hashlib
 import json
+import re
 import struct
 
 root = Path(__file__).resolve().parents[1]
@@ -69,4 +70,8 @@ if 'direct_pump.c' not in direct['sources'] or direct['entry'] != '0x000e1060':
 for name, sha in direct['sources'].items():
     if hashlib.sha256((sources / name).read_bytes()).hexdigest() != sha:
         raise SystemExit('Firmware source changed; regenerate dt295-direct-fr.bin: ' + name)
+device = (root / 'src/DriverHost_PX4/dt295/device.cpp').read_text(encoding='utf-8')
+default_digest = re.search(r'DefaultDirectFirmwareSha256\[\]\s*=\s*L"([0-9a-f]{64})"', device)
+if not default_digest or default_digest[1] != digest:
+    raise SystemExit('DriverHost default direct-fr digest differs from the bundled firmware')
 print('PASS DT295 direct-fr bundle ' + digest + ' matches its sources and manifest.')

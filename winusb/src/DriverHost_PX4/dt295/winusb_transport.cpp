@@ -3,7 +3,6 @@
 #include "msg.h"
 #include <algorithm>
 #include <cerrno>
-#include <cstdio>
 #include <array>
 #include <cstring>
 
@@ -18,7 +17,6 @@ int Error(DWORD code) {
     default:return -EIO;
     }
 }
-uint32_t Be32(const uint8_t *p) {return uint32_t(p[0])<<24|uint32_t(p[1])<<16|uint32_t(p[2])<<8|p[3];}
 }
 DWORD NativeControlIo::Submit(WINUSB_INTERFACE_HANDLE usb,WINUSB_SETUP_PACKET setup,PUCHAR data,ULONG size,ULONG &actual,OVERLAPPED &operation) {
     return WinUsb_ControlTransfer(usb,setup,data,size,&actual,&operation)?ERROR_SUCCESS:GetLastError();
@@ -27,17 +25,7 @@ DWORD NativeControlIo::Collect(WINUSB_INTERFACE_HANDLE usb,OVERLAPPED &operation
     return WinUsb_GetOverlappedResult(usb,&operation,&actual,TRUE)?ERROR_SUCCESS:GetLastError();
 }
 void NativeControlIo::Cancel(HANDLE file,OVERLAPPED &operation) noexcept {CancelIoEx(file,&operation);}
-dt295_io Transport::Callbacks() { return {Control,Now,Delay,Observe,this,Mismatch,Snapshot}; }
-int Transport::Snapshot(void *ctx,const void *data,size_t size) {
-    auto &self=*static_cast<Transport *>(ctx);
-    if(self.snapshot_path_.empty())return 0;
-    FILE *file=nullptr;
-    if(_wfopen_s(&file,self.snapshot_path_.c_str(),self.snapshot_started_?L"ab":L"wb") || !file)return -EIO;
-    const bool good=fwrite(data,1,size,file)==size;
-    const bool closed=fclose(file)==0;
-    self.snapshot_started_=true;
-    return good && closed?0:-EIO;
-}
+dt295_io Transport::Callbacks() { return {Control,Now,Delay,nullptr,this,nullptr,nullptr}; }
 int Transport::Control(void *ctx,uint8_t type,uint8_t request,uint16_t value,uint16_t index,void *data,uint16_t size,unsigned timeout)
 {
     return static_cast<Transport *>(ctx)->Transfer(type,request,value,index,data,size,timeout);
@@ -52,24 +40,11 @@ void Transport::Delay(void *ctx,unsigned ms) {
     self.delay_us_+=static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(Clock::now()-begin).count());
 }
 void Transport::ReportTiming(const char *stage) {
-    msg_info("mAgicVISION: transport stage=%s transfers=%llu in=%llu out=%llu in_us=%llu out_us=%llu control_us=%llu mean_control_us=%llu max_control_us=%llu delays=%llu requested_delay_us=%llu actual_delay_us=%llu\n",
+    msg_info("PIX-DT295: transport stage=%s transfers=%llu in=%llu out=%llu in_us=%llu out_us=%llu control_us=%llu mean_control_us=%llu max_control_us=%llu delays=%llu requested_delay_us=%llu actual_delay_us=%llu\n",
         stage,transfers_,in_,out_,in_us_,out_us_,control_us_,transfers_?control_us_/transfers_:0,max_control_us_,
         delays_,requested_delay_us_,delay_us_);
     transfers_=control_us_=max_control_us_=in_=out_=delays_=requested_delay_us_=delay_us_=0;
     in_us_=out_us_=0;
-}
-void Transport::Observe(void *ctx,const uint8_t *request,const uint8_t *response,int rc) {
-    auto &self=*static_cast<Transport *>(ctx);self.telemetry_={};
-    // DTS1は計測用FWのSERVICEだけが返す。追加制御要求を使わず同じ応答から採取する。
-    if(!rc && response && !Be32(response+8) && Be32(request+12)==0x24 && Be32(response+24)==0x44545331)
-        for(size_t i=0;i<self.telemetry_.size();++i)self.telemetry_[i]=Be32(response+24+4*i);
-    if(rc || (response && Be32(response+8)))
-        msg_err("mAgicVISION: command seq=%u op=%u command=%x result=%d status=%u detail=%d\n",
-            Be32(request+4),Be32(request+8),Be32(request+12),rc,
-            response?Be32(response+8):0,response?static_cast<int32_t>(Be32(response+20)):0);
-}
-void Transport::Mismatch(void *,uint32_t address,uint32_t expected,uint32_t observed) {
-    msg_err("mAgicVISION: firmware readback mismatch address=%08x expected=%08x observed=%08x\n",address,expected,observed);
 }
 int Transport::Transfer(uint8_t type,uint8_t request,uint16_t value,uint16_t index,void *data,uint16_t size,unsigned timeout)
 {
@@ -111,7 +86,7 @@ int Transport::Transfer(uint8_t type,uint8_t request,uint16_t value,uint16_t ind
     if(!code && actual!=size)code=ERROR_INVALID_DATA;
     if(code) {
         last_error_=code;failed_=Error(code);
-        msg_err("mAgicVISION: USB control type=%02x request=%02x value=%04x index=%04x bytes=%u actual=%lu win32=%lu errno=%d\n",
+        msg_err("PIX-DT295: USB control type=%02x request=%02x value=%04x index=%04x bytes=%u actual=%lu win32=%lu errno=%d\n",
             type,request,value,index,size,actual,code,failed_);
     }
     return failed_;

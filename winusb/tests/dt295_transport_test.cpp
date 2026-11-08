@@ -71,16 +71,5 @@ int main(int argc,char **argv){
         CHECK(!callbacks.control(callbacks.opaque,0x40,0xbc,0,0,const_cast<uint8_t *>(immutable),64,100));
         CHECK(io.buffer!=immutable && immutable[0]==0x31 && io.collects==1);
     }
-    {
-        Mock io;Transport transport(INVALID_HANDLE_VALUE,nullptr,removed,&io);auto cb=transport.Callbacks();
-        uint8_t request[64]{},response[64]{};request[15]=0x24;
-        response[24]='D';response[25]='T';response[26]='S';response[27]='1';
-        response[31]=7;response[63]=9;
-        cb.observe(cb.opaque,request,response,0);
-        CHECK(transport.Telemetry()[0]==0x44545331 && transport.Telemetry()[1]==7 && transport.Telemetry()[9]==9);
-        request[15]=0x25;cb.observe(cb.opaque,request,response,0);CHECK(!transport.Telemetry()[0]);
-        request[15]=0x24;cb.observe(cb.opaque,request,response,-EIO);CHECK(!transport.Telemetry()[0]);
-        response[11]=1;cb.observe(cb.opaque,request,response,0);CHECK(!transport.Telemetry()[0]);
-    }
     CloseHandle(removed);puts("DT295 firmware, writable OUT copy, cancellation, short transfer, disconnect, no-replay tests passed");return 0;
 }

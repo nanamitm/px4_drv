@@ -37,9 +37,7 @@ for folder in dist.glob('BonDriver_*'):
     if folder.is_dir() and (folder / 'DriverHost_PX4.exe').is_file():
         target = folder / 'firmware'
         target.mkdir(exist_ok=True)
-        # ソース生成版のDTP2とDTP3はmAgicVISION 0.1.0から初期化列を組み立てるため、同じ配置先へ揃える。
-        for name in ('magicvision-dt295.bin', 'magicvision-LICENSE-MIT.txt', 'magicvision-firmware-NOTICE.txt',
-                     'dt295-source-fr.bin', 'dt295-source-fr.json', 'dt295-direct-fr.bin', 'dt295-direct-fr.json'):
+        for name in ('dt295-source-fr.bin', 'dt295-source-fr.json', 'dt295-direct-fr.bin', 'dt295-direct-fr.json'):
             shutil.copy2(root / 'pkg/DriverHost_PX4/firmware' / name, target / name)
 target = dist / 'licenses/magicvision'
 target.mkdir(parents=True, exist_ok=True)

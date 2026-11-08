@@ -1,5 +1,7 @@
 # torne 常駐方式の実機検証
 
+このページは旧配布版の実機試験の記録です。現行配布版では常駐方式と専用INIを廃止しています。
+
 2026-11-05、Windows / WinUSB、CECH-ZD1J (`054c:04b2`) 1台、MSVC v143 Release-static x64で、mAgicVISION常駐方式を地デジ入力に使用しました。BonDriver_PX4 → IPC → DriverHost_PX4 → 常駐コードの経路です。従来のnative torneバックエンドとは機器定義の `ResidentFirmware` で分離されています。
 
 ## 再現用設定

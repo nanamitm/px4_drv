@@ -2,8 +2,7 @@
 """Bundle source-built PIX-DT295 firmware and its frontend initialization trace.
 
 DTP1 includes the initialization trace. DTP2 (--runtime-init) omits it; DriverHost then
-builds the same trace at runtime from the bundled mAgicVISION 0.1.0 firmware, so the
-distributed bundle carries only code built from this directory.
+uses its compiled-in frontend initialization sequence.
 """
 import argparse
 import hashlib
@@ -51,7 +50,7 @@ def main():
     parser.add_argument('trace', type=Path, nargs='?', help='initialization JSONL (DTP1 only)')
     parser.add_argument('output', type=Path)
     parser.add_argument('--runtime-init', action='store_true',
-                        help='write DTP2 without the trace; DriverHost builds it at runtime')
+                        help='write DTP2 without the trace; DriverHost uses its compiled-in sequence')
     parser.add_argument('--provenance', type=Path,
                         help='also write the build manifests and bundle digest as JSON')
     args = parser.parse_args()

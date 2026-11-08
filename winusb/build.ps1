@@ -143,12 +143,6 @@ foreach ($build_platform in $build_platforms) {
         if ($LASTEXITCODE -ne 0) { throw "Torne test failed: $torne_test ($build_platform)" }
     }
 
-    # 常駐方式の診断ツールはビルドだけ行い、実機の操作は明示的な引数を伴う手動試験へ分ける。
-    foreach ($resident_tool in @('magicvision_boot_probe', 'resident_capture')) {
-        msbuild "tests/$resident_tool.vcxproj" /p:"Configuration=Release-static;Platform=$build_platform;PlatformToolset=v143"
-        if ($LASTEXITCODE -ne 0) { throw "Resident diagnostic build failed: $resident_tool ($build_platform)" }
-    }
-
     msbuild tests/ts_continuity_test.vcxproj /p:"Configuration=Release-static;Platform=$build_platform;PlatformToolset=v143"
     if ($LASTEXITCODE -ne 0) { throw "TS diagnostic test build failed: $build_platform" }
     & "build/$build_platform/Release-static/ts_continuity_test.exe"

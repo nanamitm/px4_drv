@@ -4,8 +4,6 @@
 #include <windows.h>
 #include <winusb.h>
 #include <chrono>
-#include <string>
-#include <array>
 
 namespace px4::dt295 {
 class ControlIo {
@@ -31,17 +29,12 @@ public:
     // 失敗した要求を再送せず、保存済み前像を戻すときだけ通信を再開する。
     void BeginRestore(unsigned milliseconds) { failed_=0; Begin(milliseconds); }
     dt295_io Callbacks();
-    const std::array<uint32_t,10> &Telemetry() const { return telemetry_; }
     DWORD LastError() const { return last_error_; }
     void ReportTiming(const char *stage);
-    void SetSnapshotPath(std::wstring path) { snapshot_path_=std::move(path);snapshot_started_=false; }
 private:
     static int Control(void *,uint8_t,uint8_t,uint16_t,uint16_t,void *,uint16_t,unsigned);
     static uint32_t Now(void *);
     static void Delay(void *,unsigned);
-    static void Observe(void *,const uint8_t *,const uint8_t *,int);
-    static void Mismatch(void *,uint32_t,uint32_t,uint32_t);
-    static int Snapshot(void *,const void *,size_t);
     int Transfer(uint8_t,uint8_t,uint16_t,uint16_t,void *,uint16_t,unsigned);
     HANDLE file_,removed_;
     WINUSB_INTERFACE_HANDLE usb_;
@@ -50,9 +43,6 @@ private:
     Clock::time_point deadline_{};
     DWORD last_error_=0;
     int failed_=0;
-    std::wstring snapshot_path_;
-    bool snapshot_started_=false;
-    std::array<uint32_t,10> telemetry_{};
     uint64_t transfers_=0,control_us_=0,max_control_us_=0,in_=0,out_=0;
     uint64_t in_us_=0,out_us_=0;
     uint64_t delays_=0,requested_delay_us_=0,delay_us_=0;

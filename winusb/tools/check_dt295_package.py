@@ -16,6 +16,12 @@ direct_fr_sha256 = json.loads(direct_fr_record)['bundle']['sha256']
 inf = (args.dist / 'Driver/PIX-DT295.inf').read_text(encoding='utf-8')
 if 'USB\\VID_06B8&PID_103B' not in inf or 'f5b71c91-0634-4a6b-902f-fd5756f591d3' not in inf:
     raise SystemExit('DT295 INF identity mismatch')
+for legacy in ('DriverHost_TorneResident.ini', 'BonDriver_TorneResident.ini',
+               'magicvision-dt295.bin', 'magicvision-torne-resident.bin',
+               'magicvision-LICENSE-MIT.txt', 'magicvision-firmware-NOTICE.txt'):
+    unexpected = next(args.dist.rglob(legacy), None)
+    if unexpected is not None:
+        raise SystemExit('Unexpected resident firmware asset: ' + str(unexpected))
 for bits, machine in ((32, 0x14c), (64, 0x8664)):
     folder = args.dist / ('BonDriver_DT295_' + str(bits) + 'bit')
     for name in ('BonDriver_DT295.dll', 'DriverHost_PX4.exe', 'WinSCard.dll', 'channel_switch_stress.exe'):
@@ -35,11 +41,6 @@ for bits, machine in ((32, 0x14c), (64, 0x8664)):
     print('PASS DT295 package ' + str(bits) + 'bit')
 for folder in args.dist.glob('BonDriver_*'):
     if folder.is_dir() and (folder / 'DriverHost_PX4.exe').is_file():
-        firmware = folder / 'firmware/magicvision-dt295.bin'
-        if hashlib.sha256(firmware.read_bytes()).hexdigest() != 'd9f549b29d286c2ff1e7daf4237e2205bb8a5a2affbb98362bce137b8b42a33f':
-            raise SystemExit('Firmware mismatch: ' + str(firmware))
-        if not (folder / 'firmware/magicvision-LICENSE-MIT.txt').is_file() or not (folder / 'firmware/magicvision-firmware-NOTICE.txt').is_file():
-            raise SystemExit('Missing firmware license')
         host = (folder / 'DriverHost_PX4.ini').read_bytes()
         for name, sha256, record in (('dt295-source-fr', source_fr_sha256, source_fr_record),
                                      ('dt295-direct-fr', direct_fr_sha256, direct_fr_record)):
@@ -50,6 +51,9 @@ for folder in args.dist.glob('BonDriver_*'):
             # 既定のdirect-frは設定値、切り替え先のsource-frはINIのコメント内の値が同梱の版と一致する必要がある。
             if sha256.encode() not in host:
                 raise SystemExit('SourceFirmwareSha256 does not match the bundle: ' + str(source))
+        if any(line.strip().startswith((b'ResidentFirmware=', b'FirmwareBackend=magicvision'))
+               for line in host.splitlines()):
+            raise SystemExit('Unexpected resident firmware configuration: ' + str(folder))
         if b'FirmwareBackend=direct-fr' not in host:
             raise SystemExit('DT295 default backend is not direct-fr: ' + str(folder))
 for name in ('LICENSE-MIT', 'LICENSE', 'ORIGIN.json', 'PIX-DT295.md'):

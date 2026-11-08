@@ -16,7 +16,7 @@ SourceFirmwarePath="firmware\torne-source-fr.bin"
 SourceFirmwareSha256="<生成物の64桁のSHA-256>"
 ```
 
-相対パスの基準はDriverHost実行ファイルのディレクトリーです。`ResidentFirmware=true` との併用は設定エラーです。旧Goヘルパーを使うビルドも対象外です。既存DriverHostが起動中の場合は、利用中の録画を終えてから再起動すると設定が反映されます。初期化には時計の2.7秒待機試験が加わるため、初回Openの接続期限には余裕が必要です。通常の選局期限は変更不要です。
+相対パスの基準はDriverHost実行ファイルのディレクトリーです。旧INIの `ResidentFirmware=true` は廃止済みのため削除できます。旧Goヘルパーを使うビルドも対象外です。既存DriverHostが起動中の場合は、利用中の録画を終えてから再起動すると設定が反映されます。初期化には時計の2.7秒待機試験が加わるため、初回Openの接続期限には余裕が必要です。通常の選局期限は変更不要です。
 
 ## ロードと終了
 

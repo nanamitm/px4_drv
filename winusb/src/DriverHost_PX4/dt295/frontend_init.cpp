@@ -1,93 +1,157 @@
 // SPDX-License-Identifier: GPL-2.0-only
 #include "frontend_init.hpp"
-#include <cerrno>
-#include <new>
 
 namespace px4::dt295 {
 namespace {
-// 値はリポジトリへ収録せず、配布物に同梱するmAgicVISION 0.1.0の常駐コードから読む。
-// 常駐コードの初期化スクリプトは0x803ACB8Cから992 bytes・134レコード。
-// 各レコードはop, 長さ, 後続待機ms (16bit BE), データの順。
-constexpr uint32_t ResidentVa = 0x80380000, ScriptVa = 0x803ACB8C, ScriptBytes = 992, ScriptRecords = 134;
-// 地デジ初期化の末尾で、表の先頭にある3レジスターを同じ値で書き直す。
-// pix-userlandの地デジ初期化手順と同じ順序で、実機検証した初期化列と一致させる。
-constexpr uint8_t TerrestrialRewrite[] = {0x25, 0x23, 0x03};
-// DriverHostの復調器リセット後の20ms・5msと同じ待機。検証済みの初期化列と一致させるため残す。
-constexpr uint8_t LeadingDelays[] = {20, 5};
-constexpr uint8_t OpDelay = 255;
-
-uint32_t Be32(const uint8_t *p)
-{
-    return static_cast<uint32_t>(p[0]) << 24 | static_cast<uint32_t>(p[1]) << 16 |
-        static_cast<uint32_t>(p[2]) << 8 | p[3];
+constexpr uint8_t Terrestrial = 0, Satellite = 2, RfMasked = 128, Delay = 255;
 }
 
-struct Record { uint8_t op, length; uint16_t delay; const uint8_t *data; };
-}
-
-int BuildFrontendInit(const uint8_t *container, size_t size, std::vector<uint8_t> &init)
-{
-    init.clear();
-    if (!container || size < 48)
-        return -EINVAL;
-    const auto offset = Be32(container + 40), length = Be32(container + 44);
-    if (offset > size || length > size - offset || length < ScriptVa - ResidentVa + ScriptBytes)
-        return -EINVAL;
-    const auto *script = container + offset + (ScriptVa - ResidentVa);
-
-    std::vector<Record> records;
-    try {
-        records.reserve(ScriptRecords);
-        for (size_t cursor = 0; cursor < ScriptBytes;) {
-            if (ScriptBytes - cursor < 4)
-                return -EINVAL;
-            const Record r{script[cursor], script[cursor + 1],
-                static_cast<uint16_t>(script[cursor + 2] << 8 | script[cursor + 3]), script + cursor + 4};
-            if ((r.op != 0 && r.op != 2 && r.op != 128) || r.length < 1 || r.length > 8 ||
-                r.length > ScriptBytes - cursor - 4 || r.delay > 255 || (r.op == 128 && r.length != 4))
-                return -EINVAL;
-            records.push_back(r);
-            cursor += 4u + r.length;
-        }
-        if (records.size() != ScriptRecords)
-            return -EINVAL;
-
-        size_t first_satellite = records.size();
-        for (size_t i = 0; i < records.size(); ++i) {
-            if (records[i].op == 2 && first_satellite == records.size())
-                first_satellite = i;
-            else if (records[i].op != 2 && first_satellite != records.size())
-                return -EINVAL;
-        }
-        if (first_satellite == records.size())
-            return -EINVAL;
-
-        int values[256];
-        for (auto &value : values)
-            value = -1;
-        for (size_t i = 0; i < first_satellite; ++i)
-            if (records[i].op == 0 && records[i].length == 2 && values[records[i].data[0]] < 0)
-                values[records[i].data[0]] = records[i].data[1];
-        for (auto reg : TerrestrialRewrite)
-            if (values[reg] < 0)
-                return -EINVAL;
-
-        for (auto ms : LeadingDelays)
-            init.insert(init.end(), {OpDelay, 1, ms});
-        for (size_t i = 0; i < records.size(); ++i) {
-            if (i == first_satellite)
-                for (auto reg : TerrestrialRewrite)
-                    init.insert(init.end(), {0, 2, reg, static_cast<uint8_t>(values[reg])});
-            init.push_back(records[i].op);
-            init.push_back(records[i].length);
-            init.insert(init.end(), records[i].data, records[i].data + records[i].length);
-            if (records[i].delay)
-                init.insert(init.end(), {OpDelay, 1, static_cast<uint8_t>(records[i].delay)});
-        }
-    } catch (const std::bad_alloc &) {
-        init.clear();
-        return -ENOMEM;
-    }
-    return 0;
-}
+// Rev.01で検証したDTP1の初期化列。配布されていたmAgicVISION 0.1.0の
+// 初期化レジスタ値とpix-userlandの地デジ末尾処理を使った検証列に由来する。
+// 各行は操作、ペイロード長、ペイロード。待機とRMWも実機検証時の順序を維持する。
+const std::array<uint8_t, 754> FrontendInit = {
+    Delay, 1, 0x14,
+    Delay, 1, 0x05,
+    Terrestrial, 2, 0x01, 0x00,
+    Terrestrial, 2, 0x03, 0x90,
+    Terrestrial, 2, 0x06, 0x80,
+    Terrestrial, 2, 0x1c, 0x20,
+    Terrestrial, 2, 0x1d, 0x56,
+    Terrestrial, 2, 0x1e, 0x6a,
+    Terrestrial, 2, 0x1f, 0x9a,
+    Terrestrial, 2, 0x23, 0x4d,
+    Terrestrial, 2, 0x25, 0x00,
+    Terrestrial, 2, 0x26, 0x00,
+    Terrestrial, 2, 0x32, 0x21,
+    Terrestrial, 2, 0x3b, 0x21,
+    Terrestrial, 2, 0x3c, 0x3f,
+    Terrestrial, 2, 0x70, 0x38,
+    Terrestrial, 2, 0x73, 0x45,
+    Terrestrial, 2, 0x74, 0x11,
+    Terrestrial, 2, 0x75, 0x02,
+    Terrestrial, 2, 0x76, 0x00,
+    Terrestrial, 2, 0x77, 0x01,
+    Terrestrial, 2, 0x7d, 0xd2,
+    Terrestrial, 2, 0xe4, 0xf4,
+    Terrestrial, 2, 0xf4, 0x80,
+    Terrestrial, 3, 0xfe, 0xc0, 0xff,
+    Terrestrial, 4, 0xfe, 0xc0, 0x00, 0x01,
+    Terrestrial, 4, 0xfe, 0xc0, 0x96, 0x00,
+    Terrestrial, 4, 0xfe, 0xc0, 0x00, 0x00,
+    Terrestrial, 4, 0xfe, 0xc0, 0x14, 0x13,
+    Terrestrial, 4, 0xfe, 0xc0, 0x6d, 0x8a,
+    Terrestrial, 4, 0xfe, 0xc0, 0x6d, 0x0a,
+    Terrestrial, 4, 0xfe, 0xc0, 0xdf, 0x19,
+    Terrestrial, 4, 0xfe, 0xc0, 0x45, 0x1b,
+    Terrestrial, 4, 0xfe, 0xc0, 0xa9, 0x59,
+    Terrestrial, 4, 0xfe, 0xc0, 0xaa, 0x6a,
+    Terrestrial, 4, 0xfe, 0xc0, 0xbe, 0x4c,
+    Terrestrial, 4, 0xfe, 0xc0, 0xcf, 0x2a,
+    Terrestrial, 4, 0xfe, 0xc0, 0xd2, 0xf5,
+    Terrestrial, 4, 0xfe, 0xc0, 0xd0, 0x34,
+    Terrestrial, 4, 0xfe, 0xc0, 0x77, 0xe7,
+    Terrestrial, 4, 0xfe, 0xc0, 0x78, 0xe3,
+    Terrestrial, 4, 0xfe, 0xc0, 0x6f, 0x51,
+    Terrestrial, 4, 0xfe, 0xc0, 0x7b, 0x84,
+    Terrestrial, 4, 0xfe, 0xc0, 0x7c, 0x9f,
+    Terrestrial, 4, 0xfe, 0xc0, 0x56, 0x41,
+    Terrestrial, 4, 0xfe, 0xc0, 0xcd, 0x64,
+    Terrestrial, 4, 0xfe, 0xc0, 0xc3, 0x2c,
+    Terrestrial, 4, 0xfe, 0xc0, 0x9d, 0x61,
+    Terrestrial, 4, 0xfe, 0xc0, 0xf7, 0x52,
+    Terrestrial, 4, 0xfe, 0xc0, 0x58, 0x81,
+    Terrestrial, 4, 0xfe, 0xc0, 0xb1, 0x30,
+    Terrestrial, 4, 0xfe, 0xc0, 0x00, 0x01,
+    RfMasked, 4, 0x00, 0x31, 0x2f, 0xd0,
+    Terrestrial, 4, 0xfe, 0xc0, 0x00, 0x00,
+    Terrestrial, 4, 0xfe, 0xc0, 0x01, 0x89,
+    Terrestrial, 4, 0xfe, 0xc0, 0x02, 0x00,
+    Terrestrial, 4, 0xfe, 0xc0, 0x6d, 0x0a,
+    Terrestrial, 4, 0xfe, 0xc0, 0x0b, 0x01,
+    RfMasked, 4, 0x00, 0x04, 0xc0, 0x01,
+    Terrestrial, 4, 0xfe, 0xc0, 0x05, 0x1b,
+    RfMasked, 4, 0x00, 0x08, 0xf2, 0x05,
+    RfMasked, 4, 0x00, 0x09, 0x80, 0x42,
+    RfMasked, 4, 0x00, 0x5e, 0xef, 0x00,
+    Terrestrial, 4, 0xfe, 0xc0, 0x0a, 0x00,
+    Terrestrial, 4, 0xfe, 0xc0, 0x0c, 0x00,
+    Terrestrial, 4, 0xfe, 0xc0, 0x13, 0x04,
+    Terrestrial, 4, 0xfe, 0xc0, 0x53, 0xfe,
+    Terrestrial, 4, 0xfe, 0xc0, 0x57, 0x91,
+    Terrestrial, 4, 0xfe, 0xc0, 0x5a, 0xf9,
+    Terrestrial, 4, 0xfe, 0xc0, 0x5b, 0x18,
+    Terrestrial, 4, 0xfe, 0xc0, 0x5c, 0xf1,
+    Terrestrial, 4, 0xfe, 0xc0, 0x62, 0xc2,
+    Terrestrial, 4, 0xfe, 0xc0, 0x6e, 0x01,
+    Terrestrial, 4, 0xfe, 0xc0, 0x6f, 0x51,
+    Terrestrial, 4, 0xfe, 0xc0, 0x87, 0x77,
+    Terrestrial, 4, 0xfe, 0xc0, 0x88, 0x55,
+    Terrestrial, 4, 0xfe, 0xc0, 0x93, 0x22,
+    Terrestrial, 4, 0xfe, 0xc0, 0x97, 0x02,
+    Terrestrial, 4, 0xfe, 0xc0, 0xba, 0x30,
+    Terrestrial, 4, 0xfe, 0xc0, 0x98, 0xaf,
+    Terrestrial, 4, 0xfe, 0xc0, 0x9b, 0x20,
+    Terrestrial, 4, 0xfe, 0xc0, 0x9c, 0x1e,
+    Terrestrial, 4, 0xfe, 0xc0, 0xa0, 0x18,
+    Terrestrial, 4, 0xfe, 0xc0, 0xa5, 0x09,
+    Terrestrial, 4, 0xfe, 0xc0, 0xc2, 0xa9,
+    Terrestrial, 4, 0xfe, 0xc0, 0xc5, 0x7c,
+    Terrestrial, 4, 0xfe, 0xc0, 0xcd, 0xe8,
+    Terrestrial, 4, 0xfe, 0xc0, 0xce, 0x7f,
+    Terrestrial, 4, 0xfe, 0xc0, 0xd5, 0x03,
+    Terrestrial, 4, 0xfe, 0xc0, 0xd9, 0x04,
+    Terrestrial, 4, 0xfe, 0xc0, 0xea, 0x0d,
+    Terrestrial, 4, 0xfe, 0xc0, 0xdc, 0x1c,
+    Terrestrial, 4, 0xfe, 0xc0, 0x6d, 0x0a,
+    Terrestrial, 4, 0xfe, 0xc0, 0x03, 0x00,
+    Terrestrial, 4, 0xfe, 0xc0, 0x03, 0x01,
+    Delay, 1, 0x64,
+    RfMasked, 4, 0x00, 0x0d, 0xfe, 0x00,
+    Terrestrial, 4, 0xfe, 0xc0, 0x0f, 0x20,
+    Terrestrial, 4, 0xfe, 0xc0, 0x10, 0x49,
+    Terrestrial, 4, 0xfe, 0xc0, 0x11, 0x76,
+    Terrestrial, 4, 0xfe, 0xc0, 0x00, 0x01,
+    Terrestrial, 4, 0xfe, 0xc0, 0x31, 0x81,
+    Terrestrial, 4, 0xfe, 0xc0, 0x00, 0x00,
+    Terrestrial, 4, 0xfe, 0xc0, 0x7c, 0x1f,
+    Terrestrial, 4, 0xfe, 0xc0, 0x0b, 0x01,
+    Terrestrial, 4, 0xfe, 0xc0, 0x12, 0x01,
+    Delay, 1, 0x14,
+    Terrestrial, 4, 0xfe, 0xc0, 0x12, 0x00,
+    Terrestrial, 4, 0xfe, 0xc0, 0x0b, 0x00,
+    Terrestrial, 2, 0x25, 0x00,
+    Terrestrial, 2, 0x23, 0x4d,
+    Terrestrial, 2, 0x03, 0x90,
+    Satellite, 2, 0x01, 0x90,
+    Satellite, 2, 0x03, 0x00,
+    Satellite, 2, 0x04, 0x02,
+    Satellite, 2, 0x07, 0x33,
+    Satellite, 2, 0x08, 0x11,
+    Satellite, 2, 0x10, 0xb0,
+    Satellite, 2, 0x11, 0x00,
+    Satellite, 2, 0x13, 0x80,
+    Satellite, 2, 0x15, 0x00,
+    Satellite, 2, 0x17, 0x01,
+    Satellite, 2, 0x1c, 0x59,
+    Satellite, 2, 0x1d, 0xaa,
+    Satellite, 2, 0x1e, 0x20,
+    Satellite, 2, 0x1f, 0x19,
+    Satellite, 2, 0x85, 0x7a,
+    Satellite, 2, 0x87, 0x04,
+    Satellite, 2, 0x8e, 0x26,
+    Satellite, 2, 0xa3, 0x91,
+    Satellite, 2, 0xa5, 0x40,
+    Delay, 1, 0x04,
+    Satellite, 4, 0xfe, 0xc0, 0x2a, 0xb9,
+    Satellite, 6, 0xfe, 0xc0, 0x06, 0x10, 0x10, 0x00,
+    Satellite, 4, 0xfe, 0xc0, 0x0a, 0x00,
+    Satellite, 4, 0xfe, 0xc0, 0x0e, 0x00,
+    Satellite, 4, 0xfe, 0xc0, 0x2a, 0xb9,
+    Satellite, 4, 0xfe, 0xc0, 0x29, 0x70,
+    Satellite, 4, 0xfe, 0xc0, 0x28, 0x3e,
+    Satellite, 4, 0xfe, 0xc0, 0x2a, 0x19,
+    Satellite, 4, 0xfe, 0xc0, 0x1c, 0x00,
+    Satellite, 5, 0xfe, 0xc0, 0x11, 0xc0, 0xa7,
+    Delay, 1, 0x06,
+};
 }

@@ -376,6 +376,7 @@
   <ItemGroup>
     <ResourceCompile Include="DriverHost_PX4.rc" />
   </ItemGroup>
+  <PropertyGroup><Dt295HostBuild>true</Dt295HostBuild></PropertyGroup>
   <Import Project="dt295\upstream.props" />
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">

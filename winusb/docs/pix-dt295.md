@@ -4,47 +4,19 @@
 
 PIX-DT295 (`06b8:103b`) の1受信機を DriverHost_PX4 が所有し、既存の BonDriver_PX4 と IPC から地デジ・BS・CSを切り替えて使用する構成です。既存の torne / PX 系の機器制御は独立したままです。
 
-配布設定の既定は、このリポジトリのソースから生成し、I²Cを主CPUで実行するファームウェア（`FirmwareBackend=direct-fr`）です。補助CPUでI²Cを実行するソース生成版は `FirmwareBackend=source-fr`、mAgicVISIONの常駐ファームウェアは `FirmwareBackend=magicvision` で選べます。mAgicVISIONのファイルは、torneの常駐方式とソース生成版の初期化列の参照元として同梱を続けています。`FirmwareBackend` を持たない以前の配布物のINIでは、従来どおりmAgicVISION方式で動作します。
+PIX-DT295の既定は主CPU版（`direct-fr`）です。補助CPU版は `FirmwareBackend=source-fr` で選べます。 `SourceFirmwarePath` と `SourceFirmwareSha256` を省略した主CPU版は、同梱のDTP3バンドルとそのSHA-256を使います。旧INIの `FirmwareBackend=magicvision` は行を削除するか `direct-fr` に変更します。旧INIにカスタムの `SourceFirmwarePath` や `SourceFirmwareSha256` がある場合は、併せて削除するか主CPU版の値に揃えます。
 
 mAgicVISION の MIT 共有コードと上流の回帰試験を `dt295/upstream` に固定版で収録し、C11 のローダー・セッション・フレーマーを C アダプター経由で利用します。上流の回帰試験にはルートの LICENSE も保持しています。出典と各ファイルの SHA-256 は `ORIGIN.json` に記載されています。WinUSB は操作全体の期限と抜去イベントを持ち、キャンセル後も OVERLAPPED の完了を回収してからメモリーを解放する契約です。
 
 受信機を開く処理はローカル検証とバッファ確保だけで、長いUSB初期化は最初の選局へ遅延し、ReceiverManagerの一覧ロックを占有しない構成です。
 
-選局とTS受信は別スレッドです。選局前に旧受信を回収し、ストリーム世代と端数を破棄します。常駐ファームウェアの世代番号は上流セッションが検証し、USBの制御転送は個体ごとに直列化されます。受信停止後は上流 STOP の完了を確認し、通常終了は DT295 の常駐コードを保持する上流 loader_close の契約に従います。
+選局とTS受信は別スレッドです。選局前に旧受信を回収し、ストリーム世代と端数を破棄します。USB制御転送は個体ごとに直列化し、通常終了時にはTSエンジンの停止とRAMの復元を確認します。
 
 ファームウェア整合性、模擬転送、コマンドと状態遷移、TS分割入力、x86/x64 ビルドに加え、PIX-DT295実機で初期化・地デジ/BS/CSの選局・TS受信・再Openを確認しています。開始・終了を含むCC異常と長時間安定性には未解決の条件があり、詳細は [2026-11-06の実機検証](pix-dt295-validation.md) を参照してください。アンテナ給電と内蔵カードは未検証で、CNRはソース生成版だけが取得できます。復号には外部カードリーダーが必要です。
 
-## ファームウェア
+## 旧常駐方式
 
-- Release: https://github.com/makeding/mAgicVISION/releases/tag/v1
-- Package: `magicvision-firmware_0.1.0+20261104.160644_all.deb`
-- Package SHA-256: `c5ad07da6d384282ac1f3e8bc115b39c5e211a5029884c3466a26979174a35f7`
-- `firmware.bin` SHA-256: `d9f549b29d286c2ff1e7daf4237e2205bb8a5a2affbb98362bce137b8b42a33f`
-- Size: 289424 bytes; SBC2 v1; resident ABI 2; build ID `bd7efbdd5060f36c`
-
-上流 README はファームウェア成果物の再配布を認めています。収録ファイル名は `firmware/magicvision-dt295.bin` です。対応する常駐コードのソースは上流公開ツリーに含まれていません。
-
-## 送出上限256回のファームウェア
-
-CSや地デジの定常受信中にリングが詰まる条件では、送出上限を256回に増やしたPIX-DT295用イメージを `FirmwarePath` で選べます。生成器はmAgicVISION 0.1.1の `magicvision-dt295.bin` のSHA-256を検証し、計測版で実機確認した送出ループを組み込みます。生成に必要なのはPython 3です。
-
-リポジトリルートから、取得した0.1.1のイメージを指定します。
-
-```powershell
-python winusb/tools/build_dt295_stream256.py path/to/magicvision-dt295.bin magicvision-dt295-stream256.bin
-```
-
-生成ファイルを `DriverHost_PX4.exe` のあるフォルダーの `firmware` サブフォルダーに置き、PIX-DT295の機器定義を次のように設定します。
-
-```ini
-[DeviceDefinition19.Config]
-Experimental=true
-FirmwarePath="firmware\magicvision-dt295-stream256.bin"
-```
-
-切り替え時は対象機器の受信を終了し、旧イメージがRAMに残っている場合はPIX-DT295のUSBを抜き差ししてから、新しい設定でHostを起動します。元のイメージに戻す場合も同じ手順で `FirmwarePath` を変更します。
-
-生成したイメージでCS ND02、地デジ13ch、BS01/TS0を各30秒測定し、全保存TSでCC・同期・TEI異常が0件でした。CSのHost入力では開始後373.131 msまでにCC関連異常25件があり、その後は増えませんでした。模擬USB試験はx86/x64、実機試験はWindows x64で実施しました。送出上限の比較と、計測版での5分連続受信・繰り返し選局の結果も参照できます。[上限の比較](pix-dt295-budget-comparison.md) [連続受信と選局試験](pix-dt295-256-validation.md)
+mAgicVISIONの実行経路は配布版から廃止しました。旧ファームウェアはリポジトリのオフライン回帰試験と過去の計測の再現用です。送出上限256回版の実機結果は [検証記録](pix-dt295-256-validation.md) にあります。
 
 ## ビルドとオフライン試験
 
@@ -64,12 +36,12 @@ x86/x64 の上流 bootstrap / loader / session / USB window / stream input、Win
 2. `BonDriver_DT295_32bit` または `64bit` をアプリのビット数に合わせて配置します。ファームウェアは実際に起動するDriverHostと同じディレクトリの `firmware` 以下に必要です。
 3. `DriverHost_PX4.ini` の `[DeviceDefinition19.Config]` を `Experimental=true` へ変更します。初期設定はfalseのため受信機を登録せず、ファームウェアの転送もありません。
 4. 外部カードリーダーと外部アンテナ給電を用意します。BonDriverの `LNBPower=0` を維持し、未実装の内蔵カードや給電制御を前提にしない構成で確認します。
-5. 既定の `direct-fr` と `source-fr` のソース生成版は、最初の選局でRAM前像の退避と常駐コードの配置を行います（約1.3～2秒）。別のファームウェアがRAMに残っている場合や、ブートRAMが既知のRev.01の内容と一致しない場合は初期化が失敗します。mAgicVISION方式は正常終了後も常駐コードをRAMに残すため、方式を切り替えた直後はUSBを抜き差ししてから試します。それでも初期化に失敗する個体では `FirmwareBackend=magicvision` を指定します。ログの `PIX-DT295 direct-fr`・`PIX-DT295 source-fr` 行と `mAgicVISION` 行で、ファイル不正、Win32転送エラー、復調器のロック失敗を切り分けます。
+5. ソース生成版は初回選局でRAM前像を保存し、一時コードを配置します（約1.3～2秒）。旧ファームウェアがRAMに残っている場合はUSBを抜き差しします。既知のRev.01とブートRAMが一致しない機器では初期化に失敗します。ログの `PIX-DT295 direct-fr` と `PIX-DT295 source-fr` の行で初期化結果を確認できます。
 6. 地デジ、BS/CSのTSID指定、同一方式の選局反復、地デジと衛星の切替、閉じて再オープン、無信号、USB抜去・再接続、長時間録画を個別に確認します。sync / TEI / CC、TS量と無入力時間、終了の所要時間を記録します。
 
-USB応答不明のセッションは再送による二重実行を避けるため再利用できません。ログに物理的な再接続が必要と出た場合は、本体を接続し直してから確認します。通常終了では上流仕様に合わせ常駐コードがRAMに残ります。
+USB応答不明のセッションは再送による二重実行を避けるため再利用できません。ログに物理的な再接続が必要と出た場合は、本体を接続し直してから確認します。正常終了では保存したRAMと設定を復元します。
 
-無入力は5秒ごとの警告で観察し、実機の根拠がない期限で受信を終了しません。TSバッファ満杯やUSB/プロトコルの破損は受信エラーとして扱います。mAgicVISION方式ではCNRを取得できないため、信号レベル表示は実際の品質指標として利用できません。ソース生成版のCNRは後述の節を参照してください。
+無入力は5秒ごとの警告で観察し、実機の根拠がない期限で受信を終了しません。TSバッファ満杯やUSB/プロトコルの破損は受信エラーとして扱います。ソース生成版のCNRは後述の節を参照してください。
 
 配布フォルダーの `channel_switch_stress.exe` は同梱BonDriverを通して選局反復とTSを検査するツールです。実行すると機器を開くため、実機接続と設定変更後に使用します。引数のspace / channelはBonDriverが列挙するインデックスで、物理チャンネル番号ではありません。
 
@@ -77,17 +49,11 @@ USB応答不明のセッションは再送による二重実行を避けるた�
 channel_switch_stress.exe .\BonDriver_DT295.dll <space> <channel-a> <channel-b> <cycles> <measure-ms>
 ```
 
-結果は各周期の packets / sync_errors / transport_errors / continuity_errors / 空受信区間を含みます。mAgicVISION方式のsignalはCNRを取得できないため評価対象外です。
+結果は各周期の packets / sync_errors / transport_errors / continuity_errors / 空受信区間を含みます。
 
-## torne による共通経路の実機検証
+## torneの旧設定
 
-既存 `CECHZD1J` 機器定義の Config に `ResidentFirmware=true` と `Experimental=true` を明示したときだけ、常駐方式を選択できます。`FirmwarePath` はDT295と共通の検証済みSBC2コンテナーです。実際のUSB IDが `054c:04b2` の場合のみtorneプロファイルを使い、衛星要求を拒否します。設定を追加しない既存torneは従来のnativeバックエンドのままです。常駐方式の内蔵カードは対象外です。
-
-既存native経路が残したブートパッチは常駐ローダーの純正照合と一致しないため、方式の切替前にはUSBの抜き差しで初期状態へ戻す必要があります。異なるパッチを受け入れるための照合緩和はありません。常駐方式の正常終了ではtorneのブート・RAMを保存前像へ復元します。最初の書換え前には `mAgicVISION-preimage-<PID>-<tick>.bin` をホストと同じフォルダーへ保存します。
-
-WindowsのOUT制御転送は上流のconst表を直接渡さず、完了回収まで保持する書込み可能な一時バッファを使います。torne実機で検出した `ERROR_NOACCESS (998)` の修正で、DT295にも共通する転送処理です。
-
-torneで確認できるのはこの共通経路とtorne用プロファイルです。DT295固有のUSB発行方式、ブート配置、RF回路、BS/CS、給電、内蔵カードの実機確認は別に必要です。
+`ResidentFirmware=true` が残っている場合は警告を出し、既存の `I2cBackend` 設定で起動します。旧常駐方式専用のINIを使っていた場合は通常のtorne用INIへ移行します。過去の測定結果は [torne常駐方式の実機記録](torne-resident-validation.md) にあります。
 
 ## ソースからビルドするファームウェアの開発
 
@@ -100,13 +66,12 @@ I²Cパススルーを機器側、初期化・選局をホスト側へ置く構�
 ```ini
 [DeviceDefinition19.Config]
 Experimental=true
-FirmwarePath="firmware\magicvision-dt295.bin"
 FirmwareBackend=source-fr
 SourceFirmwarePath="firmware\dt295-source-fr.bin"
 SourceFirmwareSha256="<同梱の値>"
 ```
 
-同梱のバンドルはDTP2形式で、復調器・RF初期化列を含みません。初期化列のレジスター値は公式ファームウェア由来のテーブルと一致するため、リポジトリと配布物のバンドルには収録せず、DriverHostがバンドルの読み込み時に `FirmwarePath` のmAgicVISION 0.1.0から組み立てます。SHA-256を照合し、0.1.0以外のファイルは受け付けません。組み立てる列は、常駐コードの初期化スクリプト134レコードに、地デジ初期化末尾の3レジスターの書き直しと先頭の待機を加えたもので、実機で検証した初期化列とバイト単位で一致します。このため、ソース生成版でも `magicvision-dt295.bin` が必要です。
+同梱のDTP2（補助CPU版）とDTP3（主CPU版）は、DriverHostの [組み込み初期化列](../src/DriverHost_PX4/dt295/frontend_init.cpp) を共用します。実機検証済みDTP1の初期化セクションと同じ754バイトで、地デジと衛星の書き込み、マスク更新、待機の順序を含みます。既存のDTP1はバンドル内の列を使います。ソース生成版を動かすための外部初期化ファイルやmAgicVISIONバイナリは不要です。
 
 ソース生成版は冷間状態から起動するため、別ファームウェアがRAMに残っている場合は対象機のUSBを抜き差ししてから試します。BS/CSは外部給電環境で `LNBPower=0` を指定します。2026-11-08のWindows x64の試験では、初期化が約2.2秒、終了時の復元が約2.5秒で、`TuneTimeout` と `PipeTimeout` の既定値のまま選局と終了が完了しました。
 
@@ -122,7 +87,7 @@ python3 build_host_bundle.py build/auxiliary build/bulk ../../pkg/DriverHost_PX4
   --runtime-init --provenance ../../pkg/DriverHost_PX4/firmware/dt295-source-fr.json
 ```
 
-診断ツールや初期化列を含むDTP1を使う場合は、`extract_init_trace.py` で同梱のmAgicVISION 0.1.0からJSONLを生成します。`tests/test_init_trace.py` はPython版、`tests/dt295_frontend_init_test` はDriverHostのC++版の出力が、検証済みの列とSHA-256で一致することを確認します。
+診断ツールや初期化列を含むDTP1を使う場合は、`extract_init_trace.py` で同梱のmAgicVISION 0.1.0からJSONLを生成します。`tests/test_init_trace.py` はPython版、`tests/dt295_frontend_init_test` はDriverHostの組み込み列が、検証済みの列とSHA-256で一致することを確認します。
 
 ```powershell
 python winusb/experimental/dt295-firmware/extract_init_trace.py winusb/pkg/DriverHost_PX4/firmware/magicvision-dt295.bin $initTrace
@@ -135,7 +100,7 @@ BonDriverの選局・TS配信は既存のIPCを使います。衛星選局時に
 
 ### ソース生成版のCNR
 
-ソース生成版では、BonDriverの信号レベルとして復調器TC90532XBGのC/Nを返します。補助CPU経由のI²Cで、地デジは `0x8b` から3 bytes、衛星は `0xbc` から2 bytesを読み、PX4系受信機と同じ式で0.001dB単位へ換算します。mAgicVISION方式の常駐コードは信号品質を返さないため、そちらの信号レベルは0のままです。
+ソース生成版では、BonDriverの信号レベルとして復調器TC90532XBGのC/Nを返します。I²Cで、地デジは `0x8b` から3 bytes、衛星は `0xbc` から2 bytesを読み、PX4系受信機と同じ式で0.001dB単位へ換算します。
 
 読み出し中はSERVICEが1回分待たされ、1回の取得に約15～30msかかります。読み出しが失敗した場合、受信は継続し、次の選局まで信号レベルの取得だけを停止します。
 
@@ -147,20 +112,19 @@ CNRを250msごとに取得する10分試験の1回目では、試験中にPX-W3U
 
 ## 主CPU USB直接制御（既定）
 
-`FirmwareBackend=direct-fr` はPIX-DT295 Rev.01向けの経路で、配布設定の既定です。補助CPUを起動しません。BonDriver IPC、選局ロジック、TS配信バッファは既存のDriverHostと共有します。機器側は主CPUのboot0に一時的なPIF1フックを置き、I²CとTS送出をそこで実行します。初期化列は従来の `source-fr` と同じ参照ファイルから構成し、初期化の連続書き込みは最大40バイトの操作列にまとめます。主CPUが192バイトのリングレコードを188バイトTSに整形し、HostはBulk INに8 KiBの読み取りを64本投入します。C/Nは同じ復調レジスタとdB換算式を使用します。
+`FirmwareBackend=direct-fr` はPIX-DT295 Rev.01向けの経路で、配布設定の既定です。補助CPUを起動しません。BonDriver IPC、選局ロジック、TS配信バッファは既存のDriverHostと共有します。機器側は主CPUのboot0に一時的なPIF1フックを置き、I²CとTS送出をそこで実行します。初期化列は `source-fr` と共用し、初期化の連続書き込みは最大40バイトの操作列にまとめます。主CPUが192バイトのリングレコードを188バイトTSに整形し、HostはBulk INに8 KiBの読み取りを64本投入します。C/Nは同じ復調レジスタとdB換算式を使用します。
 
-配布設定には次の値が含まれています。`FirmwarePath` のmAgicVISION 0.1.0は、補助CPU版と同じく初期化データの抽出に使われます。以前の配布物のINIを使い続ける場合は、次の値を追記します。
+配布設定には次の値が含まれています。以前の配布物のINIを使い続ける場合は、次の値を追記します。
 
 ```ini
 [DeviceDefinition19.Config]
 Experimental=true
-FirmwarePath="firmware\magicvision-dt295.bin"
 FirmwareBackend=direct-fr
 SourceFirmwarePath="firmware\dt295-direct-fr.bin"
 SourceFirmwareSha256="<同梱の値>"
 ```
 
-同梱のDTP3バンドルの各ソースのSHA-256は `pkg/DriverHost_PX4/firmware/dt295-direct-fr.json` に記録され、`tools/check_dt295_source_firmware.py` が補助CPU版と同じくバンドル・manifest・現在のソースの一致を確認します。ソースを変更した場合は、FR30 GCCとBinutilsを用意し、リポジトリルートで次を実行してバンドルと記録を作り直し、`DriverHost_PX4.ini` の `SourceFirmwareSha256` を出力の値へ更新します。
+同梱のDTP3バンドルの各ソースのSHA-256は `pkg/DriverHost_PX4/firmware/dt295-direct-fr.json` に記録され、`tools/check_dt295_source_firmware.py` が補助CPU版と同じくバンドル・manifest・現在のソースの一致を確認します。ソースを変更した場合は、FR30 GCCとBinutilsを用意し、リポジトリルートで次を実行してバンドルと記録を作り直し、`DriverHost_PX4.ini` の `SourceFirmwareSha256` と `device.cpp` の `DefaultDirectFirmwareSha256` を出力の値へ更新します。
 
 ```powershell
 python winusb/experimental/dt295-firmware/build.py --direct-usb --out build/dt295-direct

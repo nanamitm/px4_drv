@@ -15,8 +15,7 @@ class SourceFirmware {
 public:
     explicit SourceFirmware(bool direct = false) : direct_(direct) {}
     bool Direct() const { return direct_; }
-    // DTP2のバンドルでは、frontend_referenceのmAgicVISION 0.1.0から初期化列を組み立てる。
-    int Load(const std::wstring &path, const std::wstring &digest, const std::wstring &frontend_reference);
+    int Load(const std::wstring &path, const std::wstring &digest);
     int Start(dt295_io io);
     int Tune(bool satellite, uint32_t khz, uint32_t tsid);
     int Locked(int &locked);

@@ -183,18 +183,8 @@ void DeviceManager::Add(const std::wstring &path, const std::pair<DeviceType, px
 	}
 	case px4::DeviceType::CECHZD1J:
 	{
-		// 常駐方式の実機試験だけを明示選択する。既存のnative torne経路とカード共有は維持する。
-		if (px4::util::wtob(def.second.configs.Get(L"ResidentFirmware", L"false"))) {
-			if(def.second.configs.Get(L"I2cBackend",L"native")==L"source-fr") {
-				msg_err("torne: ResidentFirmware and I2cBackend=source-fr cannot share one device.\n");
-				break;
-			}
-			auto dev = std::make_shared<px4::dt295::Device>(path, def.second, ++index_, receiver_manager_);
-			const int ret = dev->Init();
-			if (!ret) devices_.emplace(path, std::move(dev));
-			else msg_err("torne resident: device initialization failed ret=%d\n", ret);
-			break;
-		}
+		if (px4::util::wtob(def.second.configs.Get(L"ResidentFirmware", L"false")))
+			msg_warn("torne: ResidentFirmware is no longer supported; using the configured I2C backend.\n");
 		// torneだけの初期化失敗を局所化し、既存機種の到着処理を維持する。
 		try {
 			auto dev = std::make_shared<px4::torne::ExperimentalDevice>(path, def.second, ++index_, receiver_manager_);
