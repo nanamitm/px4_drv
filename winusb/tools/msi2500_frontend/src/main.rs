@@ -13,6 +13,9 @@
 //!   serve --path DEVICE_PATH|--index N --frequency HZ [--system isdbt|j83b] [--gain DB] [--viterbi-threads N]
 //!     DriverHost_PX4 から起動される形。標準出力へ RTL-SDR の helper と同じ形式のフレーム (hostproto) で
 //!     再多重した TS と状態を出し、標準入力の終わりで停止する。終了コード: 0 正常、1 失敗、2 引数の誤り。
+//!   serve-s1ud [--pll X]
+//!     DriverHost_PX4 の PX-S1UD の実装から起動される形。標準入力で PX-S1UD の IQ のブロック (s1ud.rs) を受け、
+//!     J.83B を復調して serve と同じ形式のフレームを標準出力へ出す。標準入力の終わりで停止する。
 //!   demod RAW_BLOCKS_FILE [TS_OUT_B]
 //!     capture の生ブロックを OFDM 復調と誤り訂正にかけ、MER、RS の訂正結果、段ごとの処理時間を出す。
 //!     TS_OUT_B を指定すると B 階層の TS を書き出す。終了コード: 0 TMCC と制御キャリヤーを確認、1 未確認、2 入力の誤り。
@@ -614,16 +617,91 @@ impl Pipe {
     }
 }
 
+/// serve の出力。処理系からの OutMsg を hostproto のフレームで標準出力へ書き、250 ms ごとに状態フレームを出す。
+/// 標準出力へ書けなくなったら stop を立てる。(終了コード, DriverHost が拒むため取り除いたパケット数) を返す
+fn serve_output(
+    stdout: &mut impl Write,
+    orx: std::sync::mpsc::Receiver<OutMsg>,
+    stop: &std::sync::atomic::AtomicBool,
+    rs_counts: &dyn Fn() -> (u64, u64),
+) -> (i32, usize) {
+    use msi2500_frontend::hostproto::{retain_valid_packets, write_frame, Kind, MAX_TS};
+    use std::sync::atomic::Ordering;
+    use std::sync::mpsc::RecvTimeoutError;
+    use std::time::Duration;
+
+    // 品質は直近の状態フレームからの B 階層の RS の成功割合 (0〜10000)。RF の C/N ではない
+    let mut code = 0;
+    let mut out_ok = true;
+    let (mut quality, mut last_acc, mut last_rej) = (0u32, 0u64, 0u64);
+    let mut last_status = Instant::now();
+    let mut last_ts: Option<Instant> = None;
+    let mut dropped = 0usize;
+    loop {
+        let m = orx.recv_timeout(Duration::from_millis(250));
+        let mut write = |kind: Kind, payload: &[u8], quality: u32, acc: u64, rej: u64| {
+            if out_ok && write_frame(&mut *stdout, kind, payload, quality, acc, rej).and_then(|_| stdout.flush()).is_err() {
+                // DriverHost が読み取りを止めた。受信を止め、残りを読み捨てて終わる
+                out_ok = false;
+                stop.store(true, Ordering::Relaxed);
+            }
+        };
+        let (acc, rej) = rs_counts();
+        match m {
+            Ok(OutMsg::Ready) => write(Kind::Ready, &[], 0, acc, rej),
+            Ok(OutMsg::Ts(mut ts)) => {
+                dropped += retain_valid_packets(&mut ts);
+                // DriverHost は TS のフレームの品質で信号レベルを更新し、BonDriver の利用側は最初の TS の時点で
+                // 信号レベルが 0 でないことを期待する。状態フレームの値はまだ 0 の場合があるため、
+                // 直近の状態フレーム以降の RS の結果 (なければ累計) から求める
+                let (da, dr) = (acc - last_acc.min(acc), rej - last_rej.min(rej));
+                let q = if da + dr > 0 {
+                    (da * 10_000 / (da + dr)) as u32
+                } else if acc + rej > 0 {
+                    (acc * 10_000 / (acc + rej)) as u32
+                } else {
+                    quality
+                };
+                for chunk in ts.chunks(MAX_TS) {
+                    write(Kind::Ts, chunk, q, acc, rej);
+                }
+                if !ts.is_empty() {
+                    last_ts = Some(Instant::now());
+                }
+            }
+            Ok(OutMsg::Error(e)) => {
+                eprintln!("[serve] {e}");
+                write(Kind::Error, e.as_bytes(), 0, acc, rej);
+                code = 1;
+                stop.store(true, Ordering::Relaxed);
+            }
+            Ok(OutMsg::Done) | Err(RecvTimeoutError::Disconnected) => break,
+            Err(RecvTimeoutError::Timeout) => {}
+        }
+        if last_status.elapsed() >= Duration::from_millis(250) {
+            let (da, dr) = (acc - last_acc.min(acc), rej - last_rej.min(rej));
+            quality = if last_ts.is_some_and(|t| t.elapsed() < Duration::from_secs(3)) && da + dr > 0 {
+                (da * 10_000 / (da + dr)) as u32
+            } else {
+                0
+            };
+            (last_acc, last_rej) = (acc, rej);
+            write(Kind::Status, &[], quality, acc, rej);
+            last_status = Instant::now();
+        }
+    }
+    (code, dropped)
+}
+
 /// DriverHost_PX4 から起動される受信。標準出力へ hostproto の形式で TS と状態を出し、
 /// 標準入力の終わり (または 1 バイト) を停止要求として扱う。終了コード: 0 正常、1 失敗、2 引数の誤り。
 fn run_serve(mut it: impl Iterator<Item = String>) -> i32 {
-    use msi2500_frontend::hostproto::{retain_valid_packets, write_frame, Kind, MAX_TS};
+    use msi2500_frontend::hostproto::{write_frame, Kind};
     use msi2500_frontend::live::{Live, LiveConfig};
     use msi2500_frontend::live_j83b::{J83bLive, J83bLiveConfig};
     use std::sync::atomic::{AtomicBool, Ordering};
-    use std::sync::mpsc::{sync_channel, RecvTimeoutError};
+    use std::sync::mpsc::sync_channel;
     use std::sync::Arc;
-    use std::time::Duration;
 
     let mut a = Args {
         seconds: f64::INFINITY, out: None, freq: 0, gain: 40, bw: 6_000_000, front_end: FrontEnd::Default, index: 0,
@@ -749,69 +827,116 @@ fn run_serve(mut it: impl Iterator<Item = String>) -> i32 {
     };
     drop(otx);
 
-    // 品質は直近の状態フレームからの B 階層の RS の成功割合 (0〜10000)。RF の C/N ではない
-    let mut code = 0;
-    let mut out_ok = true;
-    let (mut quality, mut last_acc, mut last_rej) = (0u32, 0u64, 0u64);
-    let mut last_status = Instant::now();
-    let mut last_ts: Option<Instant> = None;
-    let mut dropped = 0usize;
-    loop {
-        let m = orx.recv_timeout(Duration::from_millis(250));
-        let mut write = |kind: Kind, payload: &[u8], quality: u32, acc: u64, rej: u64| {
-            if out_ok && write_frame(&mut stdout, kind, payload, quality, acc, rej).and_then(|_| stdout.flush()).is_err() {
-                // DriverHost が読み取りを止めた。受信を止め、残りを読み捨てて終わる
-                out_ok = false;
-                stop.store(true, Ordering::Relaxed);
-            }
-        };
-        let (acc, rej) = rs_counts();
-        match m {
-            Ok(OutMsg::Ready) => write(Kind::Ready, &[], 0, acc, rej),
-            Ok(OutMsg::Ts(mut ts)) => {
-                dropped += retain_valid_packets(&mut ts);
-                // DriverHost は TS のフレームの品質で信号レベルを更新し、BonDriver の利用側は最初の TS の時点で
-                // 信号レベルが 0 でないことを期待する。状態フレームの値はまだ 0 の場合があるため、
-                // 直近の状態フレーム以降の RS の結果 (なければ累計) から求める
-                let (da, dr) = (acc - last_acc.min(acc), rej - last_rej.min(rej));
-                let q = if da + dr > 0 {
-                    (da * 10_000 / (da + dr)) as u32
-                } else if acc + rej > 0 {
-                    (acc * 10_000 / (acc + rej)) as u32
-                } else {
-                    quality
-                };
-                for chunk in ts.chunks(MAX_TS) {
-                    write(Kind::Ts, chunk, q, acc, rej);
-                }
-                if !ts.is_empty() {
-                    last_ts = Some(Instant::now());
-                }
-            }
-            Ok(OutMsg::Error(e)) => {
-                eprintln!("[serve] {e}");
-                write(Kind::Error, e.as_bytes(), 0, acc, rej);
-                code = 1;
-                stop.store(true, Ordering::Relaxed);
-            }
-            Ok(OutMsg::Done) | Err(RecvTimeoutError::Disconnected) => break,
-            Err(RecvTimeoutError::Timeout) => {}
-        }
-        if last_status.elapsed() >= Duration::from_millis(250) {
-            let (da, dr) = (acc - last_acc.min(acc), rej - last_rej.min(rej));
-            quality = if last_ts.is_some_and(|t| t.elapsed() < Duration::from_secs(3)) && da + dr > 0 {
-                (da * 10_000 / (da + dr)) as u32
-            } else {
-                0
-            };
-            (last_acc, last_rej) = (acc, rej);
-            write(Kind::Status, &[], quality, acc, rej);
-            last_status = Instant::now();
-        }
-    }
+    let (code, dropped) = serve_output(&mut stdout, orx, &stop, rs_counts.as_ref());
     let _ = capture_thread.join();
     if dropped > 0 {
         eprintln!("[serve] dropped {dropped} packets that DriverHost would reject (TEI or invalid adaptation field)");
+    }
+    code
+}
+
+/// DriverHost_PX4 の PX-S1UD の実装から起動される J.83B の復調。標準入力で s1ud.rs のブロック
+/// (Siano の型 0x037C のメッセージ本体 14724 バイト) を受け、標準出力へ serve と同じ形式で TS と状態を出す。
+/// USB は DriverHost が持つため、この helper は機器を開かない。標準入力の終わりで残りを処理して終わる。
+/// 終了コード: 0 正常、1 失敗、2 引数の誤り。
+fn run_serve_s1ud(mut it: impl Iterator<Item = String>) -> i32 {
+    use msi2500_frontend::hostproto::{write_frame, Kind};
+    use msi2500_frontend::live_j83b::{J83bLive, J83bLiveConfig};
+    use msi2500_frontend::s1ud::BLOCK_BYTES;
+    use std::io::Read;
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+    use std::sync::mpsc::{sync_channel, TrySendError};
+    use std::sync::Arc;
+
+    // 1 チャンクは 16 ブロック (約 10 ms)。キューは 256 チャンク (約 2.5 秒) で、
+    // 起動直後の FFT の計画や長い欠落をつなぐ試行 (1 ブロックに数十 ms) を吸収する
+    const CHUNK_BLOCKS: usize = 16;
+    let mut pll = 1.0f32;
+    let parsed: Result<(), String> = (|| {
+        while let Some(k) = it.next() {
+            let v = it.next().ok_or(format!("{k} needs a value"))?;
+            match k.as_str() {
+                "--pll" => pll = v.parse().map_err(|e| format!("--pll: {e}"))?,
+                x => return Err(format!("unknown argument {x}")),
+            }
+        }
+        if !(0.1..=20.0).contains(&pll) {
+            return Err("--pll must be 0.1..20".into());
+        }
+        Ok(())
+    })();
+    let mut stdout = std::io::stdout().lock();
+    if let Err(e) = parsed {
+        eprintln!("[serve-s1ud] {e}");
+        let _ = write_frame(&mut stdout, Kind::Error, e.as_bytes(), 0, 0, 0).and_then(|_| stdout.flush());
+        return 2;
+    }
+
+    let stop = Arc::new(AtomicBool::new(false));
+    let (otx, orx) = sync_channel::<OutMsg>(256);
+    let cfg = J83bLiveConfig { raw_queue: 256, symbol_queue: 512, pll_scale: pll, ts_out: Some(Box::new(ChannelWriter(otx.clone()))) };
+    let (live, raw_tx) = J83bLive::start_s1ud(cfg);
+    let st = live.stats.clone();
+    let rs_counts = move || {
+        let f = st.lock().unwrap().fec_total();
+        (f.rs_clean + f.rs_corrected, f.rs_uncorrectable)
+    };
+    let input_thread = {
+        let otx = otx.clone();
+        let stop = stop.clone();
+        std::thread::Builder::new().name("stdin".into()).spawn(move || {
+            let mut stdin = std::io::stdin().lock();
+            let (mut ready, mut blocks) = (false, 0u64);
+            let dropped = AtomicU64::new(0);
+            let mut chunk = Vec::with_capacity(CHUNK_BLOCKS * BLOCK_BYTES);
+            let mut blk = vec![0u8; BLOCK_BYTES];
+            let mut error = None;
+            while !stop.load(Ordering::Relaxed) {
+                if let Err(e) = stdin.read_exact(&mut blk) {
+                    // 標準入力の終わりは停止要求 (ブロックの途中で終わった端数は捨てる)
+                    if e.kind() != std::io::ErrorKind::UnexpectedEof {
+                        error = Some(format!("stdin read failed: {e}"));
+                    }
+                    break;
+                }
+                if !ready {
+                    ready = true;
+                    let _ = otx.send(OutMsg::Ready);
+                }
+                blocks += 1;
+                chunk.extend_from_slice(&blk);
+                if chunk.len() >= CHUNK_BLOCKS * BLOCK_BYTES {
+                    let full = std::mem::replace(&mut chunk, Vec::with_capacity(CHUNK_BLOCKS * BLOCK_BYTES));
+                    // 復調が遅れても標準入力の読み取りは止めない。DriverHost の USB の受信を待たせると、
+                    // チップ側でブロックが落ちて区別できなくなるため、ここで捨てる。捨てたブロックは
+                    // ブロック番号の欠落として S1udFrontend が検出する
+                    match raw_tx.try_send(full) {
+                        Ok(()) => {}
+                        Err(TrySendError::Full(_)) => {
+                            dropped.fetch_add(CHUNK_BLOCKS as u64, Ordering::Relaxed);
+                        }
+                        Err(TrySendError::Disconnected(_)) => break,
+                    }
+                }
+            }
+            if !chunk.is_empty() {
+                let _ = raw_tx.send(chunk);
+            }
+            drop(raw_tx);
+            let fin = live.join();
+            eprintln!("[serve-s1ud] done: input_blocks={blocks} queue_dropped_blocks={} {} first_ts={:.3}s",
+                dropped.load(Ordering::Relaxed), j83b_line(&fin), fin.first_ts_s.unwrap_or(f64::NAN));
+            let _ = otx.send(match error {
+                Some(e) => OutMsg::Error(e),
+                None => OutMsg::Done,
+            });
+        }).expect("spawn stdin thread")
+    };
+    drop(otx);
+    let (code, dropped) = serve_output(&mut stdout, orx, &stop, &rs_counts);
+    let _ = input_thread.join();
+    if dropped > 0 {
+        eprintln!("[serve-s1ud] dropped {dropped} packets that DriverHost would reject (TEI or invalid adaptation field)");
     }
     code
 }
@@ -837,6 +962,7 @@ fn main() {
             }
         },
         Some("serve") => run_serve(args),
+        Some("serve-s1ud") => run_serve_s1ud(args),
         Some("live") => match parse(args) {
             Ok(a) if a.j83b => run_live_j83b(a),
             Ok(a) => run_live(a),
@@ -850,6 +976,7 @@ fn main() {
             eprintln!("       msi2500_frontend live [--seconds N] [--freq HZ|--channel N] [--gain DB] [--index N] [--input RAW_BLOCKS_FILE] [--ts PATH] [--ts-a PATH] [--ts-b PATH] [--viterbi-threads N] [--priority normal|high] [--transfer isoch|bulk]");
             eprintln!("       msi2500_frontend live --system j83b [--seconds N] [--freq HZ|--hch N] [--gain DB] [--index N] [--input RAW_BLOCKS_FILE] [--ts PATH] [--pll X] [--priority normal|high]");
             eprintln!("       msi2500_frontend serve --path DEVICE_PATH|--index N --frequency HZ [--system isdbt|j83b] [--gain DB] [--viterbi-threads N] [--pll X]");
+            eprintln!("       msi2500_frontend serve-s1ud [--pll X]  (PX-S1UD IQ blocks on stdin)");
             eprintln!("       msi2500_frontend demod RAW_BLOCKS_FILE [TS_OUT_B]");
             2
         }
