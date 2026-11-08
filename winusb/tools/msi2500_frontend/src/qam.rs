@@ -118,31 +118,38 @@ fn fir_interleaved(x: &[f32; 2 * TAPS], h: &[f32; TAPS]) -> Complex32 {
     }
 }
 
-/// 等化器の履歴を 2 要素ずらし、添字 0 に newest、1 に second を入れる。
+/// 等化器の履歴 src を 2 要素ずらして dst へ書き、dst の添字 0 に newest、1 に second を入れる。
 /// 4 バイトずつ書いた直後に 16 バイトで読むとストアからロードへの転送に失敗して待たされ、
-/// 等化器の時間の大半を占めたため、16 バイト単位のシャッフルと書き戻しで済ませる
+/// 等化器の時間の大半を占めたため、16 バイト単位のシャッフルと書き込みで済ませる
 #[inline]
-fn shift_in(reg: &mut [f32; NT], newest: f32, second: f32) {
+fn shift_into(src: &[f32; NT], dst: &mut [f32; NT], newest: f32, second: f32) {
     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
     // SAFETY: 読み書きはすべて長さ NT (4 の倍数) の配列の範囲内
     unsafe {
-        let p = reg.as_mut_ptr();
+        let (s, d) = (src.as_ptr(), dst.as_mut_ptr());
         // 最初のベクトルの前には [-, -, newest, second] があるものとして扱う
         let mut prev = _mm_set_ps(second, newest, 0.0, 0.0);
         for c in 0..NT / 4 {
-            let v = _mm_loadu_ps(p.add(4 * c));
+            let v = _mm_loadu_ps(s.add(4 * c));
             // [prev2, prev3, v0, v1]: 前のベクトルの古い 2 要素を先頭へ送り、v の新しい 2 要素を続ける
             let shifted = _mm_shuffle_ps::<0b0100_1110>(prev, v);
-            _mm_storeu_ps(p.add(4 * c), shifted);
+            _mm_storeu_ps(d.add(4 * c), shifted);
             prev = v;
         }
     }
     #[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
     {
-        reg.copy_within(0..NT - 2, 2);
-        reg[0] = newest;
-        reg[1] = second;
+        dst[2..].copy_from_slice(&src[..NT - 2]);
+        dst[0] = newest;
+        dst[1] = second;
     }
+}
+
+/// 2 面の履歴のうち、cur 面を読み出し用、もう一方を書き込み用として借りる
+#[inline]
+fn hist_pair(h: &mut [[f32; NT]; 2], cur: usize) -> (&[f32; NT], &mut [f32; NT]) {
+    let [a, b] = h;
+    if cur == 0 { (a, b) } else { (b, a) }
 }
 
 /// 等化器の出力 Σ w[k] r[k] (複素数を実部と虚部の配列で持つ)
@@ -237,14 +244,15 @@ pub struct QamDemod {
     timing_e: f64,
     agc_p: f32,
     agc_n: u64,
-    /// 等化器の入力の履歴 (実部と虚部、添字 0 が最新)
-    reg_re: [f32; NT],
-    reg_im: [f32; NT],
+    /// 等化器の入力の履歴 (実部と虚部、添字 0 が最新)。2 面を交互に使い、hist_cur 面が最新、
+    /// もう一方が 1 シンボル前の履歴 (遅延 LMS の更新に使う)。1 シンボル前の履歴を毎回複製すると、
+    /// x86 では複製が memcpy の呼び出しになり、等化器の時間の大半を占めた
+    hist_re: [[f32; NT]; 2],
+    hist_im: [[f32; NT]; 2],
+    hist_cur: usize,
     w_re: [f32; NT],
     w_im: [f32; NT],
-    /// 遅延 LMS の、次のシンボルで反映する更新 (入力の履歴と係数)
-    pend_re: [f32; NT],
-    pend_im: [f32; NT],
+    /// 遅延 LMS の、次のシンボルで反映する更新の係数 (入力の履歴は hist の 1 シンボル前の面)
     pend_g: Complex32,
     r2: f32,
     cma_start: u64,
@@ -305,12 +313,11 @@ impl QamDemod {
             timing_e: 0.0,
             agc_p: 0.0,
             agc_n: 0,
-            reg_re: [0.0; NT],
-            reg_im: [0.0; NT],
+            hist_re: [[0.0; NT]; 2],
+            hist_im: [[0.0; NT]; 2],
+            hist_cur: 0,
             w_re: [0.0; NT],
             w_im: [0.0; NT],
-            pend_re: [0.0; NT],
-            pend_im: [0.0; NT],
             pend_g: Complex32::default(),
             r2: (m4 / m2) as f32,
             cma_start: 0,
@@ -480,17 +487,18 @@ impl QamDemod {
 
     /// freeze のときは等化器と PLL の適応、MER と出力電力の評価を止め、搬送波は推定済みの周波数で回し続ける
     fn equalize(&mut self, m: Complex32, y: Complex32, freeze: bool, out: &mut Vec<Complex32>) {
-        shift_in(&mut self.reg_re, y.re, m.re);
-        shift_in(&mut self.reg_im, y.im, m.im);
+        let (prev_re, reg_re) = hist_pair(&mut self.hist_re, self.hist_cur);
+        let (prev_im, reg_im) = hist_pair(&mut self.hist_im, self.hist_cur);
+        shift_into(prev_re, reg_re, y.re, m.re);
+        shift_into(prev_im, reg_im, y.im, m.im);
         let n = self.stats.symbols;
         self.stats.symbols += 1;
-        let y0 = fse_dot(&self.w_re, &self.w_im, &self.reg_re, &self.reg_im);
+        let y0 = fse_dot(&self.w_re, &self.w_im, reg_re, reg_im);
         // 遅延 LMS: 1 シンボル前の更新を、今のシンボルの出力を求めた後に反映する。
         // 出力 → 判定 → 更新 → 次の出力の連鎖が毎シンボル直列になり等化器の時間の大半を占めたため、
         // 連鎖を 2 シンボルにまたがらせて計算を重ねられるようにした。ステップ幅が小さく、1 シンボルの遅れの影響は無視できる
-        fse_update(&mut self.w_re, &mut self.w_im, &self.pend_re, &self.pend_im, self.pend_g);
-        self.pend_re = self.reg_re;
-        self.pend_im = self.reg_im;
+        fse_update(&mut self.w_re, &mut self.w_im, prev_re, prev_im, self.pend_g);
+        self.hist_cur ^= 1;
         let rot = self.rot;
         let z = y0 * rot;
         let mu_g;
