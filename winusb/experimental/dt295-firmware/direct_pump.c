@@ -1,5 +1,5 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
-/* Main-CPU PIF1 direct I2C and 188-byte TS transport. */
+/* Main-CPU PIF1 I2C and selectable TS transport. */
 #include <stdint.h>
 
 #ifndef DTP_MMIO
@@ -14,6 +14,11 @@
 #define DTP_I2C_WRITE(address, value) (DTP_MMIO(address) = (value))
 #endif
 
+#ifdef DTP_RAW_TS
+void dtp_raw_pump(uint32_t *packet);
+#endif
+
+#ifndef DTP_RAW_TS
 #define RING_SIZE 0x30000u
 #define RING_BASE 0x8138ec00u
 #define PRODUCER 0x01902028u
@@ -21,9 +26,11 @@
 #define FIFO_STATUS 0x00fdbd0cu
 #define FIFO_DATA 0x00fdbd84u
 #define SELECTOR 0x00fd814cu
+#endif
 #define I2C_STATUS 0x00fd8fe0u
 #define I2C_CONTROL 0x00fd8fe4u
 #define I2C_DATA 0x00fd8ff0u
+#ifndef DTP_RAW_TS
 #define UNALIGNED 0xffffffffu
 
 static unsigned advance(unsigned cursor, unsigned bytes)
@@ -137,6 +144,8 @@ reply:
         packet[i] = 0;
 }
 
+#endif
+
 static unsigned wait_byte(uint32_t *control)
 {
     for (unsigned n = 0; n < 64000; ++n) {
@@ -244,8 +253,14 @@ void dtp_bulk_pump(uint32_t *packet)
 {
     if (packet[2] == 3)
         i2c(packet);
-    else
+    else {
+#ifdef DTP_RAW_TS
+        dtp_raw_pump(packet);
+        return;
+#else
         pump(packet);
+#endif
+    }
     packet[2] |= 0x80000000u;
     packet[3] = 0;
     packet[4] = 1;

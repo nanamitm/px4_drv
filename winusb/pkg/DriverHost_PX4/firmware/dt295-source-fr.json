@@ -1,50 +1,14 @@
 {
-  "format": "DTP2",
+  "format": "DTP4",
   "bundle": {
     "file": "dt295-source-fr.bin",
-    "bytes": 4616,
-    "sha256": "92d2373945c03bd7978ed710ba283946d355e9383f163896b2d5517c3612ccbe"
+    "bytes": 1684,
+    "sha256": "a32f6ffb5a6b2161fc6a922a87883f058e275fc84453fecf7d913c2e608516cc"
   },
-  "auxiliary": {
-    "schema": 1,
-    "target": "PIX-DT295 auxiliary FR",
-    "stage": "source-auxiliary-unverified",
-    "deployable": false,
-    "features": [],
-    "torne_hal_linked": false,
-    "diagnostic": "paf1",
-    "entry": "0x000a0000",
-    "shared_ram": "0x017a0000",
-    "mailbox_cpu": "0x000a3900",
-    "mailbox_shared": "0x017a3900",
-    "mailbox_magic": "PAF1",
-    "compiler": "xgcc (GCC) 14.2.0",
-    "tools": {
-      "as": "GNU assembler (GNU Binutils) 2.43.1",
-      "ld": "GNU ld (GNU Binutils) 2.43.1",
-      "objcopy": "GNU objcopy (GNU Binutils) 2.43.1",
-      "objdump": "GNU objdump (GNU Binutils) 2.43.1"
-    },
-    "sources": {
-      "auxiliary.c": "ad2b7ee3ddd394ed70b7da1a5f474c0ff4dcc6994403b27db68aaf438a6faa68",
-      "auxiliary.h": "700360f240fe5079660456ba5dbfed867bc39fa309de46324fd6f16c39555798",
-      "auxiliary_entry.s": "8060cc7555ab9f2dcb1a195fa7155a1dd7f1369b26ccdc834fb8afab63e9e306",
-      "auxiliary.ld": "c5aaa6535439bdc2bd0ea6f0c9ba165c1a92d88b27091a1415d623040310a916",
-      "i2c_engine.c": "325d68e693d20f16cd8252903ea24673425114ee8c77857dea31158c67837db9",
-      "i2c_engine.h": "59247f7a3c5284539834c80d0ab5447f2f0f3283331ebcc1d188747762d8412a",
-      "runtime.c": "9087a5133ad67bb5abee2f9483fbd560ae46e9411522e1f402824110ec4dd87b",
-      "build_auxiliary.py": "616f4cfe192a20fd7b9e7f52ce947bfe7f82eb71825594080abf457dbfa3dc8d"
-    },
-    "binary": {
-      "file": "auxiliary.bin",
-      "bytes": 3772,
-      "sha256": "a4c092268379c2260381985740c797e7e8c11e43ae33197f77ec5e14ae6b7717"
-    }
-  },
-  "bulk": {
+  "direct": {
     "schema": 1,
     "target": "PIX-DT295",
-    "entry": "0x000e1100",
+    "entry": "0x000e1060",
     "format": "raw-fr-big-endian",
     "stage": "diagnostic-bootstrap-unverified",
     "deployable": false,
@@ -60,19 +24,20 @@
       "resident.ld": "93c64e131987c126a0f4be65d26cf0eba4f9effc9e44b98a26fe7eb0a29ee42c",
       "bootstrap.s": "79198d06bad080ed2390d51099b1cb281b3257124135ed06a290a30f3777249f",
       "bootstrap.ld": "d80f2b7cf6fbd50c3756a083fdd39491e2de11d2f580ccff73041f74d99072e8",
-      "build.py": "554bf253b49bd3f1b1a06747e217ee5065bd387153f2edb5e98facb66989f11e",
+      "build.py": "ff947da5055e315e09bd821726553fa7105b151f6b17c47257f03494cd76833b",
+      "direct_pump.c": "13c8b602e3db5c08673e5a5cb14979d6dc33e9079c20ce6ae78a61d4f9812508",
       "bulk_pump.c": "b605000691545aa50ceab31324363a96c0aea203b472ef045c9c808df67958e1"
     },
     "binary": {
       "file": "resident.bin",
-      "size": 720,
-      "sha256": "0aa7139e0bca712fccb276c5a7f8b0e078e06e36dcb2963a3351526d21515403"
+      "size": 1564,
+      "sha256": "42c5a4280cade8477c13b76d6245d41b5e7cfe00baf6c29350c83f368e6f2d53"
     },
     "bootstrap": {
       "file": "bootstrap.bin",
       "address": "0x000e1000",
       "size": 96,
-      "sha256": "d6bfeb9ddc2f568f7850d8020fc169a26b098ee2648140310eca06a1bab521ef"
+      "sha256": "aa9561c1b4a13251a5b0bedc1d690e1e3595314944b2d6848b4aafe7647716dc"
     },
     "hook": {
       "file": "boot-hook.bin",

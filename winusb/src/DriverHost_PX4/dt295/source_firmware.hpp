@@ -38,7 +38,6 @@ private:
     void Checked(uint32_t address, uint32_t value, unsigned width = 4);
     void Save(uint32_t address, size_t count);
     void Delay(unsigned ms);
-    Bytes Mailbox();
     Bytes Exchange(unsigned op, const Bytes &payload = {});
     Bytes DirectI2c(const Bytes &ops, unsigned count, unsigned read);
     void InitializeFrontend();
@@ -66,13 +65,13 @@ private:
 
     const bool direct_;
     dt295_io io_{};
-    Bytes auxiliary_, resident_, adapter_, hook_, boot_, aux_ram_, ring_;
+    Bytes resident_, adapter_, hook_, boot_, ring_;
     std::vector<Preimage> direct_saved_, ts_saved_, i2c_saved_, board_saved_;
     mb86H_stream_input input_{};
     uint32_t clock_ = 0, sequence_ = 0, cursor_ = 0, tsid_ = 0;
     uint32_t stream_phase_ = 0xffffffff, endpoint_enable_ = 0, endpoint_buffer_ = 0, endpoint_mode_ = 0;
     bool endpoint_saved_ = false;
-    bool aux_changed_ = false, aux_started_ = false, clock_changed_ = false, ts_changed_ = false;
+    bool clock_changed_ = false, ts_changed_ = false;
     bool ring_running_ = false, ready_ = false, satellite_ = false, tuned_ = false;
 };
 }

@@ -22,12 +22,14 @@ def main():
         parser.error('build.py --direct-usb is required')
     sections = [(args.build / name).read_bytes()
                 for name in ('resident.bin', 'bootstrap.bin', 'boot-hook.bin')]
-    bundle = b'DTP3' + struct.pack('>3I', *(len(section) for section in sections)) + b''.join(sections)
+    raw_ts = 'bulk_pump.c' in manifest['sources']
+    magic = b'DTP4' if raw_ts else b'DTP3'
+    bundle = magic + struct.pack('>3I', *(len(section) for section in sections)) + b''.join(sections)
     digest = hashlib.sha256(bundle).hexdigest()
     with args.output.open('xb') as output:
         output.write(bundle)
     if args.provenance:
-        record = dict(format='DTP3', bundle=dict(file=args.output.name, bytes=len(bundle), sha256=digest),
+        record = dict(format=magic.decode('ascii'), bundle=dict(file=args.output.name, bytes=len(bundle), sha256=digest),
                       direct=manifest)
         with args.provenance.open('x', encoding='utf-8', newline='\n') as output:
             output.write(json.dumps(record, indent=2) + '\n')

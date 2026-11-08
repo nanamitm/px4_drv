@@ -24,8 +24,8 @@
       "resident.ld": "93c64e131987c126a0f4be65d26cf0eba4f9effc9e44b98a26fe7eb0a29ee42c",
       "bootstrap.s": "79198d06bad080ed2390d51099b1cb281b3257124135ed06a290a30f3777249f",
       "bootstrap.ld": "d80f2b7cf6fbd50c3756a083fdd39491e2de11d2f580ccff73041f74d99072e8",
-      "build.py": "554bf253b49bd3f1b1a06747e217ee5065bd387153f2edb5e98facb66989f11e",
-      "direct_pump.c": "814708762855ce65ba79cf78764c40066f7b87fad042e0932f5d40f0b93c3b31"
+      "build.py": "ff947da5055e315e09bd821726553fa7105b151f6b17c47257f03494cd76833b",
+      "direct_pump.c": "13c8b602e3db5c08673e5a5cb14979d6dc33e9079c20ce6ae78a61d4f9812508"
     },
     "binary": {
       "file": "resident.bin",

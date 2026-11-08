@@ -4,7 +4,7 @@
 
 PIX-DT295 (`06b8:103b`) の1受信機を DriverHost_PX4 が所有し、既存の BonDriver_PX4 と IPC から地デジ・BS・CSを切り替えて使用する構成です。既存の torne / PX 系の機器制御は独立したままです。
 
-PIX-DT295の既定は主CPU版（`direct-fr`）です。補助CPU版は `FirmwareBackend=source-fr` で選べます。両方式のファームウェアをDriverHostに組み込んでいます。旧INIの `FirmwareBackend=magicvision` は行を削除するか `direct-fr` に変更します。旧配布INIに記載された各方式の既定のパスとSHA-256の組も、組み込み版に移行します。独自バンドルを指定していたINIでは、`SourceFirmwarePath` と `SourceFirmwareSha256` を削除すると、選択した方式の組み込み版で起動します。
+PIX-DT295の既定は `direct-fr` です。`FirmwareBackend=source-fr` では従来の192バイトTS転送を使います。両方式とも主CPUでI²Cを処理します。両方式のファームウェアをDriverHostに組み込んでいます。旧INIの `FirmwareBackend=magicvision` は行を削除するか `direct-fr` に変更します。旧配布INIに記載された各方式の既定のパスとSHA-256の組も、組み込み版に移行します。独自バンドルを指定していたINIでは、`SourceFirmwarePath` と `SourceFirmwareSha256` を削除すると、選択した方式の組み込み版で起動します。
 
 mAgicVISION の MIT 共有コードと上流の回帰試験を `dt295/upstream` に固定版で収録し、C11 のローダー・セッション・フレーマーを C アダプター経由で利用します。上流の回帰試験にはルートの LICENSE も保持しています。出典と各ファイルの SHA-256 は `ORIGIN.json` に記載されています。WinUSB は操作全体の期限と抜去イベントを持ち、キャンセル後も OVERLAPPED の完了を回収してからメモリーを解放する契約です。
 
@@ -57,9 +57,9 @@ channel_switch_stress.exe .\BonDriver_DT295.dll <space> <channel-a> <channel-b> 
 
 ## ソースからビルドするファームウェアの開発
 
-I²Cパススルーを機器側、初期化・選局をホスト側へ置く構成の実装は [`experimental/dt295-firmware`](../experimental/dt295-firmware/README.md) にあります。主CPU版のDTP3と補助CPU版のDTP2は、どちらもDriverHostに組み込みます。配布設定の既定は主CPU版です。対象は既知のブートRAMを持つPIX-DT295 Rev.01です。
+I²Cパススルーを機器側、初期化・選局をホスト側へ置く構成の実装は [`experimental/dt295-firmware`](../experimental/dt295-firmware/README.md) にあります。188バイト転送のDTP3と192バイト転送のDTP4は、どちらもDriverHostに組み込みます。配布設定の既定はDTP3です。対象は既知のブートRAMを持つPIX-DT295 Rev.01です。
 
-### 補助CPU版を使う
+### 192バイト転送版を使う
 
 `DriverHost_PX4.ini` の `[DeviceDefinition19.Config]` を次のように設定します。
 
@@ -69,20 +69,19 @@ Experimental=true
 FirmwareBackend=source-fr
 ```
 
-組み込みのDTP2（補助CPU版）とDTP3（主CPU版）は、DriverHostの [組み込み初期化列](../src/DriverHost_PX4/dt295/frontend_init.cpp) を共用します。実機検証済みDTP1の初期化セクションと同じ754バイトで、地デジと衛星の書き込み、マスク更新、待機の順序を含みます。ソース生成版を動かすための外部初期化ファイルやmAgicVISIONバイナリは不要です。
+組み込みのDTP4（192バイト転送）とDTP3（188バイト転送）は、DriverHostの [組み込み初期化列](../src/DriverHost_PX4/dt295/frontend_init.cpp) を共用します。実機検証済みDTP1の初期化セクションと同じ754バイトで、地デジと衛星の書き込み、マスク更新、待機の順序を含みます。ソース生成版を動かすための外部初期化ファイルやmAgicVISIONバイナリは不要です。
 
-ソース生成版は冷間状態から起動するため、別ファームウェアがRAMに残っている場合は対象機のUSBを抜き差ししてから試します。BS/CSは外部給電環境で `LNBPower=0` を指定します。2026-11-08のWindows x64の試験では、初期化が約2.2秒、終了時の復元が約2.5秒で、`TuneTimeout` と `PipeTimeout` の既定値のまま選局と終了が完了しました。
+旧 `source-fr`（DTP2）は補助CPUでI²Cを処理していました。DTP4では主CPUへ移し、192バイトのリングレコード、PIF1のTS転送、ホストの16 KiB × 4本のBulk IN要求を維持しています。旧版と比較する場合は、ファームウェアの切り替え前にUSBを抜き差しします。
 
 ### バンドルの再生成
 
-組み込みのDTP2バンドルはFR30向けのGNU Binutils 2.43.1とGCC 14.2.0で生成し、各ソースのSHA-256を含むmanifestを `pkg/DriverHost_PX4/firmware/dt295-source-fr.json` に記録しています。Windowsの通常ビルドにFR30のツールは不要で、`tools/check_dt295_source_firmware.py` がバンドル・manifest・現在のソースの一致を確認します。`experimental/dt295-firmware` のソースを変更するとこの確認が失敗するため、次の手順でバンドルと記録を作り直してDriverHostを再ビルドします。ツールの指定方法は [README](../experimental/dt295-firmware/README.md) を参照してください。
+組み込みのDTP4バンドルはFR30向けのGNU Binutils 2.43.1とGCC 14.2.0で生成し、各ソースのSHA-256を含むmanifestを `pkg/DriverHost_PX4/firmware/dt295-source-fr.json` に記録しています。Windowsの通常ビルドにFR30のツールは不要で、`tools/check_dt295_source_firmware.py` がバンドル・manifest・現在のソースの一致を確認します。`experimental/dt295-firmware` のソースを変更するとこの確認が失敗するため、次の手順でバンドルと記録を作り直してDriverHostを再ビルドします。ツールの指定方法は [README](../experimental/dt295-firmware/README.md) を参照してください。
 
 ```sh
 cd winusb/experimental/dt295-firmware
-python3 build.py --bulk --out build/bulk
-python3 build_auxiliary.py --out build/auxiliary
-python3 build_host_bundle.py build/auxiliary build/bulk ../../pkg/DriverHost_PX4/firmware/dt295-source-fr.bin \
-  --runtime-init --provenance ../../pkg/DriverHost_PX4/firmware/dt295-source-fr.json
+python3 build.py --direct-usb --raw-ts --out build/source-fr
+python3 build_direct_bundle.py build/source-fr ../../pkg/DriverHost_PX4/firmware/dt295-source-fr.bin \
+  --provenance ../../pkg/DriverHost_PX4/firmware/dt295-source-fr.json
 ```
 
 診断ツール用の初期化列や過去の試験用DTP1を再生成する場合は、`extract_init_trace.py` で同梱のmAgicVISION 0.1.0からJSONLを生成します。`tests/test_init_trace.py` はPython版、`tests/dt295_frontend_init_test` はDriverHostの組み込み列が、検証済みの列とSHA-256で一致することを確認します。
@@ -120,7 +119,7 @@ Experimental=true
 FirmwareBackend=direct-fr
 ```
 
-組み込みDTP3の各ソースのSHA-256は `pkg/DriverHost_PX4/firmware/dt295-direct-fr.json` に記録され、`tools/check_dt295_source_firmware.py` が補助CPU版と同じくバンドル・manifest・現在のソースの一致を確認します。ソースを変更した場合は、FR30 GCCとBinutilsを用意し、リポジトリルートで次を実行してバンドルと記録を作り直し、DriverHostを再ビルドします。バンドルはビルド入力としてリポジトリに置かれ、実行時にはEXE内のリソースから読み出します。
+組み込みDTP3の各ソースのSHA-256は `pkg/DriverHost_PX4/firmware/dt295-direct-fr.json` に記録され、`tools/check_dt295_source_firmware.py` がDTP4と同じくバンドル・manifest・現在のソースの一致を確認します。ソースを変更した場合は、FR30 GCCとBinutilsを用意し、リポジトリルートで次を実行してバンドルと記録を作り直し、DriverHostを再ビルドします。バンドルはビルド入力としてリポジトリに置かれ、実行時にはEXE内のリソースから読み出します。
 
 ```powershell
 python winusb/experimental/dt295-firmware/build.py --direct-usb --out build/dt295-direct

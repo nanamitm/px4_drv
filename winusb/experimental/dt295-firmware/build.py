@@ -16,6 +16,7 @@ def main():
     ap.add_argument('--linker', default='fr30-elf-ld')
     ap.add_argument('--objcopy', default='fr30-elf-objcopy')
     ap.add_argument('--objdump', default='fr30-elf-objdump')
+    ap.add_argument('--raw-ts', action='store_true', help='keep 192-byte records with --direct-usb')
     ap.add_argument('--direct-usb', action='store_true', help='build main-CPU I2C and compact TS instead of the raw Bulk pump')
     ap.add_argument('--bulk', action='store_true', help='include the experimental TS Bulk pump')
     ap.add_argument('--compiler', default='fr30-elf-gcc')
@@ -24,6 +25,8 @@ def main():
     args = ap.parse_args()
     if args.bulk and args.direct_usb:
         ap.error('--bulk and --direct-usb are mutually exclusive')
+    if args.raw_ts and not args.direct_usb:
+        ap.error('--raw-ts requires --direct-usb')
     out = args.out.resolve()
     out.mkdir(parents=True, exist_ok=True)
     resident = out/'resident.o'
@@ -38,13 +41,17 @@ def main():
         compiler = [args.compiler, *args.compiler_arg]
         if subprocess.check_output([*compiler, '-dumpmachine'], text=True).strip() != 'fr30-elf':
             raise ValueError('the Bulk diagnostic requires fr30-elf GCC')
-        assembly = out/'bulk_pump.s'
-        obj = out/'bulk_pump.o'
-        subprocess.run([*compiler, '-S', '-std=c11', '-Oz' if args.direct_usb else '-Os', '-ffreestanding', '-fno-builtin',
-                        '-Wall', '-Wextra', '-Werror', '-o', str(assembly), str(ROOT/pump_source)], check=True)
-        subprocess.run([args.assembler, '-o', str(obj), str(assembly)], check=True)
-        objects.append(str(obj))
-        sources.append(pump_source)
+        pumps = [(pump_source, '-Oz' if args.direct_usb else '-Os', ['-DDTP_RAW_TS'] if args.raw_ts else [])]
+        if args.raw_ts:
+            pumps.append(('bulk_pump.c', '-Os', ['-Ddtp_bulk_pump=dtp_raw_pump']))
+        for source, optimization, defines in pumps:
+            assembly = out / Path(source).with_suffix('.s')
+            obj = assembly.with_suffix('.o')
+            subprocess.run([*compiler, *defines, '-S', '-std=c11', optimization, '-ffreestanding', '-fno-builtin',
+                            '-Wall', '-Wextra', '-Werror', '-o', str(assembly), str(ROOT/source)], check=True)
+            subprocess.run([args.assembler, '-o', str(obj), str(assembly)], check=True)
+            objects.append(str(obj))
+            sources.append(source)
     direct_layout = ['--defsym', 'dtp_direct_layout=1'] if args.direct_usb else []
     subprocess.run([args.linker, *direct_layout, '-T', str(ROOT/'resident.ld'), '-o', str(out/'resident.elf'), *objects], check=True)
     subprocess.run([args.objcopy, '-O', 'binary', str(out/'resident.elf'), str(out/'resident.bin')], check=True)
