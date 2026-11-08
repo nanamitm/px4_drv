@@ -32,13 +32,6 @@ for bits, platform in ((32, 'x86'), (64, 'x64')):
     (folder / 'firmware').mkdir(exist_ok=True)
     shutil.copy2(root / 'pkg/DriverHost_PX4/firmware/isdbt_rio.inp', folder / 'firmware/isdbt_rio.inp')
     shutil.copytree(root / 'pkg/licenses/siano', folder / 'licenses/siano', dirs_exist_ok=True)
-# Shared hosts can expose DT295 from any configured BonDriver directory.
-for folder in dist.glob('BonDriver_*'):
-    if folder.is_dir() and (folder / 'DriverHost_PX4.exe').is_file():
-        target = folder / 'firmware'
-        target.mkdir(exist_ok=True)
-        for name in ('dt295-source-fr.bin', 'dt295-source-fr.json', 'dt295-direct-fr.bin', 'dt295-direct-fr.json'):
-            shutil.copy2(root / 'pkg/DriverHost_PX4/firmware' / name, target / name)
 target = dist / 'licenses/magicvision'
 target.mkdir(parents=True, exist_ok=True)
 vendor = root / 'src/DriverHost_PX4/dt295/upstream'

@@ -9,15 +9,16 @@
 #include <cmath>
 #include <condition_variable>
 #include <cstdio>
-#include <filesystem>
 #include <thread>
 #include <vector>
 
 namespace px4::dt295 {
 namespace {
 using Clock=std::chrono::steady_clock;
-constexpr wchar_t DefaultDirectFirmwarePath[]=L"firmware\\dt295-direct-fr.bin";
-constexpr wchar_t DefaultDirectFirmwareSha256[]=L"ba6496cf022cc3ebb1626446484b072f83fbba019d11700c1d08c1c7b75d204a";
+constexpr wchar_t LegacyDirectFirmwarePath[]=L"firmware\\dt295-direct-fr.bin";
+constexpr wchar_t LegacyDirectFirmwareSha256[]=L"ba6496cf022cc3ebb1626446484b072f83fbba019d11700c1d08c1c7b75d204a";
+constexpr wchar_t LegacySourceFirmwarePath[]=L"firmware\\dt295-source-fr.bin";
+constexpr wchar_t LegacySourceFirmwareSha256[]=L"92d2373945c03bd7978ed710ba283946d355e9383f163896b2d5517c3612ccbe";
 std::int32_t CnrMilliDb(bool satellite,uint32_t raw)
 {
     double cnr=0;
@@ -375,12 +376,17 @@ int Device::Init(){
         msg_err("PIX-DT295: unsupported FirmwareBackend=%ls; use direct-fr or source-fr\n",backend.c_str());
         return -EINVAL;
     }
-    auto path=device_def_.configs.Get(L"SourceFirmwarePath",direct?DefaultDirectFirmwarePath:L"");
-    const auto digest=device_def_.configs.Get(L"SourceFirmwareSha256",direct?DefaultDirectFirmwareSha256:L"");
-    if(path.empty() || digest.size()!=64)return -EINVAL;
-    if(!std::filesystem::path(path).is_absolute())path=px4::util::path::GetDir()+path;
+    const auto path=device_def_.configs.Get(L"SourceFirmwarePath",L"");
+    const auto digest=device_def_.configs.Get(L"SourceFirmwareSha256",L"");
+    // 旧配布INIの既定の組も、外部ファイルを必要とせずに移行できる。
+    const auto legacy_path=direct ? LegacyDirectFirmwarePath : LegacySourceFirmwarePath;
+    const auto legacy_digest=direct ? LegacyDirectFirmwareSha256 : LegacySourceFirmwareSha256;
+    if ((!path.empty() || !digest.empty()) && (path != legacy_path || digest != legacy_digest)) {
+        msg_err("PIX-DT295: external firmware support has been removed. Remove SourceFirmwarePath and SourceFirmwareSha256 to use embedded %ls firmware.\n", backend.c_str());
+        return -EINVAL;
+    }
     auto source=std::make_unique<SourceFirmware>(direct);
-    const int rc=source->Load(path,digest);
+    const auto rc=source->LoadEmbedded();
     if(rc)return rc;
     receiver_=std::make_unique<Receiver>(*this,std::move(source));
     px4::command::ReceiverInfo info{};const auto &r=device_def_.receivers.front();

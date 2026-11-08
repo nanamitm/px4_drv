@@ -1,13 +1,13 @@
 // SPDX-License-Identifier: GPL-2.0-only
 #include "source_firmware.hpp"
 #include "frontend_init.hpp"
+#include "../resource.h"
 #include "msg.h"
 #include <windows.h>
 #include <bcrypt.h>
 #include <algorithm>
 #include <cerrno>
-#include <filesystem>
-#include <fstream>
+#include <string>
 
 #pragma comment(lib, "bcrypt.lib")
 
@@ -77,52 +77,45 @@ int SourceFirmware::Failure(const char *stage, int code) const
     return code;
 }
 
-int SourceFirmware::Load(const std::wstring &path, const std::wstring &digest)
+int SourceFirmware::LoadEmbedded()
 {
-    std::ifstream stream(std::filesystem::path(path), std::ios::binary | std::ios::ate);
-    if (!stream)
-        return Failure("open bundle", -ENOENT);
-    const auto size = stream.tellg();
-    if (size < 16 || size > 32768)
+    const auto module = GetModuleHandleW(nullptr);
+    const auto id = direct_ ? IDR_DT295_DIRECT_FIRMWARE : IDR_DT295_SOURCE_FIRMWARE;
+    const auto resource = FindResourceW(module, MAKEINTRESOURCEW(id), RT_RCDATA);
+    if (!resource)
+        return Failure("embedded bundle", -ENOENT);
+    const auto handle = LoadResource(module, resource);
+    const auto *bytes = handle ? static_cast<const uint8_t *>(LockResource(handle)) : nullptr;
+    const auto size = SizeofResource(module, resource);
+    if (!bytes || size < 16 || size > 32768)
         return Failure("bundle size", -EINVAL);
-    Bytes bytes(static_cast<size_t>(size));
-    stream.seekg(0);
-    if (!stream.read(reinterpret_cast<char *>(bytes.data()), size))
-        return Failure("read bundle", -EIO);
-    const auto actual = Digest(bytes);
-    // DTP1は初期化列を含む。DTP2/3はDriverHostの組み込み初期化列を使う。
-    const auto magic = Be(bytes.data());
-    const bool runtime_init = magic != 0x44545031;
-    if (actual.size() != 64 || std::wstring(actual.begin(), actual.end()) != digest ||
-        (direct_ ? magic != 0x44545033 : magic != 0x44545031 && magic != 0x44545032))
-        return Failure("bundle SHA-256 or backend magic", -EINVAL);
+    // DTP2/3はDriverHostの組み込み初期化列を使う。
+    if (Be(bytes) != (direct_ ? 0x44545033u : 0x44545032u))
+        return Failure("bundle backend magic", -EINVAL);
 
-    Bytes *sections[] = {&auxiliary_, &resident_, &adapter_, &hook_, &init_};
-    const size_t limits[] = {0x2000, direct_ ? 0x7a0u : 0x700u, direct_ ? 0x60u : 0x100u, 8, 0x2000};
+    const std::array sections{&auxiliary_, &resident_, &adapter_, &hook_};
+    const size_t limits[] = {0x2000, direct_ ? 0x7a0u : 0x700u, direct_ ? 0x60u : 0x100u, 8};
     const size_t first = direct_ ? 1 : 0;
-    const size_t end = runtime_init ? 4 : 5;
-    size_t offset = 4 + 4 * (end - first);
-    if (bytes.size() < offset)
+    size_t offset = 4 + 4 * (sections.size() - first);
+    if (size < offset)
         return Failure("bundle size", -EINVAL);
-    for (size_t i = first; i < end; ++i) {
-        const auto count = Be(bytes.data() + 4 + 4 * (i - first));
-        if (!count || count > limits[i] || count > bytes.size() - offset)
+    for (size_t i = first; i < sections.size(); ++i) {
+        const auto count = Be(bytes + 4 + 4 * (i - first));
+        if (!count || count > limits[i] || count > size - offset)
             return Failure("bundle section size", -EINVAL);
-        sections[i]->assign(bytes.begin() + offset, bytes.begin() + offset + count);
+        sections[i]->assign(bytes + offset, bytes + offset + count);
         offset += count;
     }
-    if (offset != bytes.size() || hook_ != Bytes{0x9b,0xec,0x10,0,0x97,0x0c,0x9f,0xa0})
+    if (offset != size || hook_ != Bytes{0x9b,0xec,0x10,0,0x97,0x0c,0x9f,0xa0})
         return Failure("bundle hook or trailing data", -EINVAL);
-    if (runtime_init)
-        init_.assign(FrontendInit.begin(), FrontendInit.end());
     for (auto *section : {&auxiliary_, &resident_, &adapter_})
         section->resize((section->size() + 3) & ~size_t(3));
     bool satellite = false;
-    for (size_t i = 0; i < init_.size();) {
-        if (init_.size() - i < 2)
+    for (size_t i = 0; i < FrontendInit.size();) {
+        if (FrontendInit.size() - i < 2)
             return Failure("frontend initializer header", -EINVAL);
-        const auto op = init_[i++], n = init_[i++];
-        if (!n || n > 8 || n > init_.size() - i ||
+        const auto op = FrontendInit[i++], n = FrontendInit[i++];
+        if (!n || n > 8 || n > FrontendInit.size() - i ||
             (op != 0 && op != 2 && op != 128 && op != 255) ||
             (op == 128 && n != 4) || (op == 255 && n != 1) ||
             (satellite && (op == 0 || op == 128)))
@@ -308,9 +301,9 @@ void SourceFirmware::InitializeFrontend()
             pending = 0;
         }
     };
-    for (size_t i = 0; i < init_.size();) {
-        const auto op = init_[i++], n = init_[i++];
-        const auto data = init_.data() + i;
+    for (size_t i = 0; i < FrontendInit.size();) {
+        const auto op = FrontendInit[i++], n = FrontendInit[i++];
+        const auto data = FrontendInit.data() + i;
         if (op == 255) {
             flush();
             Delay(data[0]);

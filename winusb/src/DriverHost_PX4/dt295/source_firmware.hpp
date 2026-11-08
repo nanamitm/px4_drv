@@ -3,7 +3,6 @@
 #include "runtime.h"
 #include <array>
 #include <initializer_list>
-#include <string>
 #include <vector>
 
 extern "C" {
@@ -15,7 +14,7 @@ class SourceFirmware {
 public:
     explicit SourceFirmware(bool direct = false) : direct_(direct) {}
     bool Direct() const { return direct_; }
-    int Load(const std::wstring &path, const std::wstring &digest);
+    int LoadEmbedded();
     int Start(dt295_io io);
     int Tune(bool satellite, uint32_t khz, uint32_t tsid);
     int Locked(int &locked);
@@ -67,7 +66,7 @@ private:
 
     const bool direct_;
     dt295_io io_{};
-    Bytes auxiliary_, resident_, adapter_, hook_, init_, boot_, aux_ram_, ring_;
+    Bytes auxiliary_, resident_, adapter_, hook_, boot_, aux_ram_, ring_;
     std::vector<Preimage> direct_saved_, ts_saved_, i2c_saved_, board_saved_;
     mb86H_stream_input input_{};
     uint32_t clock_ = 0, sequence_ = 0, cursor_ = 0, tsid_ = 0;

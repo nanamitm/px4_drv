@@ -23,3 +23,6 @@
 #else
 #define VER_FLAGS	0
 #endif
+
+#define IDR_DT295_DIRECT_FIRMWARE 101
+#define IDR_DT295_SOURCE_FIRMWARE 102
