@@ -27,7 +27,11 @@ dtp_entry:
         beq .Lbulk
         .endif
         cmp #3,r0
+        .ifdef DTP_DIRECT
+        beq .Lbulk
+        .else
         beq .Lnot_ready
+        .endif
         ldi:8 #3,r2
         bra .Lreply
 .Lbad_magic:
@@ -74,7 +78,14 @@ dtp_entry:
         addn #8,r1
         ldi:8 #16,r0
         st r0,@r1
+        .ifdef DTP_DIRECT
+        addn #4,r1
+        ldi:8 #1,r0
+        st r0,@r1
+        addn #4,r1
+        .else
         addn #8,r1
+        .endif
         ldi:8 #40,r0
         st r0,@r1
         addn #4,r1

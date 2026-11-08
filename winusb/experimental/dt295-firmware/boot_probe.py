@@ -123,7 +123,8 @@ def run(control, build, evidence, execute, *, during_probe=None):
     hook = (build / 'boot-hook.bin').read_bytes()
     resident = resident.ljust((segments['binary']['bytes'] + 3) & ~3, b'\0')
     adapter = adapter.ljust((segments['bootstrap']['bytes'] + 3) & ~3, b'\0')
-    originals = [(0xe1100, read(control, 0xe1100, len(resident))),
+    entry = int(segments['binary']['address'], 16)
+    originals = [(entry, read(control, entry, len(resident))),
                  (0xe1000, read(control, 0xe1000, len(adapter))),
                  (0xc4620, read(control, 0xc4620, 64)),
                  (0xea6fc, snapshot[0x16fc:0x1704])]
@@ -133,7 +134,7 @@ def run(control, build, evidence, execute, *, during_probe=None):
     changed = [originals[2]]
     try:
         changed.append(originals[0])
-        replace(control, 0xe1100, resident)
+        replace(control, entry, resident)
         changed.append(originals[1])
         replace(control, 0xe1000, adapter)
         changed.append(originals[3])
@@ -144,7 +145,7 @@ def run(control, build, evidence, execute, *, during_probe=None):
             packet = control(0xc4620, 64)
             (evidence / f'response-{operation}.bin').write_bytes(packet)
             reply = response(packet, sequence, operation)
-            expected = struct.pack('>4I', 0, 40, 40, 0x06b8103b) if operation == CAPS else b''
+            expected = struct.pack('>4I', int(entry == 0xe1060), 40, 40, 0x06b8103b) if operation == CAPS else b''
             if reply.status != OK or reply.payload != expected:
                 raise ValueError(f'unexpected diagnostic result for operation {operation}')
             print(f'operation={operation} response=verified', flush=True)

@@ -5,7 +5,7 @@ ENTRY(dtp_entry)
 SECTIONS
 {
     /* 解析で確認したRAM範囲。実機の配置可否はUSBアダプターと併せて検証する。 */
-    . = 0x000e1100;
+    . = DEFINED(dtp_direct_layout) ? 0x000e1060 : 0x000e1100;
     .text : { *(.text*) }
     .rodata : { *(.rodata*) }
     .data : { *(.data*) }

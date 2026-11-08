@@ -21,12 +21,14 @@ def validate_boot(snapshot):
 def inspect_build(build):
     build = Path(build)
     manifest = json.loads((build/'manifest.json').read_text(encoding='utf-8'))
+    direct = 'direct_pump.c' in manifest.get('sources', {})
+    entry, capacity = ('0x000e1060', 0x7a0) if direct else ('0x000e1100', 0x700)
     if manifest.get('stage') != 'diagnostic-bootstrap-unverified' or manifest.get('deployable') is not False \
-            or manifest.get('features') != [] or manifest.get('entry') != '0x000e1100':
+            or manifest.get('features') != [] or manifest.get('entry') != entry:
         raise ValueError('expected the unverified diagnostic build manifest')
     result = {}
-    for key, name, address, limit in [('binary','resident.bin','0x000e1100',0x700),
-                                      ('bootstrap','bootstrap.bin','0x000e1000',0x100),
+    for key, name, address, limit in [('binary','resident.bin',entry,capacity),
+                                      ('bootstrap','bootstrap.bin','0x000e1000',0x60 if direct else 0x100),
                                       ('hook','boot-hook.bin','0x000ea6fc',8)]:
         data = (build/name).read_bytes()
         record = manifest[key]

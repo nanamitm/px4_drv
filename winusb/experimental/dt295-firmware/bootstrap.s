@@ -32,7 +32,11 @@ dtp_usb_hook:
         addn2 #-1,r7
         cmp #0,r7
         bne .Lcopy
+        .ifdef DTP_DIRECT
+        ldi:32 #0x000e1060,r12
+        .else
         ldi:32 #0x000e1100,r12
+        .endif
         call @r12
         /* 応答はstagingへ残す。EP0完了と保存レジスター復帰は既存処理へ戻る。 */
         ldi:32 #0x000ea8c8,r12

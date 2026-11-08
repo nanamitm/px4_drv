@@ -9,6 +9,7 @@ import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import protocol as p
+from boot_contract import inspect_build
 from fr_model import Machine
 
 DESC, STAGING = 0x2000, 0x000c4620
@@ -32,13 +33,16 @@ class BootstrapTests(unittest.TestCase):
     def test_patch_to_caps_reply(self):
         result, packet, machine, steps = run(p.request(295,p.CAPS,b'\xff'*40))
         self.assertEqual(result,DONE)
-        self.assertEqual(struct.unpack('>4I',p.response(packet,295,p.CAPS).payload),(0,40,40,0x06b8103b))
+        self.assertEqual(struct.unpack('>4I',p.response(packet,295,p.CAPS).payload),(int(DIRECT),40,40,0x06b8103b))
         self.assertTrue(all(STAGING <= a < STAGING+64 for a in machine.writes))
         self.assertEqual(machine.regs[11],DESC)
         self.assertLess(steps,400)
 
     def test_ping_and_not_ready(self):
-        for op, status in ((p.PING,p.OK),(p.I2C,p.NOT_READY),(999,p.UNSUPPORTED)):
+        cases = [(p.PING,p.OK),(999,p.UNSUPPORTED)]
+        if not DIRECT:
+            cases.append((p.I2C,p.NOT_READY))
+        for op, status in cases:
             result,packet,_,_=run(p.request(7,op))
             self.assertEqual(result,DONE)
             self.assertEqual(p.response(packet,7,op),p.Response(status,b''))
@@ -65,7 +69,9 @@ if __name__=='__main__':
     ap=argparse.ArgumentParser(description=__doc__)
     ap.add_argument('--build',type=Path,required=True)
     args,remaining=ap.parse_known_args()
-    CODE={0x000e1100:(args.build/'resident.bin').read_bytes(),
+    entry = int(inspect_build(args.build)['binary']['address'], 16)
+    DIRECT = entry == 0xe1060
+    CODE={entry:(args.build/'resident.bin').read_bytes(),
           0x000e1000:(args.build/'bootstrap.bin').read_bytes(),
           0x000ea6fc:(args.build/'boot-hook.bin').read_bytes()}
     unittest.main(argv=[sys.argv[0]]+remaining)
