@@ -142,3 +142,27 @@ BonDriverの選局・TS配信は既存のIPCを使います。衛星選局時に
 PIX-DT295 Rev.01とWindows x64で、500msごとの取得を加えた各30秒の受信と、CS ND02の250msごと・10分間の受信で、同期・TEI・CC異常は0件、受信量の低下もありませんでした。同じPCに接続したPX-W3U4（TC90522）と比べると、BS01/TS0は19.06 / 18.98dB、CS ND02は16.69 / 16.70dBでした。地デジ13chは31.28 / 28.22dBで、3dBの差が機器の入力系統によるものか、換算の差によるものかは未確認です。
 
 CNRを250msごとに取得する10分試験の1回目では、試験中にPX-W3U4を接続した約2分後、CN読み出しの制御転送が約1秒応答せずに受信が停止し、Closeの復元も失敗しました。USB接続を変えずに同じ条件で再試験した2回目は完走しています。原因は特定していないため、受信中にほかのUSB機器を抜き差しする条件は未確認として扱います。
+
+## 比較試験用の主CPU USB直接制御
+
+`FirmwareBackend=direct-fr` はPIX-DT295 Rev.01向けの実験経路です。BonDriver IPC、選局ロジック、TS配信バッファは既存のDriverHostと共有します。機器側は主CPUのboot0に一時的なPIF1フックを置き、I²CとTS送出をそこで実行します。初期化列は従来の `source-fr` と同じ参照ファイルから構成し、初期化の連続書き込みは最大40バイトの操作列にまとめます。主CPUが192バイトのリングレコードを188バイトTSに整形し、HostはBulk INに8 KiBの読み取りを64本投入します。C/Nは同じ復調レジスタとdB換算式を使用します。
+
+FR30 GCCとBinutilsを用意し、リポジトリルートで以下を実行すると比較用のDTP3バンドルができます。
+
+```powershell
+python winusb/experimental/dt295-firmware/build.py --direct-usb --out build/dt295-direct
+python winusb/experimental/dt295-firmware/build_direct_bundle.py build/dt295-direct build/dt295-direct-fr.bin
+```
+
+隔離したDriverHost環境にバンドルをコピーし、既存のPIX-DT295定義で以下を指定します。SHA-256はバンドル生成時の出力を使います。`FirmwarePath` は既存のmAgicVISION 0.1.0参照ファイルを指します。これは初期化データの抽出に使われます。
+
+```ini
+[DeviceDefinition19.Config]
+Experimental=true
+FirmwareBackend=direct-fr
+SourceFirmwarePath="firmware\dt295-direct-fr.bin"
+SourceFirmwareSha256="<バンドル生成時に表示されるSHA-256>"
+FirmwarePath="firmware\magicvision-dt295.bin"
+```
+
+同じ実機で切り替える場合は先に受信を閉じ、復元結果を確認してから次のバックエンドを起動します。比較条件として放送・C/N取得頻度・時間を揃えると、停止とCC異常を別々に比較できます。復元に失敗した場合はログに残り、再試験には対象機のUSB電源再投入が必要です。内蔵B-CASとアンテナ給電は今回の比較範囲外です。実機での初期化、選局、連続受信、復元は未検証です。

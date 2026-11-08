@@ -15,7 +15,8 @@ namespace px4::dt295 {
 namespace {
 using Bytes = std::vector<uint8_t>;
 constexpr uint32_t Boot = 0xe9000, BootSize = 0x3910, Hook = 0xea6fc;
-constexpr uint32_t Stage = 0xc4620, Resident = 0xe1100, Adapter = 0xe1000;
+constexpr uint32_t Stage = 0xc4620, Resident = 0xe1100, DirectResident = 0xe1060, Adapter = 0xe1000;
+constexpr uint32_t Protect = 0xfd814c, EndpointControl = 0xfdbc14, EndpointBuffer = 0xfdbd08;
 constexpr uint32_t AuxRam = 0x017a0000, Mail = AuxRam + 0x3900;
 constexpr uint32_t Cluster = 0x01700000, Vector = 0x017ffffc;
 constexpr uint32_t Ring = 0x8138ec00, RingSize = 0x30000, Run = 0x01902010, Clock = 0x01900404;
@@ -72,7 +73,7 @@ std::string Digest(const Bytes &bytes)
 
 int SourceFirmware::Failure(const char *stage, int code) const
 {
-    msg_err("PIX-DT295 source-fr: %s failed (result=%d)\n", stage, code);
+    msg_err("PIX-DT295 %s: %s failed (result=%d)\n", direct_ ? "direct-fr" : "source-fr", stage, code);
     return code;
 }
 
@@ -82,27 +83,29 @@ int SourceFirmware::Load(const std::wstring &path, const std::wstring &digest, c
     if (!stream)
         return Failure("open bundle", -ENOENT);
     const auto size = stream.tellg();
-    if (size < 20 || size > 32768)
+    if (size < 16 || size > 32768)
         return Failure("bundle size", -EINVAL);
     Bytes bytes(static_cast<size_t>(size));
     stream.seekg(0);
     if (!stream.read(reinterpret_cast<char *>(bytes.data()), size))
         return Failure("read bundle", -EIO);
     const auto actual = Digest(bytes);
-    // DTP1は初期化列を含む。DTP2は初期化列を含まず、配布物のmAgicVISION 0.1.0から実行時に組み立てる。
-    const bool runtime_init = Be(bytes.data()) == 0x44545032;
+    // DTP1は初期化列を含む。DTP2/3は配布物のmAgicVISION 0.1.0から実行時に組み立てる。
+    const auto magic = Be(bytes.data());
+    const bool runtime_init = magic != 0x44545031;
     if (actual.size() != 64 || std::wstring(actual.begin(), actual.end()) != digest ||
-        (Be(bytes.data()) != 0x44545031 && !runtime_init))
-        return Failure("bundle SHA-256 or magic", -EINVAL);
+        (direct_ ? magic != 0x44545033 : magic != 0x44545031 && magic != 0x44545032))
+        return Failure("bundle SHA-256 or backend magic", -EINVAL);
 
     Bytes *sections[] = {&auxiliary_, &resident_, &adapter_, &hook_, &init_};
-    constexpr size_t limits[] = {0x2000, 0x700, 0x100, 8, 0x2000};
-    const size_t count = runtime_init ? 4 : 5;
-    size_t offset = 4 + 4 * count;
+    const size_t limits[] = {0x2000, direct_ ? 0x7a0u : 0x700u, direct_ ? 0x60u : 0x100u, 8, 0x2000};
+    const size_t first = direct_ ? 1 : 0;
+    const size_t end = runtime_init ? 4 : 5;
+    size_t offset = 4 + 4 * (end - first);
     if (bytes.size() < offset)
         return Failure("bundle size", -EINVAL);
-    for (size_t i = 0; i < count; ++i) {
-        const auto count = Be(bytes.data() + 4 + 4 * i);
+    for (size_t i = first; i < end; ++i) {
+        const auto count = Be(bytes.data() + 4 + 4 * (i - first));
         if (!count || count > limits[i] || count > bytes.size() - offset)
             return Failure("bundle section size", -EINVAL);
         sections[i]->assign(bytes.begin() + offset, bytes.begin() + offset + count);
@@ -240,20 +243,23 @@ SourceFirmware::Bytes SourceFirmware::Mailbox()
     return MappedRead(Mail, 64);
 }
 
-SourceFirmware::Bytes SourceFirmware::Exchange(unsigned op, uint32_t cursor, uint32_t budget)
+SourceFirmware::Bytes SourceFirmware::Exchange(unsigned op, const Bytes &payload)
 {
     Bytes request;
-    for (auto word : {0x50494631u, ++sequence_, op, 1u, 0u, 0u, cursor, budget}) {
+    for (auto word : {0x50494631u, ++sequence_, op, 1u, op == 3 ? static_cast<uint32_t>(payload.size()) : 0u, 0u}) {
         const auto bytes = Encode(word);
         request.insert(request.end(), bytes.begin(), bytes.end());
     }
+    request.insert(request.end(), payload.begin(), payload.end());
     request.resize(64);
     Control(Stage, request.data(), request.size(), false, 0x7e);
     auto reply = Read(Stage, 64);
-    const unsigned length = op == 1 ? 16 : op == 4 ? 20 : 0;
+    const auto length = Be(&reply[20]);
+    const bool expected_length = op == 3 ? length >= 8 && length <= 40 :
+        length == (op == 1 ? 16u : op == 4 ? (direct_ ? 24u : 20u) : 0u);
     if (Be(reply.data()) != 0x50494631 || Be(&reply[4]) != sequence_ ||
         Be(&reply[8]) != (op | 0x80000000) || Be(&reply[12]) || Be(&reply[16]) != 1 ||
-        Be(&reply[20]) != length || std::any_of(reply.begin() + 24 + length, reply.end(), [](auto b) { return b; }))
+        !expected_length || std::any_of(reply.begin() + 24 + length, reply.end(), [](auto b) { return b; }))
         throw -EPROTO;
     return reply;
 }
@@ -265,6 +271,11 @@ SourceFirmware::Bytes SourceFirmware::I2c(uint8_t address, std::initializer_list
 
 SourceFirmware::Bytes SourceFirmware::I2c(uint8_t address, const uint8_t *tx, size_t size, unsigned rx)
 {
+    if (direct_) {
+        Bytes ops{address, static_cast<uint8_t>(size), static_cast<uint8_t>(rx)};
+        ops.insert(ops.end(), tx, tx + size);
+        return DirectI2c(ops, 1, rx);
+    }
     Bytes args{address, static_cast<uint8_t>(size), static_cast<uint8_t>(rx), 0};
     args.insert(args.end(), tx, tx + size);
     args.resize(20);
@@ -289,6 +300,175 @@ SourceFirmware::Bytes SourceFirmware::I2c(uint8_t address, const uint8_t *tx, si
     throw -ETIMEDOUT;
 }
 
+SourceFirmware::Bytes SourceFirmware::DirectI2c(const Bytes &ops, unsigned count, unsigned read)
+{
+    const auto reply = Exchange(3, ops);
+    const auto result = Be(&reply[24]), completed = Be(&reply[28]);
+    if (result || completed != count || Be(&reply[20]) != 8 + read) {
+        msg_err("PIX-DT295 direct-fr: I2C result=%u completed=%u/%u\n", result, completed, count);
+        throw result == 2 ? -ETIMEDOUT : result == 4 ? -ENXIO : -EIO;
+    }
+    return Bytes(reply.begin() + 32, reply.begin() + 32 + read);
+}
+
+void SourceFirmware::InitializeFrontend()
+{
+    Bytes batch;
+    unsigned pending = 0;
+    const auto flush = [&] {
+        if (pending) {
+            DirectI2c(batch, pending, 0);
+            batch.clear();
+            pending = 0;
+        }
+    };
+    for (size_t i = 0; i < init_.size();) {
+        const auto op = init_[i++], n = init_[i++];
+        const auto data = init_.data() + i;
+        if (op == 255) {
+            flush();
+            Delay(data[0]);
+        } else if (op == 128) {
+            flush();
+            Field(data[1], data[2], data[3]);
+        } else if (direct_) {
+            if (batch.size() + 3 + n > 40)
+                flush();
+            batch.insert(batch.end(), {op == 2 ? Sat : Gr, n, 0});
+            batch.insert(batch.end(), data, data + n);
+            ++pending;
+        } else {
+            I2c(op == 2 ? Sat : Gr, data, n, 0);
+        }
+        i += n;
+    }
+    flush();
+}
+
+void SourceFirmware::InstallPif()
+{
+    const auto entry = direct_ ? DirectResident : Resident;
+    Save(entry, resident_.size());
+    Save(Adapter, adapter_.size());
+    Save(Hook, hook_.size());
+    Write(entry, resident_, 4, true);
+    Write(Adapter, adapter_, 4, true);
+    Write(Hook, hook_, 8, true);
+    const auto caps = Exchange(1);
+    if (Be(&caps[24]) != (direct_ ? 1u : 0u) || Be(&caps[28]) != 40 ||
+        Be(&caps[32]) != 40 || Be(&caps[36]) != 0x06b8103b)
+        throw -EPROTO;
+    Exchange(2);
+}
+
+uint32_t SourceFirmware::DirectReg(uint32_t address, unsigned width)
+{
+    return Be(Read(address, width).data(), width);
+}
+
+void SourceFirmware::SetDirectReg(uint32_t address, uint32_t value, unsigned width)
+{
+    Write(address, Encode(value, width), 4, false);
+}
+
+void SourceFirmware::EnableTsSystem()
+{
+    Save(0xf10118, 2);
+    Save(0xf1011c, 2);
+    Save(0xf001f0, 4);
+    Write(0xf10118, {0xff,0xff}, 4, true);
+    Write(0xf1011c, Encode((0x479f & 0xfa1f) | 0x580, 2), 4, true);
+    Write(0xf001f0, Encode(0x1a000000), 4, true);
+}
+
+void SourceFirmware::PrepareDirectI2c()
+{
+    const auto save = [this](uint32_t address, unsigned width = 4) {
+        i2c_saved_.push_back({address, Read(address, width)});
+        return Be(i2c_saved_.back().bytes.data(), width);
+    };
+    const auto memory = save(0xfd0090, 2);
+    SetDirectReg(0xfd0090, memory | 2, 2);
+    const auto start = io_.now_ms(io_.opaque);
+    while (DirectReg(0xfd0090, 2) & 0x10)
+        if (io_.now_ms(io_.opaque) - start >= 2000)
+            throw -ETIMEDOUT;
+    SetDirectReg(0xfd0090, (DirectReg(0xfd0090, 2) & ~2u) | 1u, 2);
+
+    // 主CPUからI2Cを使う場合も、チップ側のクロックと停止状態を確認する。
+    const auto power = Get(0x01600000), reset = Get(0x01600004), clock = Get(0x01600404);
+    if (power != 0x000200ff || reset != 0x01000000 ||
+        ((DirectReg(0xf10004, 2) >> 10) & 3) != 2)
+        throw -EPROTO;
+    board_saved_ = {{0x01600404, Encode(clock)}, {0x01600000, Encode(power)}, {0x01600004, Encode(reset)}};
+    Checked(0x01600404, clock | 0x40000);
+    Put(0x01600004, 0xffffffff);
+    Put(0x01600000, 0xffffffff);
+    Put(0x01600004, 0x00800000);
+    if (Get(0x01600004) != 0x00800000 || !(Get(0x01600000) & 0x20000))
+        throw -EIO;
+
+    // USBクロックの既存ビットを維持し、I2Cブロックだけを有効にする。
+    SetDirectReg(0xf10014, 0xd082, 2);
+    SetDirectReg(0xf1001c, (save(0xf1001c, 2) & ~0x5080u) | 2, 2);
+    SetDirectReg(0xf10114, save(0xf10114) | 0x00200000);
+    SetDirectReg(0xfd8010, save(0xfd8010) | 0x10);
+    SetDirectReg(0xfd8014, save(0xfd8014) & ~0x10u);
+    SetDirectReg(0xfd80b0, save(0xfd80b0) | 1);
+    for (const auto &reg : {Register{0xfd80c0,4,0}, Register{0xfd8ff8,4,6},
+                            Register{0xfd8ff4,4,0x10}, Register{0xfd8fe8,4,0x3c},
+                            Register{0xfd8fe4,4,0x42}}) {
+        save(reg.address);
+        SetDirectReg(reg.address, reg.value);
+    }
+    if ((DirectReg(0xfd8fe4) & ~1u) != 0x42 ||
+        DirectReg(0xfd8ff8) != 6 || DirectReg(0xfd8ff4) != 0x10)
+        throw -EIO;
+}
+
+void SourceFirmware::SetEndpoint(uint32_t group, uint32_t address, uint32_t value)
+{
+    try {
+        SetDirectReg(Protect, group);
+        SetDirectReg(address, value);
+    } catch (...) {
+        SetDirectReg(Protect, 15);
+        throw;
+    }
+    SetDirectReg(Protect, 15);
+}
+
+void SourceFirmware::StartEndpoint()
+{
+    if (DirectReg(Protect) != 15)
+        throw -EPROTO;
+    endpoint_mode_ = DirectReg(0xfdbc04);
+    endpoint_enable_ = DirectReg(EndpointControl);
+    endpoint_buffer_ = DirectReg(EndpointBuffer);
+    endpoint_saved_ = true;
+    SetEndpoint(1, 0xfdbc04, 0x85000000);
+    SetEndpoint(8, EndpointBuffer, 1);
+    SetEndpoint(6, EndpointBuffer, 0x00ff6000);
+    SetEndpoint(6, EndpointBuffer, DirectReg(EndpointBuffer));
+    const auto enable = endpoint_enable_ & 0xfffdfffdu;
+    SetEndpoint(2, EndpointControl, enable);
+    SetEndpoint(8, EndpointControl, enable);
+}
+
+void SourceFirmware::StopEndpoint()
+{
+    if (!endpoint_saved_)
+        return;
+    SetEndpoint(8, EndpointBuffer, 1);
+    SetEndpoint(6, EndpointBuffer, endpoint_buffer_);
+    SetEndpoint(2, EndpointControl, endpoint_enable_);
+    SetEndpoint(8, EndpointControl, endpoint_enable_);
+    SetEndpoint(1, 0xfdbc04, endpoint_mode_);
+    if (DirectReg(Protect) != 15)
+        throw -EIO;
+    endpoint_saved_ = false;
+}
+
 int SourceFirmware::Start(dt295_io io)
 {
     io_ = io;
@@ -297,12 +477,13 @@ int SourceFirmware::Start(dt295_io io)
         if (Read(0x82008, 2) != Bytes(2))
             throw -EPROTO;
         boot_ = Read(Boot, BootSize);
-        if (Digest(boot_) != BootDigest || MappedRead(Cluster, 8) != Bytes{0,2,0,0xff,0x0d,0x8f,0x7f,0xf3} ||
-            Get(Vector) || Read(0xf10014, 2) != Bytes(2) || Read(0xf10018, 2) != Bytes(2) ||
+        if (Digest(boot_) != BootDigest || (!direct_ &&
+            (MappedRead(Cluster, 8) != Bytes{0,2,0,0xff,0x0d,0x8f,0x7f,0xf3} || Get(Vector))) || Read(0xf10014, 2) != Bytes(2) || Read(0xf10018, 2) != Bytes(2) ||
             Read(0xf10118, 2) != Bytes{0x90,0} || Read(0xf1011c, 2) != Bytes{0x47,0x9f} ||
             Read(0xf001f0, 4) != Bytes(4))
             throw -EPROTO;
-        aux_ram_ = MappedRead(AuxRam, 0x4000);
+        if (!direct_)
+            aux_ram_ = MappedRead(AuxRam, 0x4000);
         Save(Stage, 64); // BCブロック書込みの作業領域は最後に復元する。
         Save(0xf10014, 2);
         Save(0xf10018, 2);
@@ -312,72 +493,58 @@ int SourceFirmware::Start(dt295_io io)
         Delay(20);
         Write(0xf10018, {0,2}, 4, true);
         Delay(5);
-        stage = "PAF1 start";
-        aux_changed_ = true;
-        MappedWrite(AuxRam, auxiliary_);
-        if (MappedRead(AuxRam, auxiliary_.size()) != auxiliary_)
-            throw -EIO;
-        MappedWrite(Mail, Bytes(64));
-        Put(Vector, 0xa0000);
-        const auto vector = Get(Vector);
-        if (vector != 0 && vector != 0xa0000)
-            throw -EIO;
-        aux_started_ = true;
-        Put(Cluster + 4, 0xffffffff);
-        Put(Cluster, 0xffffffff);
-        Put(Cluster + 4, 0x00800000);
-        Put(Cluster + 4, 0);
-        Put(Cluster, 0xfffcffff);
-        uint32_t heartbeat = 0;
-        bool seen = false, running = false;
-        const auto started = io_.now_ms(io_.opaque);
-        do {
-            const auto mail = Mailbox();
-            if (Be(mail.data()) == 0x50414631 && Be(&mail[4]) == 1) {
-                const auto tick = Be(&mail[8]);
-                if (seen && tick != heartbeat) {
-                    running = true;
-                    break;
+        if (direct_) {
+            stage = "main CPU I2C setup";
+            EnableTsSystem();
+            PrepareDirectI2c();
+            stage = "direct PIF1 install";
+            InstallPif();
+        } else {
+            stage = "PAF1 start";
+            aux_changed_ = true;
+            MappedWrite(AuxRam, auxiliary_);
+            if (MappedRead(AuxRam, auxiliary_.size()) != auxiliary_)
+                throw -EIO;
+            MappedWrite(Mail, Bytes(64));
+            Put(Vector, 0xa0000);
+            const auto vector = Get(Vector);
+            if (vector != 0 && vector != 0xa0000)
+                throw -EIO;
+            aux_started_ = true;
+            Put(Cluster + 4, 0xffffffff);
+            Put(Cluster, 0xffffffff);
+            Put(Cluster + 4, 0x00800000);
+            Put(Cluster + 4, 0);
+            Put(Cluster, 0xfffcffff);
+            uint32_t heartbeat = 0;
+            bool seen = false, running = false;
+            const auto started = io_.now_ms(io_.opaque);
+            do {
+                const auto mail = Mailbox();
+                if (Be(mail.data()) == 0x50414631 && Be(&mail[4]) == 1) {
+                    const auto tick = Be(&mail[8]);
+                    if (seen && tick != heartbeat) {
+                        running = true;
+                        break;
+                    }
+                    heartbeat = tick;
+                    seen = true;
                 }
-                heartbeat = tick;
-                seen = true;
-            }
-            Delay(10);
-        } while (io_.now_ms(io_.opaque) - started < 3000);
-        if (!running)
-            throw -ETIMEDOUT;
+                Delay(10);
+            } while (io_.now_ms(io_.opaque) - started < 3000);
+            if (!running)
+                throw -ETIMEDOUT;
 
-        stage = "frontend initialization";
-        for (size_t i = 0; i < init_.size();) {
-            const auto op = init_[i++], n = init_[i++];
-            const auto data = init_.data() + i;
-            if (op == 255)
-                Delay(data[0]);
-            else if (op == 128)
-                Field(data[1], data[2], data[3]);
-            else
-                I2c(op == 2 ? Sat : Gr, data, n, 0);
-            i += n;
         }
-
-        stage = "PIF1 install";
-        Save(Resident, resident_.size());
-        Save(Adapter, adapter_.size());
-        Save(Hook, hook_.size());
-        Write(Resident, resident_, 4, true);
-        Write(Adapter, adapter_, 4, true);
-        Write(Hook, hook_, 8, true);
-        const auto caps = Exchange(1);
-        if (Be(&caps[24]) || Be(&caps[28]) != 40 || Be(&caps[32]) != 40 || Be(&caps[36]) != 0x06b8103b)
-            throw -EPROTO;
-        Exchange(2);
+        stage = "frontend initialization";
+        InitializeFrontend();
+        if (!direct_) {
+            stage = "PIF1 install";
+            InstallPif();
+        }
         stage = "TS engine snapshot";
-        Save(0xf10118, 2);
-        Save(0xf1011c, 2);
-        Save(0xf001f0, 4);
-        Write(0xf10118, {0xff,0xff}, 4, true);
-        Write(0xf1011c, Encode((0x479f & 0xfa1f) | 0x580, 2), 4, true);
-        Write(0xf001f0, Encode(0x1a000000), 4, true);
+        if (!direct_)
+            EnableTsSystem();
         if (Get(Run))
             throw -EBUSY;
         clock_ = Get(Clock);
@@ -389,7 +556,7 @@ int SourceFirmware::Start(dt295_io io)
         for (const auto &reg : Registers)
             ts_saved_.push_back({reg.address, Encode(Get(reg.address, reg.width), reg.width)});
         ready_ = true;
-        msg_info("PIX-DT295 source-fr: PAF1/PIF1 ready\n");
+        msg_info("PIX-DT295: %s ready\n", direct_ ? "direct-fr PIF1" : "source-fr PAF1/PIF1");
         return 0;
     } catch (int error) {
         return Failure(stage, error);
@@ -598,11 +765,12 @@ int SourceFirmware::Capture(bool enable)
     try {
         if (!enable) {
             StopRing();
+            StopEndpoint();
             return 0;
         }
         if (!ready_ || !tuned_ || ring_running_)
             return -EINVAL;
-        const int rc = mb86H_stream_input_init(&input_, MB86H_STREAM_FORMAT_RAW_TS, 0, MB86H_TS_RECORD_BYTES);
+        const int rc = mb86H_stream_input_init(&input_, MB86H_STREAM_FORMAT_RAW_TS, 0, direct_ ? MB86H_TS_PACKET_SIZE : MB86H_TS_RECORD_BYTES);
         if (rc)
             return rc;
 
@@ -619,6 +787,9 @@ int SourceFirmware::Capture(bool enable)
         Put(0x01901040, 0x03000000);
         Put(0x019010a4, 0x13170400);
         cursor_ = 0;
+        stream_phase_ = 0xffffffff;
+        if (direct_)
+            StartEndpoint();
         ring_running_ = true;
         Put(Run, 0x02000000);
         return 0;
@@ -632,11 +803,40 @@ int SourceFirmware::Capture(bool enable)
 int SourceFirmware::Service()
 {
     try {
-        constexpr unsigned budget = 256;
-        const auto reply = Exchange(4, cursor_, budget);
+        const unsigned budget = direct_ ? 512 : 256;
+        auto payload = Encode(cursor_);
+        const auto amount = Encode(budget);
+        payload.insert(payload.end(), amount.begin(), amount.end());
+        if (direct_) {
+            const auto phase = Encode(stream_phase_);
+            payload.insert(payload.end(), phase.begin(), phase.end());
+        }
+        const auto reply = Exchange(4, payload);
         const auto next = Be(&reply[24]), count = Be(&reply[28]), result = Be(&reply[40]);
-        if (result || count > budget || next != (cursor_ + count * 512) % RingSize)
+        if (result || count > budget || next >= RingSize) {
+            msg_err("PIX-DT295: PIF1 pump result=%u cursor=%u sent=%u producer=%u FIFO=%08x\n",
+                    result, next, count, Be(&reply[32]), Be(&reply[36]));
             return Failure("PIF1 Bulk pump response", -EPROTO);
+        }
+        if (direct_) {
+            const auto state = Be(&reply[44]);
+            if (state == 0xffffffff) {
+                if (stream_phase_ != state || count || next)
+                    return -EPROTO;
+            } else {
+                const auto offset = state >> 8;
+                const auto phase = state & 255;
+                const bool initial = stream_phase_ == 0xffffffff;
+                const auto consumed = (initial ? 0 : stream_phase_ & 255) + count * 512;
+                const auto raw = (initial ? offset : cursor_) + count * 512 + 4 * (consumed / 188);
+                if (offset >= 192 || (!initial && offset != (stream_phase_ >> 8)) ||
+                    phase != consumed % 188 || next != raw % RingSize)
+                    return -EPROTO;
+            }
+            stream_phase_ = state;
+        } else if (next != (cursor_ + count * 512) % RingSize) {
+            return -EPROTO;
+        }
         cursor_ = next;
         return 0;
     } catch (int error) {
@@ -664,6 +864,7 @@ void SourceFirmware::StopRing()
 void SourceFirmware::Restore()
 {
     StopRing();
+    StopEndpoint();
     if (ts_changed_) {
         for (auto i = ts_saved_.rbegin(); i != ts_saved_.rend(); ++i)
             MappedWrite(i->address, i->bytes);
@@ -708,6 +909,10 @@ void SourceFirmware::Restore()
             Read(0xf10114, 2) != Bytes{0x80,0} || Read(0xf1010c, 2) != Bytes{0,1})
             throw -EIO;
     }
+    for (auto i = i2c_saved_.rbegin(); i != i2c_saved_.rend(); ++i)
+        Write(i->address, i->bytes, 4, false);
+    for (auto i = board_saved_.rbegin(); i != board_saved_.rend(); ++i)
+        MappedWrite(i->address, i->bytes);
     // フックを先に戻し、参照先の常駐コードを後から戻す。
     for (auto i = direct_saved_.rbegin(); i != direct_saved_.rend(); ++i)
         Write(i->address, i->bytes, i->address == Hook || i->address == Stage ? i->bytes.size() : 4, true);
@@ -725,9 +930,14 @@ int SourceFirmware::Close()
         Restore();
         direct_saved_.clear();
         ts_saved_.clear();
+        i2c_saved_.clear();
+        board_saved_.clear();
         aux_changed_ = aux_started_ = clock_changed_ = ts_changed_ = false;
         ready_ = satellite_ = tuned_ = false;
-        msg_info("PIX-DT295 source-fr: boot RAM, auxiliary and TS ring restoration verified\n");
+        if (direct_)
+            msg_info("PIX-DT295 direct-fr: boot RAM and TS ring restoration verified\n");
+        else
+            msg_info("PIX-DT295 source-fr: boot RAM, auxiliary and TS ring restoration verified\n");
         return 0;
     } catch (int error) {
         return Failure("restore; USB power cycle required", error);

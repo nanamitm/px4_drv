@@ -56,9 +56,9 @@ struct Read {
     HANDLE file;WINUSB_INTERFACE_HANDLE usb;
     Event event;
     OVERLAPPED operation{};
-    std::array<uint8_t,16384> bytes{};
+    std::vector<uint8_t> bytes;
     bool pending=false;
-    Read(HANDLE f,WINUSB_INTERFACE_HANDLE u):file(f),usb(u){operation.hEvent=event.value;}
+    Read(HANDLE f,WINUSB_INTERFACE_HANDLE u,size_t size):file(f),usb(u),bytes(size){operation.hEvent=event.value;}
     ~Read(){if(pending){CancelIoEx(file,&operation);ULONG n=0;WinUsb_GetOverlappedResult(usb,&operation,&n,TRUE);}}
     DWORD Submit(){
         if(!event.value)return ERROR_NOT_ENOUGH_MEMORY;
@@ -126,7 +126,7 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         if(!open_ || !parent_.available_ || failed_ || worker_error_)return -ECANCELED;
         if(!tuned_)return 0;
-        // CNの読み出しは補助CPU経由のI²CでSERVICEを待たせる。失敗後は応答が残る可能性があるため、
+        // CNの読み出しはI²Cの制御転送でSERVICEを待たせる。失敗後は応答が残る可能性があるため、
         // 受信を止めずに次の選局まで読み出しを止め、TS配信を統計取得より優先する。
         if(cn_failed_)return -EIO;
         bool satellite=false;uint32_t raw=0;
@@ -155,7 +155,7 @@ protected:
             // 復元前像は最初の書換え前に保存し、途中失敗やプロセス異常終了後の調査に残す。
             transport_.SetSnapshotPath(px4::util::path::GetDir()+L"mAgicVISION-preimage-"+
                 std::to_wstring(GetCurrentProcessId())+L"-"+std::to_wstring(GetTickCount64())+L".bin");
-            msg_info("DT295: initializing backend=%s\n",source_?"source-fr":parent_.torne_?"torne-resident":"magicvision");
+            msg_info("DT295: initializing backend=%s\n",source_?(source_->Direct()?"direct-fr":"source-fr"):parent_.torne_?"torne-resident":"magicvision");
             transport_.Begin(parent_.torne_?180000:120000);const int initialized=source_?source_->Start(transport_.Callbacks()):dt295_start(runtime_);
             transport_.ReportTiming("initialize");
             if(initialized){
@@ -163,7 +163,7 @@ protected:
                 failed_=true;return initialized;
             }
             initialized_=true;
-            msg_info("DT295: initialized backend=%s\n",source_?"source-fr":parent_.torne_?"torne-resident":"magicvision");
+            msg_info("DT295: initialized backend=%s\n",source_?(source_->Direct()?"direct-fr":"source-fr"):parent_.torne_?"torne-resident":"magicvision");
         }
         int rc=StopReader();tuned_=false;
         if(rc){failed_=true;return rc;}
@@ -293,8 +293,12 @@ private:
         uint64_t input_bytes=0,max_read_gap_us=0;
         try {
             auto quality=std::make_unique<px4::TsContinuityMonitor>();
-            std::array<std::unique_ptr<Read>,4> reads;
-            for(auto &read:reads){read=std::make_unique<Read>(parent_.usb_dev_.dev,parent_.usb_dev_.winusb);if(auto error=read->Submit()){worker_error_=-EIO;break;}}
+            const bool direct=source_ && source_->Direct();
+            std::vector<std::unique_ptr<Read>> reads(direct?64:4);
+            for(auto &read:reads){
+                read=std::make_unique<Read>(parent_.usb_dev_.dev,parent_.usb_dev_.winusb,direct?8192:16384);
+                if(auto error=read->Submit()){worker_error_=-EIO;break;}
+            }
             {std::lock_guard<std::mutex> state(state_mutex_);armed_=!worker_error_;}changed_.notify_all();
             size_t head=0;auto last=Clock::now();auto warning=last;auto previous_read=last;
             std::vector<uint8_t> output;output.reserve(32768);
@@ -417,7 +421,7 @@ int Device::Init(){
     const auto backend=device_def_.configs.Get(L"FirmwareBackend",L"magicvision");
     std::vector<uint8_t> firmware;
     std::unique_ptr<SourceFirmware> source;
-    if(backend==L"source-fr" && pix){
+    if((backend==L"source-fr" || backend==L"direct-fr") && pix){
         auto path=device_def_.configs.Get(L"SourceFirmwarePath",L"");
         const auto digest=device_def_.configs.Get(L"SourceFirmwareSha256",L"");
         if(path.empty() || digest.size()!=64)return -EINVAL;
@@ -425,7 +429,7 @@ int Device::Init(){
         // DTP2の初期化列はmAgicVISION 0.1.0から組み立てるため、同じFirmwarePathを参照する。
         auto reference=device_def_.configs.Get(L"FirmwarePath",L"firmware\\magicvision-dt295.bin");
         if(!std::filesystem::path(reference).is_absolute())reference=px4::util::path::GetDir()+reference;
-        source=std::make_unique<SourceFirmware>();
+        source=std::make_unique<SourceFirmware>(backend==L"direct-fr");
         const int rc=source->Load(path,digest,reference);
         if(rc)return rc;
     }else if(backend==L"magicvision"){
