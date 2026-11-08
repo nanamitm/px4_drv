@@ -107,6 +107,121 @@ firmware が誤り訂正できなかったパケットを TS から除いた可�
 隣り合う転送の `last` と `first` の CC、`seq` と `slot` の並び、`completed_at` の間隔から、
 転送単位の欠落、入替え、転送内の欠落を区別します。出力は1秒あたり64件までで、省略数は次の行の `skipped` に残ります。
 
+## J.83B の受信（実験的）
+
+PX-S1UD のチューナーは、スカパー！プレミアムサービス光の J.83 Annex B（256QAM、5.6 Msps）の
+周波数帯も受信できます。復調前の IQ（12 MS/s）を USB で送出する J.83B 用の firmware を読み込むと、
+ホスト側で復調して TS を得られます。J.83B 用の firmware は Siano の通常の firmware とは別のファイルで、
+出所と再配布の条件を確認できていないため配布物に含まれず、利用者が用意したファイルを指定します。
+
+### 構成
+
+DriverHost は USB を持ち続け、J.83B の選局で次の順に処理します。
+
+1. J.83B 用の firmware を読み込みます。ISDB-T の選局へ戻るときは、通常の firmware を読み込み直します。
+2. IQ の送出を開始する要求（`0x037A`）を、中心周波数（Hz）を引数として送ります。この要求が選局を兼ね、
+   ISDB-T の選局要求は送りません。引数0で送出を止めます。
+3. IQ のブロック（`0x037C`、7,360 サンプルとブロック番号）を、helper の標準入力へ渡します。
+4. helper の TS を、ISDB-T と同じ配信バッファへ書きます。
+
+復調と誤り訂正は、MSi2500 と同じ `msi2500_frontend.exe` の `serve-s1ud` が行います。
+DSP を別プロセスに置く理由は MSi2500 と同じで、ライセンスと障害の分離のためです。
+helper はブロックの間で落ちる 4〜7 サンプルの長さを判定して時間軸を作り直し、
+I と Q の利得のずれを補正してから J.83B を復調します（`tools/msi2500_frontend/src/s1ud.rs`）。
+
+firmware の切り替えでは、SW_RELOAD_START を送った後の状態を GET_VERSION で確かめます。
+実機では、通常の firmware は読み込みを待つ状態になり、J.83B 用の firmware は ROM のブートローダー
+（モード255）へ戻ることがありました。後者では bulk IN の受信が一度 ERROR_GEN_FAILURE で失敗するため、
+読み込み直しの間だけ IN パイプをリセットして受信要求を出し直し、ROM へ戻っていればコールド起動の手順で書きます。
+J.83B 用の firmware は INIT_DEVICE の後も独自のモード（実機では7）を返すため、起動後のモードは確かめません。
+J.83B 用の firmware が稼働したままの機器を開いた場合は、通常の firmware を読み込み直してから ISDB-T として使います。
+
+helper の TS が3秒以内に届いていればロックとみなします。CNR の値は、MSi2500 と同じく
+RS 復号の成功割合から求めた 0〜100 の品質点で、校正した C/N ではありません。
+firmware の受信統計は ISDB-T のもののため、J.83B では使いません。
+
+チップは IQ を USB へ送り切れずにブロックを落とすことがあり、BonDriver_S1UD.dll でも約2%でした。
+helper はブロック番号の欠落を検出し、8ブロック以下ならつないで復調を続け、それを超えると作り直します。
+作り直した区間では TS が途切れ、continuity counter の不連続として現れます。
+DriverHost と helper の間のキューがあふれた場合も、捨てたブロックは同じく欠落として扱われます。
+
+### 設定
+
+`DriverHost_PX4.ini` の `[DeviceDefinition18.Config]` に J.83B 用の firmware と helper を指定し、
+`[DeviceDefinition18.Receiver0]` の `System` を `"ISDB-T,J.83B"` にします。
+相対パスは `DriverHost_PX4.exe` の配置先が基準です。helper は MSi2500 の配布物の
+`msi2500` フォルダーにあり、PX-S1UD の配布物には含まれていません。
+
+```ini
+[DeviceDefinition18.Config]
+FirmwarePath="firmware\isdbt_rio.inp"
+J83BFirmwarePath="firmware\s1ud_j83b.inp"
+HelperPath="msi2500\msi2500_frontend.exe"
+```
+
+`BonDriver_PX-S1UD.ini` では、`[BonDriver]` と `[ReceiverDefinition0]` の `System` を
+`"ISDB-T,J.83B"` にし、`[BonDriver.J.83B]` の `ChSetPath` に `BonDriver_PX4-J83B.ChSet.txt` を指定します。
+`System` に J.83B を書いて `J83BFirmwarePath` を指定しない場合、DriverHost は機器を登録しません。
+
+helper の標準エラー出力は、`DriverHost_PX4.exe` の配置先の `px-s1ud_j83b-<機器番号>.log` に残ります。
+終了時の行の `queue_dropped_blocks` は DriverHost と helper の間で捨てたブロック数、
+`gaps` はチップとキューで落ちたブロック数、`seg` は作り直した回数に1を加えた値です。
+
+### 処理量
+
+138.750 MHz の収録（29秒）で測った helper の前処理と復調は、Ryzen 9 5900X の1スレッドで
+x64 が実時間の約0.64倍、x86 が約0.68倍でした。誤り訂正は別スレッドで約0.45倍（x64）です。
+遅い CPU では実時間に間に合わない可能性があります。
+
+### 検証範囲
+
+Windows 上の PX-S1UD 1台で、138.750 MHz（スカパー！プレミアムサービス光）を `siano_live_test` の
+J.83B モードで受信しました。DriverHost と同じ受信バックエンドを直接呼び出す試験で、
+各回とも開始時に J.83B 用の firmware から通常の firmware へ戻し、選局で J.83B 用の firmware へ切り替えています。
+
+| 項目 | x64 30分 | x64 60秒 | x86 60秒 |
+| --- | --- | --- | --- |
+| 受信パケット | 48,073,646 | 1,636,079 | 1,629,619 |
+| ロック外れ（1秒ごとの確認） | 0 | 0 | 0 |
+| 同期／TEI／形式エラー、書込み拒否 | すべて0 | すべて0 | すべて0 |
+| 連続性エラー | 3,655 | 43 | 88 |
+| MER | 31.9 dB | 31.7 dB | 31.7 dB |
+| チップが落としたブロック | 3,196（0.11%） | 2 | 148 |
+| 復調の作り直し | 222 | 0 | 4 |
+| DriverHost と helper の間で捨てたブロック | 0 | 0 | 0 |
+| RS 復号の訂正不能 | 26,681／84,697,241 | 293／2,882,178 | 344／2,871,004 |
+
+連続性エラーの大半は、helper が欠落をつなげずに復調を作り直した区間で生じています。
+30分の試験では作り直しが約8秒に1回あり、そのたびに TS が途切れました。
+
+ブロックの欠落はチップの中で起きています。IQ の送出を止める要求の応答には firmware が数えたバッファーの統計が入り
+（BonDriver_S1UD.dll のログの書式に合わせると、溜めた数、送った数、捨てた数など）、3分の試験で捨てた数295は
+ブロック番号から数えた欠落と一致しました。ブロック番号は捨てた分も進むため、溜めた後、USB へ送る前に捨てられています。
+その間もホストの受信要求は32本中8本以上が残っており、受信要求を128本に増やしても欠落は減りませんでした。
+DriverHost は IQ の送出を止めるときに、この統計とホストの受信要求の余裕をログへ記録します。
+
+欠落は約5ミリ秒の間に「1ブロック届いて2〜7ブロック落ちる」が数回続く形で起きます。helper は1回ごとの欠落を
+つなごうとしますが、次の理由で固まりの途中で判定に失敗します。
+
+- 15サンプル（7シンボル）の整数倍のずれは判定誤差に現れないため、4ブロック以上の欠落では候補が一つに定まりません。
+- 長い区間を埋める間に搬送波の位相とタイミングがずれ、正しい候補の判定誤差も他と区別できなくなります。
+
+再同期の短縮と判定の改善は今後の課題です。
+
+収録データでの確認として、BonDriver_S1UD.dll 経由で収録した USB データを実時間の速度で `serve-s1ud` へ渡し、
+キューの欠落なく 771,742 パケットを復号しました。同じデータを DriverHost の helper 制御部
+（`siano/iq_helper.cpp`）経由で渡し、同じ TS が戻ることも確認しました。
+`siano_frontend_test` では、firmware の切り替え（ROM へ戻る場合を含む）、IQ の送出要求の形式を模擬試験しています。
+
+BonDriver 経由の視聴と録画、138.750 MHz 以外のチャンネル、選局を続けたまま ISDB-T と J.83B を
+交互に切り替える試験は、まだ確認していません。
+実機試験は `siano_live_test` の J.83B モードで行えます。INI の `[PX-S1UD]` 節に
+`J83BFirmwarePath` と `HelperPath` を書き、中心周波数を kHz で指定します。
+
+```powershell
+build/x64/Release-static/siano_live_test.exe j83b:138750 3600 build/s1ud-j83b-138750.ts build/s1ud-j83b.ini
+```
+
 ## 実装と検証範囲
 
 Siano 制御は [siano-userland](https://github.com/Khronos31/siano-userland/tree/2f32c2a34665d6ccca39c9362eb786be78351347)
