@@ -21,7 +21,7 @@ BonDriver / DriverHost
 
 現時点で実装されているのは、整列した64-byteパケットを受け取るプロトコルコア、既存USBブート処理からコアへ接続する診断用アダプター、ホスト用のパケットコーデックです。コアは能力照会と疎通確認に応答し、I²C要求にはNOT_READYを返します。能力ビットは0で、I²C/TSを利用可能とは通知しません。機器レジスターや任意メモリーを読み書きするコマンドはありません。
 
-DT295向けUSBアダプターは実機でCAPS/PINGと復元を確認済みです。`build.py --bulk` の出力と補助CPU版から作るDTP2バンドルは `pkg/DriverHost_PX4/firmware/dt295-source-fr.bin` に収録し、配布物に同梱しています。配布設定の既定の方式で、DriverHostの `FirmwareBackend=source-fr` に対応します。選局・TS受信・CNRの実機検証とバンドルの再生成手順は [PIX-DT295の説明](../../docs/pix-dt295.md) にあります。
+DT295向けUSBアダプターは実機でCAPS/PINGと復元を確認済みです。`build.py --bulk` の出力と補助CPU版から作るDTP2バンドルは `pkg/DriverHost_PX4/firmware/dt295-source-fr.bin` に収録し、配布物に同梱しています。DriverHostの `FirmwareBackend=source-fr` に対応します。`build.py --direct-usb` の出力から作る主CPU版のDTP3バンドルは `pkg/DriverHost_PX4/firmware/dt295-direct-fr.bin` に収録し、配布設定の既定の `FirmwareBackend=direct-fr` に対応します。選局・TS受信・CNRの実機検証とバンドルの再生成手順は [PIX-DT295の説明](../../docs/pix-dt295.md) にあります。
 
 I²CのC状態機械と、補助CPUのC診断プログラムを追加しています。既定のPAF1はDT295 Rev.01の補助CPUで実行し、物理I²C制御器の状態レジスターを読めます。I²C転送の状態機械への接続は残っています。ビルド・実機診断・ABIは [auxiliary-design.md](auxiliary-design.md) にあります。torne用の別ビルドPAF2では、ソース生成FRイメージを実機で動かし、HAL経由のID読み取りと100組の反復一致、選局・80秒のTS受信、core1 RAMの復元・既存経路への復帰を確認しています。時計は診断用のホスト供給方式です。詳細は [torne-fr-i2c.md](torne-fr-i2c.md) にあります。
 
