@@ -89,31 +89,47 @@ torneで確認できるのはこの共通経路とtorne用プロファイルで�
 
 ## ソースからビルドするファームウェアの開発
 
-I²Cパススルーを機器側、初期化・選局をホスト側へ置く構成の実験実装は [`experimental/dt295-firmware`](../experimental/dt295-firmware/README.md) にあります。現段階は独立したFRプロトコルコアと診断用ブートアダプターのビルド・命令モデル検証で、ロード/復元、実機でのUSB接続、物理I²C、TSの実装・検証は残っています。通常の配布物や機器定義には接続されていないため、本ページのSBC2方式と置き換えて使える段階ではありません。
+I²Cパススルーを機器側、初期化・選局をホスト側へ置く構成の実装は [`experimental/dt295-firmware`](../experimental/dt295-firmware/README.md) にあります。ソースから生成したバンドル `dt295-source-fr.bin` は、配布物の各 `firmware` フォルダーに同梱されています。既定の方式はmAgicVISIONのままで、ソース生成版は設定の切り替えで使います。対象は既知のブートRAMを持つPIX-DT295 Rev.01です。
 
-### ソース生成版をBonDriverで試す
+### ソース生成版を使う
 
-対象は既知のブートRAMを持つPIX-DT295 Rev.01です。`build.py --bulk` と `build_auxiliary.py` の出力、および衛星初期化を含む地デジ・衛星JSONLから、DriverHost用のバンドルを生成します。生成器が表示するSHA-256を設定に使います。
-
-```powershell
-python winusb/experimental/dt295-firmware/build_host_bundle.py $auxiliaryBuild $bulkBuild $initTrace dt295-source-fr.bin
-```
-
-バンドルをDriverHostの `firmware` フォルダーに置き、既存のPIX-DT295定義を次のように設定します。`SourceFirmwareSha256` は生成器の出力に置き換えます。
+`DriverHost_PX4.ini` の `[DeviceDefinition19.Config]` で `Experimental=true` と `FirmwareBackend=source-fr` を指定します。`SourceFirmwarePath` と `SourceFirmwareSha256` は同梱のバンドルに合わせて設定済みです。
 
 ```ini
 [DeviceDefinition19.Config]
 Experimental=true
+FirmwarePath="firmware\magicvision-dt295.bin"
 FirmwareBackend=source-fr
 SourceFirmwarePath="firmware\dt295-source-fr.bin"
-SourceFirmwareSha256="<64桁のSHA-256>"
+SourceFirmwareSha256="<同梱の値>"
 ```
 
-`BonDriver_DT295.ini` の `[BonDriver]` に `TuneTimeout=150000` を指定し、試験用DriverHostの `[DriverHost_PX4]` には `PipeTimeout=240000` を指定します。初回選局にはRAM前像の退避、Closeには復元が含まれます。ソース生成版は冷間状態から起動するため、別ファームウェアがRAMに残っている場合は対象機のUSBを抜き差ししてから試します。BS/CSは外部給電環境で `LNBPower=0` を指定します。
+同梱のバンドルはDTP2形式で、復調器・RF初期化列を含みません。初期化列のレジスター値は公式ファームウェア由来のテーブルと一致するため、リポジトリと配布物のバンドルには収録せず、DriverHostがバンドルの読み込み時に `FirmwarePath` のmAgicVISION 0.1.0から組み立てます。SHA-256を照合し、0.1.0以外のファイルは受け付けません。組み立てる列は、常駐コードの初期化スクリプト134レコードに、地デジ初期化末尾の3レジスターの書き直しと先頭の待機を加えたもので、実機で検証した初期化列とバイト単位で一致します。このため、ソース生成版でも `magicvision-dt295.bin` が必要です。
+
+ソース生成版は冷間状態から起動するため、別ファームウェアがRAMに残っている場合は対象機のUSBを抜き差ししてから試します。BS/CSは外部給電環境で `LNBPower=0` を指定します。2026-11-08のWindows x64の試験では、初期化が約2.2秒、終了時の復元が約2.5秒で、`TuneTimeout` と `PipeTimeout` の既定値のまま選局と終了が完了しました。
+
+### バンドルの再生成
+
+同梱のバンドルはFR30向けのGNU Binutils 2.43.1とGCC 14.2.0で生成し、各ソースのSHA-256を含むmanifestを `pkg/DriverHost_PX4/firmware/dt295-source-fr.json` に記録しています。Windowsの通常ビルドにFR30のツールは不要で、`tools/check_dt295_source_firmware.py` がバンドル・manifest・現在のソースの一致を確認します。`experimental/dt295-firmware` のソースを変更するとこの確認が失敗するため、次の手順でバンドルと記録を作り直し、`DriverHost_PX4.ini` の `SourceFirmwareSha256` を出力の値へ更新します。ツールの指定方法は [README](../experimental/dt295-firmware/README.md) を参照してください。
+
+```sh
+cd winusb/experimental/dt295-firmware
+python3 build.py --bulk --out build/bulk
+python3 build_auxiliary.py --out build/auxiliary
+python3 build_host_bundle.py build/auxiliary build/bulk ../../pkg/DriverHost_PX4/firmware/dt295-source-fr.bin \
+  --runtime-init --provenance ../../pkg/DriverHost_PX4/firmware/dt295-source-fr.json
+```
+
+診断ツールや初期化列を含むDTP1を使う場合は、`extract_init_trace.py` で同梱のmAgicVISION 0.1.0からJSONLを生成します。`tests/test_init_trace.py` はPython版、`tests/dt295_frontend_init_test` はDriverHostのC++版の出力が、検証済みの列とSHA-256で一致することを確認します。
+
+```powershell
+python winusb/experimental/dt295-firmware/extract_init_trace.py winusb/pkg/DriverHost_PX4/firmware/magicvision-dt295.bin $initTrace
+python winusb/experimental/dt295-firmware/build_host_bundle.py $auxiliaryBuild $bulkBuild $initTrace dt295-source-fr-dtp1.bin
+```
 
 BonDriverの選局・TS配信は既存のIPCを使います。衛星選局時には明示TSIDが必要です。`CheckLock` は選局完了時の検証結果を返します。RF状態の継続監視、内蔵B-CAS、アンテナ給電はこの経路の対象外です。CloseはTSエンジンを停止してからリング、RAM、システム設定を復元します。復元が完了しなかった場合はログに記録され、USBの電源再投入が必要です。
 
-Windows x64の隔離環境では、同じBonDriverのOpen中にGR13 → BS01 → CS02 → GR13を各6秒受信し、保存TSのPATでTSID 31761 → 16400 → 24608 → 31761を確認しました。各保存TSの同期・TEI・CC・形式異常は0件でした。DriverHostの一部の区間では192-byte入力の再同期が1件記録されました。Close後にUSB抜き差しなしで再Openし、BS01とCS02を各4秒受信して再度復元を確認しました。初回選局は約28～29秒、以降の切り替えは約4.5～5.3秒、終了時の復元は約31～33秒でした。
+初期実装（コミット `4089042`、DTP1バンドル）の試験では、Windows x64の隔離環境で、同じBonDriverのOpen中にGR13 → BS01 → CS02 → GR13を各6秒受信し、保存TSのPATでTSID 31761 → 16400 → 24608 → 31761を確認しました。各保存TSの同期・TEI・CC・形式異常は0件でした。DriverHostの一部の区間では192-byte入力の再同期が1件記録されました。Close後にUSB抜き差しなしで再Openし、BS01とCS02を各4秒受信して再度復元を確認しました。初回選局は約28～29秒、以降の切り替えは約4.5～5.3秒、終了時の復元は約31～33秒でした。
 
 ### ソース生成版のCNR
 

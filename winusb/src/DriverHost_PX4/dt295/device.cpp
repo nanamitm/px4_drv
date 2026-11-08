@@ -421,8 +421,11 @@ int Device::Init(){
         const auto digest=device_def_.configs.Get(L"SourceFirmwareSha256",L"");
         if(path.empty() || digest.size()!=64)return -EINVAL;
         if(!std::filesystem::path(path).is_absolute())path=px4::util::path::GetDir()+path;
+        // DTP2の初期化列はmAgicVISION 0.1.0から組み立てるため、同じFirmwarePathを参照する。
+        auto reference=device_def_.configs.Get(L"FirmwarePath",L"firmware\\magicvision-dt295.bin");
+        if(!std::filesystem::path(reference).is_absolute())reference=px4::util::path::GetDir()+reference;
         source=std::make_unique<SourceFirmware>();
-        const int rc=source->Load(path,digest);
+        const int rc=source->Load(path,digest,reference);
         if(rc)return rc;
     }else if(backend==L"magicvision"){
         auto path=device_def_.configs.Get(L"FirmwarePath",L"firmware\\magicvision-dt295.bin");

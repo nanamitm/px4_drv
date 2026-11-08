@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
 #include "source_firmware.hpp"
+#include "frontend_init.hpp"
 #include "msg.h"
 #include <windows.h>
 #include <bcrypt.h>
@@ -75,27 +76,32 @@ int SourceFirmware::Failure(const char *stage, int code) const
     return code;
 }
 
-int SourceFirmware::Load(const std::wstring &path, const std::wstring &digest)
+int SourceFirmware::Load(const std::wstring &path, const std::wstring &digest, const std::wstring &frontend_reference)
 {
     std::ifstream stream(std::filesystem::path(path), std::ios::binary | std::ios::ate);
     if (!stream)
         return Failure("open bundle", -ENOENT);
     const auto size = stream.tellg();
-    if (size < 24 || size > 32768)
+    if (size < 20 || size > 32768)
         return Failure("bundle size", -EINVAL);
     Bytes bytes(static_cast<size_t>(size));
     stream.seekg(0);
     if (!stream.read(reinterpret_cast<char *>(bytes.data()), size))
         return Failure("read bundle", -EIO);
     const auto actual = Digest(bytes);
+    // DTP1は初期化列を含む。DTP2は初期化列を含まず、配布物のmAgicVISION 0.1.0から実行時に組み立てる。
+    const bool runtime_init = Be(bytes.data()) == 0x44545032;
     if (actual.size() != 64 || std::wstring(actual.begin(), actual.end()) != digest ||
-        Be(bytes.data()) != 0x44545031)
+        (Be(bytes.data()) != 0x44545031 && !runtime_init))
         return Failure("bundle SHA-256 or magic", -EINVAL);
 
-    size_t offset = 24;
     Bytes *sections[] = {&auxiliary_, &resident_, &adapter_, &hook_, &init_};
     constexpr size_t limits[] = {0x2000, 0x700, 0x100, 8, 0x2000};
-    for (size_t i = 0; i < std::size(sections); ++i) {
+    const size_t count = runtime_init ? 4 : 5;
+    size_t offset = 4 + 4 * count;
+    if (bytes.size() < offset)
+        return Failure("bundle size", -EINVAL);
+    for (size_t i = 0; i < count; ++i) {
         const auto count = Be(bytes.data() + 4 + 4 * i);
         if (!count || count > limits[i] || count > bytes.size() - offset)
             return Failure("bundle section size", -EINVAL);
@@ -104,6 +110,22 @@ int SourceFirmware::Load(const std::wstring &path, const std::wstring &digest)
     }
     if (offset != bytes.size() || hook_ != Bytes{0x9b,0xec,0x10,0,0x97,0x0c,0x9f,0xa0})
         return Failure("bundle hook or trailing data", -EINVAL);
+    if (runtime_init) {
+        std::ifstream reference(std::filesystem::path(frontend_reference), std::ios::binary | std::ios::ate);
+        if (!reference)
+            return Failure("open frontend initialization reference", -ENOENT);
+        const auto reference_size = reference.tellg();
+        if (reference_size < 48 || reference_size > 1024 * 1024)
+            return Failure("frontend initialization reference size", -EINVAL);
+        Bytes container(static_cast<size_t>(reference_size));
+        reference.seekg(0);
+        if (!reference.read(reinterpret_cast<char *>(container.data()), reference_size))
+            return Failure("read frontend initialization reference", -EIO);
+        if (Digest(container) != FrontendInitContainerSha256)
+            return Failure("frontend initialization reference SHA-256 (mAgicVISION 0.1.0 required)", -EINVAL);
+        if (const int rc = BuildFrontendInit(container.data(), container.size(), init_))
+            return Failure("frontend initialization from reference", rc);
+    }
     for (auto *section : {&auxiliary_, &resident_, &adapter_})
         section->resize((section->size() + 3) & ~size_t(3));
     bool satellite = false;

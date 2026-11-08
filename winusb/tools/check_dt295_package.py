@@ -2,12 +2,15 @@
 from pathlib import Path
 import argparse
 import hashlib
+import json
 import struct
 
 root = Path(__file__).resolve().parents[1]
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--dist', type=Path, default=root / 'dist')
 args = parser.parse_args()
+source_fr_record = (root / 'pkg/DriverHost_PX4/firmware/dt295-source-fr.json').read_bytes()
+source_fr_sha256 = json.loads(source_fr_record)['bundle']['sha256']
 inf = (args.dist / 'Driver/PIX-DT295.inf').read_text(encoding='utf-8')
 if 'USB\\VID_06B8&PID_103B' not in inf or 'f5b71c91-0634-4a6b-902f-fd5756f591d3' not in inf:
     raise SystemExit('DT295 INF identity mismatch')
@@ -35,6 +38,12 @@ for folder in args.dist.glob('BonDriver_*'):
             raise SystemExit('Firmware mismatch: ' + str(firmware))
         if not (folder / 'firmware/magicvision-LICENSE-MIT.txt').is_file() or not (folder / 'firmware/magicvision-firmware-NOTICE.txt').is_file():
             raise SystemExit('Missing firmware license')
+        source = folder / 'firmware/dt295-source-fr.bin'
+        if hashlib.sha256(source.read_bytes()).hexdigest() != source_fr_sha256 or \
+                (folder / 'firmware/dt295-source-fr.json').read_bytes() != source_fr_record:
+            raise SystemExit('Source-built firmware mismatch: ' + str(source))
+        if source_fr_sha256.encode() not in (folder / 'DriverHost_PX4.ini').read_bytes():
+            raise SystemExit('SourceFirmwareSha256 does not match the bundle: ' + str(folder))
 for name in ('LICENSE-MIT', 'LICENSE', 'ORIGIN.json', 'PIX-DT295.md'):
     if not (args.dist / 'licenses/magicvision' / name).is_file():
         raise SystemExit('Missing upstream attribution: ' + name)

@@ -21,7 +21,7 @@ BonDriver / DriverHost
 
 現時点で実装されているのは、整列した64-byteパケットを受け取るプロトコルコア、既存USBブート処理からコアへ接続する診断用アダプター、ホスト用のパケットコーデックです。コアは能力照会と疎通確認に応答し、I²C要求にはNOT_READYを返します。能力ビットは0で、I²C/TSを利用可能とは通知しません。機器レジスターや任意メモリーを読み書きするコマンドはありません。
 
-DT295向けUSBアダプターは実機でCAPS/PINGと復元を確認済みです。物理HAL、電源/リセット、TS取り込み・USB転送、DriverHostとの接続は未実装です。通常ビルドとパッケージングには含まれません。
+DT295向けUSBアダプターは実機でCAPS/PINGと復元を確認済みです。`build.py --bulk` の出力と補助CPU版から作るDTP2バンドルは `pkg/DriverHost_PX4/firmware/dt295-source-fr.bin` に収録し、配布物に同梱しています。DriverHostの `FirmwareBackend=source-fr` で使用でき、既定の方式はmAgicVISIONのままです。選局・TS受信・CNRの実機検証とバンドルの再生成手順は [PIX-DT295の説明](../../docs/pix-dt295.md) にあります。
 
 I²CのC状態機械と、補助CPUのC診断プログラムを追加しています。既定のPAF1はDT295 Rev.01の補助CPUで実行し、物理I²C制御器の状態レジスターを読めます。I²C転送の状態機械への接続は残っています。ビルド・実機診断・ABIは [auxiliary-design.md](auxiliary-design.md) にあります。torne用の別ビルドPAF2では、ソース生成FRイメージを実機で動かし、HAL経由のID読み取りと100組の反復一致、選局・80秒のTS受信、core1 RAMの復元・既存経路への復帰を確認しています。時計は診断用のホスト供給方式です。詳細は [torne-fr-i2c.md](torne-fr-i2c.md) にあります。
 
@@ -142,7 +142,7 @@ torneで最下層を検証するためのHALは [torne-hal.md](torne-hal.md) に
 
 `build.py --bulk` はソースから生成する常駐コードにPIF1操作4を追加します。通常のBinutils指定に加え、補助CPUビルドと同じFR向けGCCを `--compiler` / `--compiler-arg` で指定します。動作には、ホスト側で独立してTSエンジンを設定・停止し、同じWinUSBハンドルでBulk IN `0x81` を読む診断用オーケストレーションが必要です。機器側の操作仕様と実測結果は [research.md](research.md) にあります。
 
-同じWinUSBハンドルでの再選局と定常受信は `bulk_validate.py` で測定できます。PAF1の補助CPUビルド、`build.py --bulk` の出力、対象機の地デジ初期化JSONL、未作成の証跡ディレクトリを指定します。JSONLは比較調査で抽出した地デジ初期化列を使います。`op` と、操作に応じて `payload`（16進）または `delay_ms` を持つ行形式です。
+同じWinUSBハンドルでの再選局と定常受信は `bulk_validate.py` で測定できます。PAF1の補助CPUビルド、`build.py --bulk` の出力、対象機の地デジ初期化JSONL、未作成の証跡ディレクトリを指定します。JSONLは `extract_init_trace.py` で、同梱のmAgicVISION 0.1.0ファームウェアから生成します。値は公式ファームウェア由来のテーブルと一致するため、リポジトリには収録していません。`op` と、操作に応じて `payload`（16進）または `delay_ms` を持つ行形式です。
 
 ```powershell
 python bulk_validate.py $interface $auxiliaryBuild $bulkBuild $initTrace $evidence --channels 13:31761 17:31760 13:31761 --seconds 5 --long-seconds 1800

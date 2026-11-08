@@ -13,7 +13,8 @@ extern "C" {
 namespace px4::dt295 {
 class SourceFirmware {
 public:
-    int Load(const std::wstring &path, const std::wstring &digest);
+    // DTP2のバンドルでは、frontend_referenceのmAgicVISION 0.1.0から初期化列を組み立てる。
+    int Load(const std::wstring &path, const std::wstring &digest, const std::wstring &frontend_reference);
     int Start(dt295_io io);
     int Tune(bool satellite, uint32_t khz, uint32_t tsid);
     int Locked(int &locked);
