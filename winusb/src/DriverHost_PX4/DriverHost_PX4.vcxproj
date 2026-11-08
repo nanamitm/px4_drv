@@ -282,6 +282,9 @@
     <ClCompile Include="siano\frontend.cpp">
       <ObjectFileName>$(IntDir)siano_frontend.obj</ObjectFileName>
     </ClCompile>
+    <ClCompile Include="siano\iq_helper.cpp">
+      <ObjectFileName>$(IntDir)siano_iq_helper.obj</ObjectFileName>
+    </ClCompile>
     <ClCompile Include="siano\protocol.c" />
     <ClCompile Include="torne\experimental_device.cpp" />
     <ClCompile Include="torne\frontend_native_client.cpp" />
@@ -340,6 +343,7 @@
     <ClInclude Include="siano\capture_gate.hpp" />
     <ClInclude Include="siano\firmware_path.hpp" />
     <ClInclude Include="siano\frontend.hpp" />
+    <ClInclude Include="siano\iq_helper.hpp" />
     <ClInclude Include="siano\protocol.h" />
     <ClInclude Include="rtlsdr\protocol.hpp" />
     <ClInclude Include="pxbcud\frontend.hpp" />
