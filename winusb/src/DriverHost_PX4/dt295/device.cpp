@@ -179,7 +179,8 @@ protected:
             msg_info("mAgicVISION: tune target=%s frequency_khz=%u tsid=%x\n",parent_.torne_?"torne":"DT295",params_.freq,tsid);
             rc=source_?source_->Tune(satellite,params_.freq,tsid):
                 dt295_tune(runtime_,satellite?1u:0u,params_.freq,tsid);
-            if(source_ && rc && rc!=-EINVAL)failed_=true;
+            // 引数不正と無信号(-ENOLINK)は機器状態を壊さないため、次の選局を受け付ける。それ以外は転送異常として扱う。
+            if(source_ && rc && rc!=-EINVAL && rc!=-ENOLINK)failed_=true;
             transport_.ReportTiming("tune");
         }
         if(!rc){tuned_=true;if(capture_)rc=StartReader();}

@@ -560,7 +560,9 @@ int SourceFirmware::Tune(bool satellite, uint32_t khz, uint32_t tsid)
             }
             Delay(100);
         } while (io_.now_ms(io_.opaque) - start < 4000);
-        return Failure("frontend lock/TSID", -ETIMEDOUT);
+        // 無信号・TSID不一致は機器の異常ではない。USB転送の期限切れ(-ETIMEDOUT)と区別し、次の選局を受け付ける。
+        msg_info("PIX-DT295 source-fr: no lock system=%s IF_kHz=%u\n", satellite ? "ISDB-S" : "ISDB-T", khz);
+        return -ENOLINK;
     } catch (int error) {
         return Failure("frontend tune", error);
     } catch (const std::bad_alloc &) {
