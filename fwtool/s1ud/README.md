@@ -416,6 +416,56 @@ field with the argument minus 24. Send argument 12 to acquire up
 to eight blocks and stop capture. This command returns after the
 batch finishes or its bounded DMA wait expires.
 
+#### Continuous streaming
+
+Request 890 has the same number as the reference J.83B request 0x37A.
+An argument of 90,000,000 or more is a frequency in Hz. It starts
+a continuous stream of 892 (0x37C) blocks, like the reference firmware.
+Only 138,750,000 Hz is accepted. It is the only frequency whose PLL
+word and RF masks were read from the reference. Other frequencies
+return result 1. After the first frequency request, argument 0 stops
+the stream. Both replies are 891 (0x37B) with seven little-endian words:
+result, filled, sent, late, dropped, timeouts, and errors. The counts
+accumulate from the first start.
+
+The first frequency request creates a ROM task, using ROM entry 0x14bdc
+with the reference arguments. The task streams, so the stop request is
+still processed during the stream. The capture ring holds exactly one
+block, as in the reference. The task packs samples behind the DMA write
+pointer. When the DMA writes the last ring word (0xf6f7fc), the task
+re-arms it at once. Interrupts are masked with ROM entries 0xb64 and 0xb94
+from the end-of-ring wait to the restart, as in the reference. Without
+the mask, 40% of the block boundaries lost more than the 4–7 samples
+expected by `s1ud.rs`. The decoder then failed its gap trial and
+resynchronized frequently. Twelve 0x4000-byte slots at 0xe20000 are sent
+in rotation. A slot that is still waiting for USB completion is not packed.
+That block is counted as dropped, and the 20-bit sequence number still
+advances. Bits 20–21 of the tag are 1 for an on-time block and 2 for the
+first block or a block after a late re-arm.
+
+The level difference at 138.75 MHz was caused by bit 18 of 0x852040.
+The cable PLL mask sequence clears it. The reference sets it while
+streaming (0x852040 = 0xfab67fa1). Setting it raised the mean-removed
+complex RMS from 1.04 to 35.7. The reference value is 35.6. Writing
+the other DSP registers that differ from the reference did not change
+the level or decoding. They include 0x84007c, 0x84037c, and the
+0x841100–0x8414f4 blocks.
+
+A 20 s run was taken with a Python WinUSB reader. It received 32,044
+blocks, and 460 were dropped when the reader fell behind. The first
+11,000 blocks had no drops. `s1ud_j83b` decoded them to 180,366 TS
+packets at MER 31.5 dB, with 49 uncorrectable RS blocks and no
+demodulator restart. 11,000 reference-firmware blocks from the same
+channel gave 178,053 packets, with 655 blocks dropped by the chip.
+DriverHost cold-boot loading, other frequencies, and long runs have not
+been tested.
+
+Argument 100 followed by an address and a value writes one register.
+It replies with 894: address, value, and readback. Read registers
+with the ROM request 662 over a four-byte range. The reply is the word
+itself. Avoid sending requests other than stop during a stream. A burst
+of about 20 pokes during streaming stopped the probe from responding.
+
 Argument 2 returns the batch trace in 893. The first twelve
 (address, value) pairs contain the initial timer value, the number
 of completed slots, eight completion timestamps, the final observed
