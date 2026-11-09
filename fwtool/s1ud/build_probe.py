@@ -16,7 +16,7 @@ MARKER_OFFSET = 0x40
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("output", type=Path)
-    parser.add_argument("--probe", choices=("boot", "bulk"), default="boot")
+    parser.add_argument("--probe", choices=("boot", "bulk", "capture"), default="boot")
     parser.add_argument("--cross-prefix", default="arc-linux-gnu-")
     args = parser.parse_args()
     source = Path(__file__).with_name(f"{args.probe}_probe.S")

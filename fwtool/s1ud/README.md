@@ -278,3 +278,96 @@ The first sampled status was 0x6d4b80c0 at 13ch and 0x6d971000 at
 and reproduced both lock results. In both builds, the measured ADC
 calibration result stayed zero and the capture write pointer stayed
 at the ring base. No acquired I/Q was observed.
+
+#### ADC request and capture route readback
+
+Standalone builds 7 through 9 kept the PLL locked and matched the
+reference state of 0x820068 during capture. The ADC request at
+0x850018 read back 0x80 immediately, but never self-cleared within
+the bounded poll. The probe cleared it after timeout and the result
+at 0x85001c was zero. In builds 8 and 9, both route words read zero
+immediately after writing 1 to 0x840280 and 0x11 to 0x8403b0.
+The reference reports those nonzero words during active capture.
+Setting the additional startup controls at 0x800010, 0x940008
+and 0x90003c did not change that result. No acquired I/Q was observed.
+
+#### Reference route availability before capture
+
+The reference route diagnostic read zero immediately after attempting
+to write 0x11 to 0x8403b0 in the idle state. After selecting 13ch
+with the same image, 0x840280 read 1, 0x8403b0 read 0x11, and the
+capture pointer advanced. In the separate cold reference trace,
+0x8407f4 changed from 2 at idle to 3 before capture, and 0x8407fc
+changed from all ones at idle to zero during the tune transition
+and then to 0x7ffffeb9. The ADC request at 0x850018 was observed
+counting down to zero. The exact prerequisite for route access
+has not been isolated.
+
+Standalone build 10 attempted the reference capture values 3 and
+0x7ffffeb9 at 0x8407f4 and 0x8407fc. Both read back zero, along with
+0x840038, 0x8400e0, 0x840280 and 0x8403b0. The sampled system clock
+and power values 0x820000, 0x820008, 0x82000c, 0x820054, 0x820064
+and 0x820068 matched the active reference values. PLL lock and
+the 0x850000 write (0x309) also succeeded. This isolates the current
+readback discrepancy to the sampled 0x840xxx block and leaves its
+startup prerequisite unresolved. No acquired I/Q was observed.
+
+#### Internal reference checkpoints
+
+Read-only checkpoints in the reference 13ch and 14ch tune path
+captured 0x8407f4, 0x8407fc and 0x840038. The three words were
+zero immediately after PLL setup. After the clock-control routine
+they read 2, 0xffffffff and 0x14. After ADC input configuration
+they read 3, 0x7ffffeb9 and 0x40. I/Q was received in both tests.
+
+Standalone build 11 repeated the clock-off and clock-on sequence
+after PLL setup and delayed before re-enabling it. The PLL still
+locked, but the sampled 0x840xxx words and ADC result remained zero.
+All six USB bursts still contained the initialization pattern.
+
+Per-write checkpoints in the reference 13ch and 14ch tune path
+showed that 0x8407f4 and 0x8407fc first became nonzero immediately
+after ORing 0x00ffe000 into 0x820008. The observed values were 2
+and 0xffffffff. They were zero after the four preceding clock writes.
+In standalone build 12 the same clock register readbacks matched at
+each checkpoint, including the final 0x820008 value of 0x0fffffff.
+The two downstream words nevertheless stayed zero, the PLL remained
+locked, and the capture pointer stayed at the ring base. This
+identifies the observed reference transition, but the shared clock
+register values do not reproduce the prerequisite state by themselves.
+
+#### Standalone I/Q bursts after ROM startup setup
+
+The reference startup task calls ROM entry 0x19f0 with a 36-byte
+configuration for the 12 MHz board clock. Calling the routine from
+the standalone USB command handler caused subsequent version
+requests to time out. Build 14 called it from the RAM entry before
+installing the USB hooks, using a 0x1000-byte launch stack.
+After the final clock write, 0x8407f4 and 0x8407fc then read 2 and
+0xffffffff, as in the reference trace.
+
+Build 14 returned three separate 14,720-byte payloads per channel
+at 13ch and 14ch, with all six USB completions observed. The
+buffers contained no four-byte initialization-pattern words, and
+repeated bursts differed. The mean in-band to edge power ratios
+were 14.26 dB and 12.34 dB, versus 14.10 dB and 12.35 dB for the
+corresponding reference captures. The pointer read at the ring
+base in the two late polls, so this verifies burst acquisition
+only. Continuous capture, buffer wrap handling, TS decoding,
+and J.83B reception were not tested with build 14.
+
+### Build the standalone capture probe
+
+Build the experimental burst image with
+`python3 fwtool/s1ud/build_probe.py --probe capture /tmp/s1ud-capture.inp`.
+Use a ROM launch stack of `0x1000` in request 664. The capture image
+is intended for bench testing on the measured 12 MHz PX-S1UD.
+
+Send request 890 with argument 8 for 13ch or 9 for 14ch. Wait about
+60 ms, send argument 10 to stop and pack the capture buffer, then
+send argument 1 to read the 892 payload. Poll argument 0 for USB
+completion before starting another capture. Each payload contains
+14,720 sample bytes in signed I0, I1, Q0, Q1 order, followed by a
+four-byte zero word. Negate the signed Q samples for the convention
+used by the host decoder. The probe uses a fixed-size capture ring
+and has no continuous-stream sequence counter.
