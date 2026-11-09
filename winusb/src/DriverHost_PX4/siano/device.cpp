@@ -414,6 +414,9 @@ private:
     }
     void Run() noexcept
     {
+        // J.83B では同じ PC で IQ の復調が CPU を使い続け、通常の優先度では受信要求の出し直しが最大 64 ms 遅れた。
+        // チップの送信枠は約 7 ms 分しかないため、TS の配信スレッドと同じく優先度を上げて読み取りを途切れさせない
+        SetThreadPriority(GetCurrentThread(),THREAD_PRIORITY_TIME_CRITICAL);
         try { RunTransfers(); }
         catch (const std::bad_alloc&) { error_=-ENOMEM;msg_err("PX-S1UD: receive allocation failed\n"); }
         catch (const std::exception& e) { error_=-EIO;msg_err("PX-S1UD: receive exception: %s\n",e.what()); }
