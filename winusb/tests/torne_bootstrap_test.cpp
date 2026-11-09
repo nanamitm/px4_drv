@@ -6,6 +6,7 @@
 #include "../src/DriverHost_PX4/torne/mb86h47_stream.hpp"
 
 #include <cstdlib>
+#include <algorithm>
 #include <iostream>
 #include <map>
 #include <vector>

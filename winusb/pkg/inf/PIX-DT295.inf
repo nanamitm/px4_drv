@@ -1,0 +1,46 @@
+; Copyright 2026 Till0196
+; Copyright 2026 px4_drv contributors
+; SPDX-License-Identifier: Apache-2.0
+;
+; Locally adapted MEDIA-class INF for binding the PIXELA PIX-DT295 to the in-box WinUSB
+; driver. Class, package version and catalog name adapted locally.
+; Included in the existing px4_drv_winusb.cat; use the existing cert-install.jse.
+
+[Version]
+Signature   = "$Windows NT$"
+Class       = Media
+ClassGuid   = {4D36E96C-E325-11CE-BFC1-08002BE10318}
+Provider    = %ProviderName%
+CatalogFile = px4_drv_winusb.cat
+DriverVer   = 11/04/2026,1.0.0.1
+
+[Manufacturer]
+%ManufacturerName% = DeviceList,NTx86,NTamd64,NTarm64
+
+[DeviceList.NTx86]
+%DeviceName% = WinUSBInstall, USB\VID_06B8&PID_103B
+
+[DeviceList.NTamd64]
+%DeviceName% = WinUSBInstall, USB\VID_06B8&PID_103B
+
+[DeviceList.NTarm64]
+%DeviceName% = WinUSBInstall, USB\VID_06B8&PID_103B
+
+[WinUSBInstall]
+Include = winusb.inf
+Needs   = WINUSB.NT
+
+[WinUSBInstall.Services]
+Include = winusb.inf
+Needs   = WINUSB.NT.Services
+
+[WinUSBInstall.HW]
+AddReg = DeviceInterfaceGUID
+
+[DeviceInterfaceGUID]
+HKR,,DeviceInterfaceGUIDs,0x10000,"{f5b71c91-0634-4a6b-902f-fd5756f591d3}"
+
+[Strings]
+ProviderName     = "px4_drv"
+ManufacturerName = "PIXELA"
+DeviceName       = "PIXELA PIX-DT295 ISDB-T/S Receiver Device (WinUSB)"

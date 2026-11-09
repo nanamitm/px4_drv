@@ -1,0 +1,13 @@
+mAgicVISION firmware binary
+Source release: https://github.com/makeding/mAgicVISION/releases/tag/v1
+Package: magicvision-firmware_0.1.0+20261104.160644_all.deb
+Extracted member: usr/lib/firmware/magicvision/firmware.bin
+Local name: magicvision-dt295.bin
+SHA256: d9f549b29d286c2ff1e7daf4237e2205bb8a5a2affbb98362bce137b8b42a33f
+
+Upstream README explicitly permits redistribution of firmware artifacts:
+https://github.com/makeding/mAgicVISION/blob/e1b1280ee07fe98431e07e2d38b26111b16c1895/README.md
+
+The included MIT license describes the upstream shared host code; it does not
+assign an additional license to the firmware binary. Firmware source is not
+included in the upstream public tree used for this integration.

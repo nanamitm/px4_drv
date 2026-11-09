@@ -17,6 +17,9 @@ winusb/**/*.cmd text eol=crlf
 winusb/*.sln text eol=crlf
 winusb/**/*.rc text eol=crlf
 
+# 固定版の上流ソースは出典の SHA-256 と一致する LF を維持する
+winusb/src/DriverHost_PX4/dt295/upstream/** text eol=lf
+
 # ChSet は CP932 のバイト列を維持し、改行だけ CRLF に変換
 winusb/pkg/BonDriver_PX4/*.ChSet.txt text eol=crlf
 

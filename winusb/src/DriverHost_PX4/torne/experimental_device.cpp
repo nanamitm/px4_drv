@@ -89,8 +89,13 @@ struct ExperimentalSession {
 	}
 	bool InitializeBridge()
 	{
-		control.Begin(Clock::now() + std::chrono::seconds(8));
-		return bootstrap.Initialize(GetTickCount() | 1u) == BootstrapResult::ok && bus.BeginAfterBootstrap(bootstrap);
+		const auto deadline=Clock::now()+std::chrono::seconds(8);
+		control.Begin(deadline);
+        if(bootstrap.Initialize(GetTickCount()|1u)!=BootstrapResult::ok) {
+            msg_err("torne: bootstrap failed result=%u address=%08x os_error=%d\n",static_cast<unsigned>(bootstrap.Result()),bootstrap.LastAddress(),bootstrap.LastSystemError());
+            return false;
+        }
+		return bus.BeginAfterBootstrap(bootstrap);
 	}
 	bool InitializeFrontend(bool output_error_packets)
 	{
@@ -603,6 +608,15 @@ ExperimentalDevice::ExperimentalDevice(const std::wstring &path, const px4::Devi
 ExperimentalDevice::~ExperimentalDevice() { Term(); if (cancel_) CloseHandle(cancel_); }
 int ExperimentalDevice::Init()
 {
+    const auto backend=device_def_.configs.Get(L"I2cBackend",L"native");
+    if (backend == L"source-fr") {
+        msg_err("torne: I2cBackend=source-fr has been removed. Set I2cBackend=native or remove the setting.\n");
+        return -EINVAL;
+    }
+    if (backend != L"native") {
+        msg_err("torne: invalid I2cBackend (expected native).\n");
+        return -EINVAL;
+    }
 	output_error_packets_=px4::util::wtob(device_def_.configs.Get(L"OutputErrorPackets",L"false"));
     auto_recovery_=px4::util::wtob(device_def_.configs.Get(L"AutoRecovery",L"false"));
     initial_lock_retry_=px4::util::wtob(device_def_.configs.Get(L"InitialLockRetry",L"false"));

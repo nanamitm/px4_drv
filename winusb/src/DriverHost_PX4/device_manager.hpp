@@ -38,6 +38,7 @@ enum class DeviceType : std::uint32_t {
 	RTLSDR,
 	SIANO,
 	MSI2500,
+	PIXDT295,
 };
 
 class DeviceManager final {
