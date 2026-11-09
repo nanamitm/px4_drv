@@ -135,11 +135,15 @@ public:
         if (!tuned_) return 0;
         if (iq_) {
             // J.83B の復調は helper が行い、firmware の統計は ISDB-T のもののため使わない。
-            // MSi2500 と同じく、helper の TS が 3 秒以内に届いていればロックとし、品質は RS の成功割合とする
+            // MSi2500 と同じく、helper の TS が 3 秒以内に届いていればロックとする。
+            // C/N には helper が報告する復調器の MER (dB) を ISDB-T の CNR と同じ dB×1000 で返す。
+            // RS の成功割合は正常受信中にほぼ 100% で変わらず、C/N の目安にならないため。
+            // MER をまだ報告していない間 (起動直後と MER を送らない古い helper) は、従来どおり RS の成功割合を返す
             if (iq_helper_.Failed()) return -ECANCELED;
             const auto last=iq_helper_.LastTs();
             locked_=iq_helper_.Ready() && last && GetTickCount64()-last<3000;
-            cnr_=locked_ ? static_cast<std::int32_t>(iq_helper_.Quality()*10) : 0;
+            const auto mer=iq_helper_.MerX100();
+            cnr_=!locked_ ? 0 : mer>=0 ? mer*10 : static_cast<std::int32_t>(iq_helper_.Quality()*10);
             locked=locked_;
             return 0;
         }

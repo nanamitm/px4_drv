@@ -73,7 +73,7 @@ int IqHelper::Start(const std::wstring& exe,const std::wstring& log,TsHandler ts
         std::lock_guard<std::mutex> lock(mutex_);
         closing_=false;queue_.clear();
     }
-    ready_=false;failed_=false;stopping_=false;last_ts_=0;quality_=0;dropped_=0;
+    ready_=false;failed_=false;stopping_=false;last_ts_=0;quality_=0;mer_x100_=-1;dropped_=0;
     const bool resumed=ResumeThread(process.hThread)!=static_cast<DWORD>(-1);
     CloseHandle(process.hThread);
     if (!resumed) {Stop();return -EIO;}
@@ -143,7 +143,13 @@ void IqHelper::Read() noexcept
                         msg_err("PX-S1UD: J.83B helper error: %.*s\n",static_cast<int>(frame.size),reinterpret_cast<const char*>(data));
                         return false;
                     }
-                    if (frame.kind==3) quality_=frame.quality;
+                    if (frame.kind==3) {
+                        quality_=frame.quality;
+                        // 判定帰還から外れた間など MER が載らない状態は、直前の値を残す。
+                        // ロックの判定は TS の到着で行い、MER は表示だけに使うため
+                        std::uint32_t mer=0;
+                        if (rtlsdr::StatusMer(frame,data,mer)) mer_x100_=static_cast<std::int32_t>(mer);
+                    }
                     if (frame.kind==2) {
                         quality_=frame.quality;last_ts_=GetTickCount64();
                         if (!stopping_ && !ts_(data,frame.size)) return false;
@@ -187,6 +193,6 @@ void IqHelper::Stop()
     if (writer_.joinable()) writer_.join();
     if (reader_.joinable()) reader_.join();
     CloseIf(input_);CloseIf(output_);CloseIf(process_);CloseIf(job_);
-    running_=false;ready_=false;last_ts_=0;quality_=0;
+    running_=false;ready_=false;last_ts_=0;quality_=0;mer_x100_=-1;
 }
 }

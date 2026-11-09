@@ -36,6 +36,8 @@ public:
     bool Failed() const {return failed_;}
     ULONGLONG LastTs() const {return last_ts_;}
     std::uint32_t Quality() const {return quality_;}
+    // helper が状態で報告した復調器の MER (dB×100)。まだ報告がない (古い helper を含む) ときは -1
+    std::int32_t MerX100() const {return mer_x100_;}
     std::uint64_t Dropped() const {return dropped_;}
 private:
     void Write() noexcept;
@@ -52,6 +54,7 @@ private:
     std::atomic_bool running_{false},ready_{false},failed_{false},stopping_{false};
     std::atomic<ULONGLONG> last_ts_{0};
     std::atomic<std::uint32_t> quality_{0};
+    std::atomic<std::int32_t> mer_x100_{-1};
     std::atomic<std::uint64_t> dropped_{0};
 };
 }
