@@ -526,19 +526,53 @@ requests that DriverHost sends, in this order:
 From the cold-booted probe, this sequence loaded the reference J.83B
 firmware without unplugging the device. Its IQ stream then worked.
 
-Loading this probe from another firmware is not implemented. The ROM
-reset handler calls the warm entry with the reset cause. When the entry
-returns nonzero, the ROM initializes the heap and USB stack, then calls
-the hook at 0x40218, and finally `_start` through 0x4021c. The reference
-warm entry saves the ROM USB state to 0xe40000, marked with 0xaa11bb22.
-Its 0x40218 hook rebuilds the ROM USB stack from that copy, so the host
-does not enumerate the device again. This probe's warm entry returns 0.
-After such a reset, the device stayed present but every request timed
-out. Without administrator rights, `CM_Reenumerate_DevNode` returned
-`CR_ACCESS_DENIED`. `pnputil /restart-device`, run as administrator,
-left the port showing "Device Descriptor Request Failed". A CPU soft
-reset does not appear to reset the USB controller for a new
-enumeration.
+The ROM reset handler calls the warm entry with the reset cause. When
+the entry returns nonzero, the ROM initializes the heap and USB stack.
+It then calls the hook at 0x40218, and finally `_start` through
+0x4021c. The CPU reset keeps the USB connection, so the host does not
+enumerate the device again. A firmware that lets the ROM rebuild its
+USB stack from scratch therefore loses the host. In an early build the
+warm entry returned 0. After that reset the device stayed present, but
+every request timed out. Without administrator rights,
+`CM_Reenumerate_DevNode` returned `CR_ACCESS_DENIED`.
+`pnputil /restart-device`, run as administrator, left the port showing
+"Device Descriptor Request Failed".
+
+The probe now keeps the ROM USB state across the reset, as the
+reference firmware does:
+
+- The warm entry restores the ROM work area saved before the reset and
+  the reset cause at 0x40250, then clears the hooks at 0x40200–0x4023f.
+- It sets the clock registers again in the reference order, with
+  interrupts masked.
+- It calls ROM 0x5fa4 with 0 and 1.
+- It copies the ROM USB state to 0xe40000 with the marker 0xaa11bb22.
+  The state is the words at 0xf67a38 and 0xf67fa8, the halfwords at
+  0xf67f10 and 0xf67f12, and the byte at 0xf66bc4. It also includes the
+  heap blocks referenced by 0xf67a24, 0xf67a28, 0xf67a2c, 0xf67a30,
+  0xf67a44, and 0xf67a34. Two blocks referenced from the 0xf67a30
+  structure at +0x30 and +0x34 are copied as well, and so is the
+  variable-length block at 0xf67a3c.
+- It calls ROM 0x1604, then restores the image prefix at 0x40260.
+- It installs the HIF, restore, start, and 0x4023c hooks, and returns 1.
+
+The 0x40218 hook runs after the ROM has reinitialized its heap. It
+allocates heap copies of the saved blocks and writes their pointers
+back to the ROM variables. It restores the ROM USB callback table,
+which consists of ROM function addresses from 0x63e0 to 0x67c0. It then
+rebuilds the links inside the restored structures. Finally it calls ROM
+0x6d20, 0x128dc, 0x13130, 0x58c0, 0x6030, and 0x12bbc, as the reference
+does, and continues with the probe initialization. Cold boot still
+configures the board clock with ROM 0x19f0. The warm path does not call
+it.
+
+Without unplugging, the probe was loaded from the reference J.83B
+firmware and from the normal ISDB-T firmware. Each switch used the
+DriverHost reload sequence, and the probe then loaded the other
+firmware again. Two round trips with the reference firmware streamed in
+every phase. After a switch from the ISDB-T firmware, a 4 s recording at
+138.75 MHz decoded to 92,002 TS packets at MER 32.0 dB. The ISDB-T
+firmware reached mode 6 after `INIT_DEVICE`.
 
 #### Send slots and dropped blocks
 

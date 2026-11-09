@@ -36,6 +36,19 @@
     .equ ROM_WORK_SAVE, 0xe50000
     .equ ROM_WARM_ENTRY, 0x40200
     .equ ROM_SOFT_RESET, 0x123c
+    /* warm 起動で ROM の USB の状態を保つための ROM の入口 (参照 firmware が同じ目的で呼ぶもの) */
+    .equ ROM_ZERO, 0x488
+    .equ ROM_USB_SUSPEND, 0x1604
+    .equ ROM_USB_ENDPOINTS, 0x58c0
+    .equ ROM_USB_PREPARE, 0x5fa4
+    .equ ROM_USB_PIPE, 0x6030
+    .equ ROM_USB_SPEED, 0x6d20
+    .equ ROM_USB_TIMER, 0x11524
+    .equ ROM_USB_ATTACH, 0x128dc
+    .equ ROM_USB_NOTIFY, 0x12bbc
+    .equ ROM_USB_CONFIGURE, 0x13130
+    .equ USB_SAVE, 0xe40000
+    .equ USB_SAVE_MAGIC, 0xaa11bb22
 
     .section .text
     .global _start
@@ -72,6 +85,13 @@ cold_start:
     push_s blink
     mov r0, board_clock_config
     jl 0x19f0
+    pop_s blink
+/* cold 起動と warm 起動の共通の初期化。ROM の主処理が 0x4021c の開始処理を重ねて呼ばないよう、先に消す */
+app_init:
+    push_s blink
+    mov r0, ROM_WARM_ENTRY + 0x1c
+    mov_s r1, 0
+    st.di r1, [r0]
     jl init_dma_buffers
     mov r0, usb_complete
     jl ROM_SET_COMPLETION
@@ -225,10 +245,494 @@ small_reply:
     mov_s r2, 12
     b send_reply
 
-/* warm 入口。USB の状態の復元は未実装のため 0 を返し、ROM の通常の初期化に任せる */
+/* warm 入口 (ROM のリセット処理が r0 にリセット要因を入れて呼ぶ)。別の firmware からこの firmware へ読み込み直すと、
+   CPU だけがリセットされ、USB コントローラーとホストの接続は残る。ROM の通常の初期化に任せると、ホストは改めて
+   列挙せず、要求がすべて時間切れになった (README の実験)。そこで ROM が初期化する前に ROM の USB の状態を
+   リセットの影響を受けない 0xe40000 へ写し、0x40218 の復元処理で ROM の初期化の後に戻す */
 warm_entry:
-    mov_s r0, 0
+    push_s blink
+    st.aw r18, [sp, -4]
+    st.aw r17, [sp, -4]
+    st.aw r16, [sp, -4]
+    push_s r15
+    push_s r14
+    push_s r13
+    /* 読み込み直す前の firmware が 0xe50000 へ退避した ROM の作業領域を戻す。0x40250 はリセット要因で、
+       ROM が今回書いた値があればそれを残し、なければ引数の値を置く */
+    mov r2, ROM_WORK + 0x10
+    ld.di r2, [r2]
+    mov r3, ROM_WORK_SAVE
+    mov r4, ROM_WORK
+    mov r5, 8
+warm_work_restore:
+    ld.ab r1, [r3, 4]
+    st.di r1, [r4]
+    add r4, r4, 4
+    sub.f r5, r5, 1
+    bne warm_work_restore
+    mov r1, ROM_WORK + 0x10
+    cmp r2, 0
+    mov.ne r0, r2
+    st.di r0, [r1]
+    /* 0x40200 からのフック (16 語) を消す。最後に必要なものだけ置き直す */
+    mov r3, ROM_WARM_ENTRY
+    mov r5, 16
+    mov_s r1, 0
+warm_hooks_clear:
+    st.di r1, [r3]
+    add r3, r3, 4
+    sub.f r5, r5, 1
+    bne warm_hooks_clear
+    /* クロックを読み込み直しの前と同じ状態へ戻す。cold 起動で使う ROM の 0x19f0 は、USB の処理と並べて
+       呼ぶと応答が止まったため、ここでは同じレジスターを順に書く */
+    jl ROM_IRQ_DISABLE
+    mov r18, r0
+    mov r16, 0x820054
+    mov r17, 0x820008
+    mov r13, 0x820068
+    mov r14, 0x90003c
+    ld.di r0, [r16]
+    bclr r0, r0, 6
+    st.di r0, [r16]
+    ld.di r0, [r17]
+    and r0, r0, 0xff000fff
+    st.di r0, [r17]
+    ld.di r0, [r13]
+    bclr r0, r0, 6
+    st.di r0, [r13]
+    mov r0, 2
+    jl ROM_DELAY
+    ld.di r0, [r14]
+    bset r0, r0, 0
+    st.di r0, [r14]
+    mov r0, 2
+    jl ROM_DELAY
+    mov r0, 0x820000
+    ld.di r1, [r0]
+    bclr r1, r1, 2
+    bclr r1, r1, 18
+    st.di r1, [r0]
+    ld.di r1, [r13]
+    bclr r1, r1, 0
+    bclr r1, r1, 1
+    st.di r1, [r13]
+    mov r0, 0x820000
+    ld.di r1, [r0]
+    or r1, r1, 0xe02000
+    st.di r1, [r0]
+    mov r0, 2
+    jl ROM_DELAY
+    ld.di r0, [r13]
+    bset r0, r0, 6
+    st.di r0, [r13]
+    mov r0, 0x07ffffff
+    st.di r0, [r17]
+    ld.di r0, [r16]
+    bset r0, r0, 6
+    st.di r0, [r16]
+    mov r0, 2
+    jl ROM_DELAY
+    ld.di r0, [r14]
+    bset r0, r0, 1
+    st.di r0, [r14]
+    mov r0, r18
+    jl ROM_IRQ_RESTORE
+    mov r0, 0
+    jl ROM_USB_PREPARE
+    mov r0, 1
+    jl ROM_USB_PREPARE
+    /* ROM の USB の状態を 0xe40000 へ写す */
+    mov r14, USB_SAVE
+    mov r0, USB_SAVE_MAGIC
+    st r0, [r14, 0]
+    mov r1, 0xf67a38
+    ld r0, [r1]
+    st r0, [r14, 4]
+    mov r1, 0xf67fa8
+    ld r0, [r1]
+    st r0, [r14, 8]
+    mov r1, 0xf67f10
+    ldh r0, [r1]
+    sth r0, [r14, 0xc]
+    ldh r0, [r1, 2]
+    sth r0, [r14, 0xe]
+    mov r1, 0xf66bc4
+    ldb r0, [r1]
+    stb r0, [r14, 0x10]
+    mov r15, 0xf67a30
+    ld r15, [r15]
+    mov r16, usb_save_table
+warm_save_next:
+    ld r0, [r16, 0]
+    breq r0, 0, warm_save_variable
+    ld r1, [r16, 4]
+    ld r2, [r16, 8]
+    /* 写し元が 0xf00000 以上なら ROM の変数で、その値 (ヒープ上の領域) から写す。
+       小さい値は 0xf67a30 が指す構造の中の位置で、そこの語が指す領域から写す */
+    mov r3, 0xf00000
+    cmp r1, r3
+    blo warm_save_field
+    ld r1, [r1]
+    b warm_save_copy
+warm_save_field:
+    add r1, r1, r15
+    ld r1, [r1]
+warm_save_copy:
+    jl ROM_COPY
+    add r16, r16, 12
+    b warm_save_next
+warm_save_variable:
+    /* 長さが 0xe40004 にある可変長の領域。1 から 0x400 バイトのときだけ写す */
+    ld r2, [r14, 4]
+    sub r0, r2, 1
+    mov r3, 0x3ff
+    cmp r0, r3
+    bhi warm_save_done
+    mov r1, 0xf67a3c
+    ld r1, [r1]
+    mov r0, USB_SAVE + 0x2da
+    jl ROM_COPY
+warm_save_done:
+    jl ROM_USB_SUSPEND
+    /* 先頭 0xa0 バイトは読み込み直しで写されないため、置いたイメージから戻す */
+    mov r0, 0x40260
+    mov r1, STAGING_BASE
+    mov r2, IMAGE_PREFIX
+    jl ROM_COPY
+    mov r0, ROM_HIF_HOOK
+    mov r1, handle_message
+    st.di r1, [r0]
+    mov r0, ROM_WARM_ENTRY + 0x18
+    mov r1, warm_restore
+    st.di r1, [r0]
+    mov r0, ROM_WARM_ENTRY + 0x1c
+    mov r1, 0x40260
+    st.di r1, [r0]
+    mov r0, ROM_WARM_ENTRY + 0x3c
+    mov r1, idle_hook
+    st.di r1, [r0]
+    mov_s r0, 1
+    pop_s r13
+    pop_s r14
+    pop_s r15
+    ld.ab r16, [sp, 4]
+    ld.ab r17, [sp, 4]
+    ld.ab r18, [sp, 4]
+    pop_s blink
     j_s [blink]
+
+/* 0x4023c のフック。r1 が 0 なら 1 を返す */
+idle_hook:
+    tst r1, r1
+    mov r0, 1
+    mov.ne r0, 0
+    j_s [blink]
+
+/* ROM のヒープに len (r1) バイトを確保し、src (r0) を写して返す。確保できなければ ROM のリセットに任せる */
+usb_alloc_copy:
+    push_s blink
+    push_s r13
+    push_s r14
+    push_s r15
+    mov r14, r1
+    mov r15, r0
+    mov r0, r1
+    jl ROM_ALLOC
+    mov.f r13, r0
+    jleq ROM_SOFT_RESET
+    mov r0, r13
+    mov r2, r14
+    mov r1, r15
+    jl ROM_COPY
+    mov r0, r13
+    pop_s r15
+    pop_s r14
+    pop_s r13
+    pop_s blink
+    j_s [blink]
+
+/* ROM のヒープに len (r0) バイトを確保し、0 で埋めて返す */
+usb_alloc_zero:
+    push_s blink
+    push_s r13
+    push_s r14
+    mov r14, r0
+    jl ROM_ALLOC
+    mov.f r13, r0
+    jleq ROM_SOFT_RESET
+    mov r0, r13
+    mov r1, r14
+    jl ROM_ZERO
+    mov r0, r13
+    pop_s r14
+    pop_s r13
+    pop_s blink
+    j_s [blink]
+
+/* 0x40218 の復元処理。ROM がヒープと USB を初期化した後に呼ぶ。0xe40000 の写しから ROM の USB の変数と
+   構造を戻し、ホストとの接続をそのまま使える状態にしてから、この firmware の初期化 (app_init) へ進む */
+warm_restore:
+    push_s blink
+    st.aw r20, [sp, -4]
+    st.aw r19, [sp, -4]
+    st.aw r18, [sp, -4]
+    st.aw r17, [sp, -4]
+    st.aw r16, [sp, -4]
+    push_s r15
+    push_s r14
+    push_s r13
+    mov r1, 0x800010
+    ld.di r0, [r1]
+    bclr r0, r0, 8
+    st.di r0, [r1]
+    mov r0, ROM_WORK + 0x18
+    ld.di r0, [r0]
+    brne r0, 0, warm_restore_check
+    mov r0, 1
+    mov r1, 0x61a80
+    mov r2, 2
+    jl ROM_USB_TIMER
+warm_restore_check:
+    mov r0, USB_SAVE
+    ld r0, [r0]
+    mov r1, USB_SAVE_MAGIC
+    cmp r0, r1
+    bne warm_restore_done
+    mov r0, USB_SAVE + 0x14
+    mov r1, 0x20
+    jl usb_alloc_copy
+    mov r14, r0
+    mov r0, USB_SAVE + 0x34
+    mov r1, 0x50
+    jl usb_alloc_copy
+    mov r17, r0
+    mov r0, USB_SAVE + 0x84
+    mov r1, 0x38
+    jl usb_alloc_copy
+    mov r20, r0
+    mov r0, USB_SAVE + 0xbc
+    mov r1, 404
+    jl usb_alloc_copy
+    mov r13, r0
+    mov r0, USB_SAVE + 0x250
+    mov r1, 0x20
+    jl usb_alloc_copy
+    mov r18, r0
+    mov r0, USB_SAVE + 0x270
+    mov r1, 0x40
+    jl usb_alloc_copy
+    mov r16, r0
+    mov r1, 0xf67a34
+    st r16, [r1]
+    mov r1, 0xf67a24
+    st r14, [r1]
+    mov r1, 0xf67a28
+    st r17, [r1]
+    mov r1, 0xf67a2c
+    st r20, [r1]
+    mov r1, 0xf67a30
+    st r13, [r1]
+    mov r1, 0xf67a44
+    st r18, [r1]
+    mov r0, USB_SAVE + 0x2b0
+    mov r1, 0x28
+    jl usb_alloc_copy
+    st r0, [r13, 0x30]
+    mov r0, USB_SAVE + 0x2d8
+    mov r1, 2
+    jl usb_alloc_copy
+    st r0, [r13, 0x34]
+    mov r1, USB_SAVE
+    ld r1, [r1, 4]
+    sub r0, r1, 1
+    mov r2, 0x3ff
+    cmp r0, r2
+    bhi warm_restore_scalars
+    mov r0, USB_SAVE + 0x2da
+    jl usb_alloc_copy
+    mov r1, 0xf67a3c
+    st r0, [r1]
+warm_restore_scalars:
+    mov r0, USB_SAVE
+    ld r1, [r0, 4]
+    mov r2, 0xf67a38
+    st r1, [r2]
+    ldh r1, [r0, 0xe]
+    mov r2, 0xf67f12
+    sth r1, [r2]
+    ldh r1, [r0, 0xc]
+    mov r2, 0xf67f10
+    sth r1, [r2]
+    ld r1, [r0, 8]
+    mov r2, 0xf67fa8
+    st r1, [r2]
+    ldb r1, [r0, 0x10]
+    mov r2, 0xf66bc4
+    stb r1, [r2]
+    /* ROM の USB の処理表を ROM の関数で埋め直す */
+    mov r1, usb_rom_words
+warm_restore_words:
+    ld r2, [r1, 0]
+    breq r2, 0, warm_restore_links
+    ld r3, [r1, 4]
+    st r3, [r2]
+    add r1, r1, 8
+    b warm_restore_words
+warm_restore_links:
+    mov r0, 0xf67fa4
+    st r13, [r0]
+    mov r0, 0xf67f8c
+    st r0, [r17, 76]
+    mov r0, 0x20
+    jl usb_alloc_zero
+    mov r1, 0xf67a60
+    st r0, [r1]
+    mov r0, 512
+    jl usb_alloc_zero
+    mov r1, 0xf67a64
+    st r0, [r1]
+    st r13, [r14, 0xc]
+    st r17, [r14, 4]
+    mov r0, 0
+    stb r0, [r14, 0x14]
+    mov r0, 0x18
+    jl usb_alloc_zero
+    st r0, [r14, 0x18]
+    mov r0, 256
+    jl usb_alloc_zero
+    st r0, [r14, 0x1c]
+    st r14, [r13, 0x20]
+    st r18, [r13, 28]
+    mov r0, 0xf67f70
+    mov r1, 0x1c
+    jl ROM_ZERO
+    mov r0, 0xf67f70
+    mov r1, 0x6750
+    st r1, [r0]
+    mov r1, 0x6768
+    st r1, [r0, 4]
+    st r0, [r13, 0]
+    add r1, r13, 56
+    st r1, [r13, 4]
+    mov r1, 0x13130
+    st r1, [r18, 8]
+    mov r1, 0x1319c
+    st r1, [r18, 24]
+    st r20, [r17, 8]
+    ld r1, [r17, 20]
+    mov r0, 0xc40e00
+    st.di r0, [r1]
+    add r0, r13, 152
+    st r0, [r13, 152]
+    st r0, [r13, 156]
+    add r0, r13, 220
+    add r2, r13, 8
+    add r1, r13, 136
+    st r0, [r13, 220]
+    st r0, [r13, 224]
+    add r0, r13, 204
+    st r13, [r13, 0x78]
+    st r0, [r13, 0xc]
+    st r0, [r13, 136]
+    st r13, [r13, 188]
+    st r2, [r13, 140]
+    st r1, [r13, 8]
+    st.as r13, [r13, 64]
+    st r2, [r13, 204]
+    st r1, [r13, 208]
+    mov r0, r17
+    jl ROM_USB_SPEED
+    add r20, r13, 124
+    add r19, r13, 192
+    /* 高速 (戻り値 3) と全速で、ROM の記述子の表が異なる */
+    mov r15, 0xf66bc0
+    cmp r0, 3
+    mov.eq r15, 0xf66bbc
+    ld r15, [r15]
+    add r17, r16, 24
+    mov r0, r17
+    mov r1, 0x19ff4
+    mov r2, 7
+    jl ROM_COPY
+    ldh r0, [r15, 0]
+    st r20, [r16, 8]
+    sth r0, [r16, 28]
+    st r17, [r13, 148]
+    add r17, r16, 0x21
+    mov r0, r17
+    mov r1, 0x1a000
+    mov r2, 7
+    jl ROM_COPY
+    ldh r0, [r15, 2]
+    stb r0, [r16, 37]
+    st r19, [r16, 12]
+    lsr r0, r0, 8
+    stb r0, [r16, 38]
+    ld r0, [r13, 4]
+    st r17, [r13, 216]
+    add r1, r0, 12
+    st r1, [r0, 0xc]
+    st r1, [r0, 0x10]
+    add r1, r13, 84
+    st r1, [r13, 0x54]
+    st r1, [r13, 0x58]
+    mov r1, 0xf67f54
+    st r1, [r0, 8]
+    mov r0, 0
+    stb r0, [r14, 0x14]
+    mov r1, ROM_WARM_ENTRY + 0x3c
+    mov r0, idle_hook
+    st.di r0, [r1]
+    jl ROM_USB_ATTACH
+    mov r0, 1
+    jl ROM_USB_CONFIGURE
+    mov r0, 1
+    stb r0, [r14, 0x14]
+    ld r0, [r14, 4]
+    jl ROM_USB_ENDPOINTS
+    mov r13, 1
+    mov r1, 0xf67a50
+    st r13, [r1]
+    mov r1, 0xf67a40
+    st r13, [r1]
+    mov r1, 0xf68278
+    st r13, [r1]
+    mov r0, 0
+    jl ROM_USB_PIPE
+    mov r0, 1
+    jl ROM_USB_PIPE
+    mov r0, 12
+    jl ROM_ALLOC
+    mov.f r1, r0
+    beq warm_restore_done
+    mov r2, 0xc1
+    stb r2, [r1, 0]
+    mov r2, 2
+    stb r2, [r1, 1]
+    stb r13, [r1, 2]
+    mov r2, 0
+    stb r2, [r1, 3]
+    mov r3, 12
+    stb r3, [r1, 4]
+    stb r2, [r1, 5]
+    stb r2, [r1, 6]
+    stb r2, [r1, 7]
+    st r2, [r1, 8]
+    jl ROM_USB_NOTIFY
+warm_restore_done:
+    mov r0, 5
+    mov r1, ROM_WORK + 8
+    st.di r0, [r1]
+    pop_s r13
+    pop_s r14
+    pop_s r15
+    ld.ab r16, [sp, 4]
+    ld.ab r17, [sp, 4]
+    ld.ab r18, [sp, 4]
+    ld.ab r19, [sp, 4]
+    ld.ab r20, [sp, 4]
+    pop_s blink
+    j app_init
 
 /* BonDriver_S1UD.dll の J.83B 用 firmware と同じ要求 0x37A (= 890、この probe の命令と同じ番号)。
    90 MHz 以上の引数は周波数 (Hz) として連続送出を始め、送出タスクの作成後の 0 は送出を止める。
@@ -1780,6 +2284,24 @@ release_request:
     j_s [blink]
 
     .balign 4
+/* warm 入口で 0xe40000 へ写す領域 (写し先, 写し元, 長さ)。写し元が 0xf00000 以上なら、その ROM の変数が指す領域。
+   小さい値は 0xf67a30 が指す構造の中の、その位置の語が指す領域 */
+usb_save_table:
+    .long USB_SAVE + 0x14, 0xf67a24, 0x20
+    .long USB_SAVE + 0x34, 0xf67a28, 0x50
+    .long USB_SAVE + 0x84, 0xf67a2c, 0x38
+    .long USB_SAVE + 0xbc, 0xf67a30, 404
+    .long USB_SAVE + 0x250, 0xf67a44, 0x20
+    .long USB_SAVE + 0x270, 0xf67a34, 0x40
+    .long USB_SAVE + 0x2b0, 0x30, 0x28
+    .long USB_SAVE + 0x2d8, 0x34, 2
+    .long 0
+/* 復元処理で ROM の USB の処理表へ置く値 (アドレス, 値) */
+usb_rom_words:
+    .long 0xf67f8c, 0x6788, 0xf67f90, 0x6798, 0xf67f98, 0x67c0, 0xf67f9c, 0x67a8
+    .long 0xf67f54, 0x63e0, 0xf67f58, 0x64a0, 0xf67f5c, 0x64e4, 0xf67f60, 0x6648, 0xf67f64, 0x66d8
+    .long 0xf67f68, 0, 0xf67f6c, 0, 0xf67a58, 0, 0xf68278, 0, 0xf68274, 1
+    .long 0
 small_frame:
     .short 0
     .byte 11, 0
