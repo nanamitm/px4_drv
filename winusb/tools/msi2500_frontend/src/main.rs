@@ -618,14 +618,16 @@ impl Pipe {
 }
 
 /// serve の出力。処理系からの OutMsg を hostproto のフレームで標準出力へ書き、250 ms ごとに状態フレームを出す。
-/// 標準出力へ書けなくなったら stop を立てる。(終了コード, DriverHost が拒むため取り除いたパケット数) を返す
+/// 標準出力へ書けなくなったら stop を立てる。(終了コード, DriverHost が拒むため取り除いたパケット数) を返す。
+/// mer は状態フレームの payload に載せる復調器の MER (dB、測れていなければ None)
 fn serve_output(
     stdout: &mut impl Write,
     orx: std::sync::mpsc::Receiver<OutMsg>,
     stop: &std::sync::atomic::AtomicBool,
     rs_counts: &dyn Fn() -> (u64, u64),
+    mer: &dyn Fn() -> Option<f32>,
 ) -> (i32, usize) {
-    use msi2500_frontend::hostproto::{retain_valid_packets, write_frame, Kind, MAX_TS};
+    use msi2500_frontend::hostproto::{retain_valid_packets, status_payload, write_frame, Kind, MAX_TS};
     use std::sync::atomic::Ordering;
     use std::sync::mpsc::RecvTimeoutError;
     use std::time::Duration;
@@ -662,6 +664,11 @@ fn serve_output(
                 } else {
                     quality
                 };
+                // DriverHost は MER の報告がない間は品質 (RS の成功割合) を C/N として返すため、
+                // 最初の TS の前に MER を載せた状態を送り、受信開始の時点から MER を表示させる
+                if last_ts.is_none() && !ts.is_empty() {
+                    write(Kind::Status, &status_payload(mer()), q, acc, rej);
+                }
                 for chunk in ts.chunks(MAX_TS) {
                     write(Kind::Ts, chunk, q, acc, rej);
                 }
@@ -686,7 +693,7 @@ fn serve_output(
                 0
             };
             (last_acc, last_rej) = (acc, rej);
-            write(Kind::Status, &[], quality, acc, rej);
+            write(Kind::Status, &status_payload(mer()), quality, acc, rej);
             last_status = Instant::now();
         }
     }
@@ -762,7 +769,9 @@ fn run_serve(mut it: impl Iterator<Item = String>) -> i32 {
     }
     let (otx, orx) = sync_channel::<OutMsg>(256);
     // 品質の元になる RS の成功数と失敗数 (ISDB-T は B 階層、J.83B は全 RS ブロック)
-    let (pipe, mut feeder, rs_counts): (Pipe, _, Box<dyn Fn() -> (u64, u64)>) = if a.j83b {
+    // MER は ISDB-T は B 階層、J.83B は判定帰還中の復調器の値
+    type MerFn = Box<dyn Fn() -> Option<f32>>;
+    let (pipe, mut feeder, rs_counts, mer): (Pipe, _, Box<dyn Fn() -> (u64, u64)>, MerFn) = if a.j83b {
         let cfg = J83bLiveConfig { raw_queue: 256, symbol_queue: 512, pll_scale: a.pll, ts_out: Some(Box::new(ChannelWriter(otx.clone()))) };
         let (live, feeder) = J83bLive::start(cfg);
         let st = live.stats.clone();
@@ -770,7 +779,12 @@ fn run_serve(mut it: impl Iterator<Item = String>) -> i32 {
             let f = st.lock().unwrap().fec_total();
             (f.rs_clean + f.rs_corrected, f.rs_uncorrectable)
         };
-        (Pipe::J83b(live), feeder, Box::new(counts))
+        let st = live.stats.clone();
+        let mer = move || {
+            let q = &st.lock().unwrap().qam;
+            q.dd.then_some(q.mer_db)
+        };
+        (Pipe::J83b(live), feeder, Box::new(counts), Box::new(mer))
     } else {
         let cfg = LiveConfig {
             viterbi_threads: a.viterbi_threads.max(1),
@@ -785,7 +799,12 @@ fn run_serve(mut it: impl Iterator<Item = String>) -> i32 {
             let b = st.lock().unwrap().layer_total(1);
             (b.clean + b.corrected, b.uncorrectable)
         };
-        (Pipe::Isdbt(live), feeder, Box::new(counts))
+        let st = live.stats.clone();
+        let mer = move || {
+            let o = &st.lock().unwrap().ofdm;
+            (o.acquired && o.mer_db[1] != 0.0).then_some(o.mer_db[1])
+        };
+        (Pipe::Isdbt(live), feeder, Box::new(counts), Box::new(mer))
     };
     let capture_thread = {
         let otx = otx.clone();
@@ -827,7 +846,7 @@ fn run_serve(mut it: impl Iterator<Item = String>) -> i32 {
     };
     drop(otx);
 
-    let (code, dropped) = serve_output(&mut stdout, orx, &stop, rs_counts.as_ref());
+    let (code, dropped) = serve_output(&mut stdout, orx, &stop, rs_counts.as_ref(), mer.as_ref());
     let _ = capture_thread.join();
     if dropped > 0 {
         eprintln!("[serve] dropped {dropped} packets that DriverHost would reject (TEI or invalid adaptation field)");
@@ -881,6 +900,12 @@ fn run_serve_s1ud(mut it: impl Iterator<Item = String>) -> i32 {
         let f = st.lock().unwrap().fec_total();
         (f.rs_clean + f.rs_corrected, f.rs_uncorrectable)
     };
+    // MER は判定帰還で追従している間だけ渡す。CMA で収束を待つ間の値は C/N の目安にならない
+    let st = live.stats.clone();
+    let mer = move || {
+        let q = &st.lock().unwrap().qam;
+        q.dd.then_some(q.mer_db)
+    };
     let input_thread = {
         let otx = otx.clone();
         let stop = stop.clone();
@@ -933,7 +958,7 @@ fn run_serve_s1ud(mut it: impl Iterator<Item = String>) -> i32 {
         }).expect("spawn stdin thread")
     };
     drop(otx);
-    let (code, dropped) = serve_output(&mut stdout, orx, &stop, &rs_counts);
+    let (code, dropped) = serve_output(&mut stdout, orx, &stop, &rs_counts, &mer);
     let _ = input_thread.join();
     if dropped > 0 {
         eprintln!("[serve-s1ud] dropped {dropped} packets that DriverHost would reject (TEI or invalid adaptation field)");
