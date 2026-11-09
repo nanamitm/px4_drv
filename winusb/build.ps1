@@ -395,6 +395,15 @@ if ($LASTEXITCODE -ne 0) { throw 'RTL-SDR package validation failed.' }
 & python (Join-Path $PSScriptRoot 'tests/rtlsdr_package_test.py')
 if ($LASTEXITCODE -ne 0) { throw 'RTL-SDR package regression tests failed.' }
 
+# RSP1 互換機 (MSi2500) の実験的な対応。helper の自動試験とビルド、対応ソースを含む配布物を作る。
+foreach ($runtime_architecture in @('x86', 'x64')) {
+    # VsDevCmd が追加する PATH/INCLUDE/LIB を次の architecture へ持ち越さない。
+    & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot 'tools/msi2500/build-bondriver.ps1') -SkipNativeBuild -Architecture $runtime_architecture
+    if ($LASTEXITCODE -ne 0) { throw "MSi2500 packaging failed ($runtime_architecture)" }
+}
+& python (Join-Path $PSScriptRoot 'tools/check_msi2500_package.py')
+if ($LASTEXITCODE -ne 0) { throw 'MSi2500 package validation failed.' }
+
 # 共通ホストの全配置先へ Siano firmware とライセンスを同梱する。
 & python (Join-Path $PSScriptRoot 'tools/package_siano.py')
 if ($LASTEXITCODE -ne 0) { throw 'PX-S1UD packaging failed.' }

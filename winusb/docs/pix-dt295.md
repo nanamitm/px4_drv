@@ -34,7 +34,7 @@ x86/x64 の上流 bootstrap / loader / session / USB window / stream input、Win
 
 1. `06b8:103b` のPIX-DT295であることを確認し、`PIX-DT295.inf` を使用する機器だけへWinUSBを割り当てます。PIX-DT295 Wなど別PIDは対象外です。
 2. `BonDriver_DT295_32bit` または `64bit` をアプリのビット数に合わせて配置します。ファームウェアは実際に起動するDriverHostと同じディレクトリの `firmware` 以下に必要です。
-3. `DriverHost_PX4.ini` の `[DeviceDefinition19.Config]` を `Experimental=true` へ変更します。初期設定はfalseのため受信機を登録せず、ファームウェアの転送もありません。
+3. `DriverHost_PX4.ini` の `[DeviceDefinition20.Config]` を `Experimental=true` へ変更します。初期設定はfalseのため受信機を登録せず、ファームウェアの転送もありません。
 4. 外部カードリーダーと外部アンテナ給電を用意します。BonDriverの `LNBPower=0` を維持し、未実装の内蔵カードや給電制御を前提にしない構成で確認します。
 5. ソース生成版は初回選局でRAM前像を保存し、一時コードを配置します（約1.3～2秒）。旧ファームウェアがRAMに残っている場合はUSBを抜き差しします。既知のRev.01とブートRAMが一致しない機器では初期化に失敗します。ログの `PIX-DT295 direct-fr` と `PIX-DT295 source-fr` の行で初期化結果を確認できます。
 6. 地デジ、BS/CSのTSID指定、同一方式の選局反復、地デジと衛星の切替、閉じて再オープン、無信号、USB抜去・再接続、長時間録画を個別に確認します。sync / TEI / CC、TS量と無入力時間、終了の所要時間を記録します。
@@ -61,10 +61,10 @@ I²Cパススルーを機器側、初期化・選局をホスト側へ置く構�
 
 ### 192バイト転送版を使う
 
-`DriverHost_PX4.ini` の `[DeviceDefinition19.Config]` を次のように設定します。
+`DriverHost_PX4.ini` の `[DeviceDefinition20.Config]` を次のように設定します。
 
 ```ini
-[DeviceDefinition19.Config]
+[DeviceDefinition20.Config]
 Experimental=true
 FirmwareBackend=source-fr
 ```
@@ -114,7 +114,7 @@ CNRを250msごとに取得する10分試験の1回目では、試験中にPX-W3U
 配布設定には次の値が含まれています。以前の配布物のINIを使い続ける場合は、次の値を追記します。
 
 ```ini
-[DeviceDefinition19.Config]
+[DeviceDefinition20.Config]
 Experimental=true
 FirmwareBackend=direct-fr
 ```
