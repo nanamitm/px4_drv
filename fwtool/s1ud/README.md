@@ -421,9 +421,53 @@ batch finishes or its bounded DMA wait expires.
 Request 890 has the same number as the reference J.83B request 0x37A.
 An argument of 90,000,000 or more is a frequency in Hz. It starts
 a continuous stream of 892 (0x37C) blocks, like the reference firmware.
-Only 138,750,000 Hz is accepted. It is the only frequency whose PLL
-word and RF masks were read from the reference. Other frequencies
-return result 1. After the first frequency request, argument 0 stops
+Frequencies from 90 MHz to 775 MHz are accepted, the same range as
+DriverHost. Frequencies above that range return result 1.
+
+The tuning follows the reference routines at 0x47afc and 0x478b4.
+The sub-band boundaries are 84, 150, and 360 MHz. Below 84 MHz the PLL
+step is one sixteenth of the 12 MHz reference. Below 360 MHz it is one
+eighth, and above that it is twice the reference.
+N is the frequency divided by the step, with a half rounded up. The
+signed 14-bit fraction is the remainder times 8192 divided by the step,
+rounded the same way. Bits 8 and 9 are 0x200 below 360 MHz. A 23-entry
+table of (address, mask, value per sub-band) sets the RF registers. It
+contains the same values as the reference table at 0x4ae84. Bit 18 of
+0x852040 is set below 360 MHz, and bit 2 is cleared. The computed PLL
+word matched the reference at all 18 sampled frequencies from 93 MHz to
+765 MHz. 0x852004, 0x852040, and bits 19–20 of 0x852000 also matched at
+all 18. The ADC path and clock registers did not change with frequency
+in the reference.
+
+The RF gain field of 0x852000 is set by an AGC in the streaming task.
+There are 10 steps below 360 MHz and 5 above. They are gain values that
+the reference AGC selected while streaming. Each step raised the level
+by 1.3–2 times on 327.25, 333.75, and 138.75 MHz, and the high band
+order was checked on 580.75 MHz. The level comes from 64 words spread
+over each packed block. The absolute values are summed over 32 blocks.
+The AGC moves one step up below a mean absolute value of 14, which is
+a complex RMS of about 25, and one step down above 32, about 57.
+An earlier lower limit of 11 left weak channels near RMS 20, and their
+MER was 1.5–2 dB below the reference. `agc_limits` holds the two sums.
+A nonzero `gain_override` fixes 0x852000 to that value and disables
+the AGC. Both can be written with argument 100 before a stream starts.
+
+On this cable feed, the reference firmware decoded 7 of the 16 J.83B
+channels in the BonDriver channel list. The 4 s v32 recordings decoded
+the same 7 channels:
+
+| Channel (MHz) | AGC step | MER (dB) | Reference MER (dB) |
+| ---: | ---: | ---: | ---: |
+| 132.25 | 1 | 30.8 | 30.9 |
+| 138.75 | 1 | 31.7 | 32.0 |
+| 281.75 | 1 | 32.0 | 30.9 |
+| 288.25 | 1 | 31.2 | 31.2 |
+| 327.25 | 6 | 30.0 | 30.9 |
+| 333.75 | 7 | 30.2 | 30.1 |
+| 580.75 | 2 | 33.6 | 32.7 |
+
+The other 9 channels did not decode with either firmware. Frequencies
+below 90 MHz were not tested. After the first frequency request, argument 0 stops
 the stream. Both replies are 891 (0x37B) with seven little-endian words:
 result, filled, sent, late, dropped, timeouts, and errors. The counts
 accumulate from the first start.
@@ -459,6 +503,32 @@ demodulator restart. 11,000 reference-firmware blocks from the same
 channel gave 178,053 packets, with 655 blocks dropped by the chip.
 DriverHost cold-boot loading, other frequencies, and long runs have not
 been tested.
+
+#### Send slots and dropped blocks
+
+With 32 overlapped 16 KB host reads, the standalone probe dropped 0.136%
+of the blocks in 30 minutes with 12 slots. The reference firmware
+dropped 0.114% in 10 minutes. In both, every drop was a block whose
+slot was still waiting for USB completion. The host arrival intervals
+were mostly 0.60–0.65 ms. Occasional runs of 3–7 ms intervals let the
+send queue grow. While it drained, the fastest intervals were
+0.40–0.45 ms, only 10–50% above the data rate. When all slots were busy,
+one whole round of slots was dropped, so the burst length matched the
+slot count. Changing the reference task argument r7 from 0x1e to 1 did
+not change the rate.
+
+`slot_config` sets the slot count (up to 64), the first slot address,
+the header and descriptor addresses, the slot spacing, the number of
+slots before a second region, the second region address, and the
+blocks per send (1 or 2). RAM was found at 0xe00000–0xe0ffff (mirrored
+at 0xe10000) and 0xe20000–0xe6ffff. In 10-minute runs, 20 slots dropped
+0.087%. 26 slots dropped 0.105%, and ROM_SEND_BULK rejected 265 sends,
+which suggests a ROM limit of 20 to 25 queued sends. Sending two blocks
+per 0x37C message dropped 0.095% with 11 slots, against 0.130% for one
+block with 20 slots. That is within the variation between runs of the
+same setting (0.059–0.136%). The defaults stay at 12 slots of one block.
+A host that receives two-block messages must split the payload into
+14,724-byte blocks.
 
 Argument 100 followed by an address and a value writes one register.
 It replies with 894: address, value, and readback. Read registers

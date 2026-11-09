@@ -18,7 +18,8 @@
     .equ ROM_IRQ_DISABLE, 0xb64
     .equ ROM_IRQ_RESTORE, 0xb94
     /* 連続送出の送信枠。参照 firmware と同じく 0x4000 バイト間隔の 12 枠を順に使う */
-    .equ STREAM_SLOTS, 12
+    /* 送信枠の上限。枠の数と配置は slot_config で変えられ、既定は参照 firmware と同じ 12 枠 */
+    .equ STREAM_SLOTS_MAX, 64
     .equ RING_BASE, 0xf68500
     .equ RING_END, 0xf6f800
     /* DMA は 1 ブロック分の環状領域の最後の語を書いて停止する。この語の変化で終端を検出する */
@@ -53,14 +54,15 @@ handle_message:
 /* BonDriver_S1UD.dll の J.83B 用 firmware と同じ要求 0x37A (= 890、この probe の命令と同じ番号)。
    90 MHz 以上の引数は周波数 (Hz) として連続送出を始め、送出タスクの作成後の 0 は送出を止める。
    応答 0x37B (= 891) は結果と送出の累積統計 (filled, sent, late, dropped, timeouts, errors) を返す。
-   PLL とマスクの値を参照 firmware で確認した 138.75 MHz だけを受け付け、ほかは結果 1 を返す。
+   周波数は DriverHost と同じ 90 MHz から 775 MHz までを受け付け、範囲外は結果 1 を返す。
    入口では fixed_data が blink と r13 を退避し、r13 が要求を指す */
 iq_request:
     mov r2, 1
     ld r1, [r13, 8]
     breq r1, 0, iq_accept
-    mov r3, 138750000
-    brne r1, r3, iq_reply
+    mov r3, 775000000
+    cmp r1, r3
+    bhi iq_reply
 iq_accept:
     mov r0, stream_state
     ld r3, [r0, 0]
@@ -275,6 +277,12 @@ capture_start:
     mov.eq r6, 0xfb6c5000
     cmp r1, 11
     mov.eq r6, 0xc0017600
+    /* 固定の PLL 語の試験は、138.75 MHz を副帯域 1、地上波の 13ch と 14ch を副帯域 3 として扱う */
+    mov r0, tune_sub
+    mov r1, 3
+    cmp r6, 0xc0017600
+    mov.eq r1, 1
+    st r1, [r0]
     jl capture_tune
     b capture_route
 
@@ -532,10 +540,12 @@ capture_adc_record:
     mov r0, 0x852004
     mov r1, 0x001e50a0
     st.di r1, [r0]
-    mov r0, 0x852008
-    ld.di r1, [r0]
-    cmp r1, 0xc0017600
-    bne prepare_capture_ring
+    /* 360 MHz 以下 (副帯域 0 から 2) は、参照 firmware が 138.75 MHz の送出中に使っていた RF の値を書く。
+       ゲインは参照の AGC が選んだ値で固定し、周波数ごとの調整はしない */
+    mov r0, tune_sub
+    ld r1, [r0]
+    cmp r1, 3
+    bhs prepare_capture_ring
     mov r0, 0x852000
     mov r1, 0x00108d59
     st.di r1, [r0]
@@ -549,6 +559,43 @@ capture_adc_record:
     bset r1, r1, 18
     st.di r1, [r0, 0x40]
 prepare_capture_ring:
+    /* RF ゲインの初期値。gain_override が 0 以外ならその値で固定し、AGC を止める。
+       0 なら帯域の段列 (360 MHz 未満と以上で別) の開始段を書き、送出中の AGC を有効にする */
+    mov r2, agc_state
+    mov r0, gain_override
+    ld r1, [r0]
+    breq r1, 0, prepare_agc
+    mov r0, 0x852000
+    st.di r1, [r0]
+    mov r1, 0
+    st r1, [r2, 0]
+    b prepare_capture_clear
+prepare_agc:
+    mov r0, tune_sub
+    ld r0, [r0]
+    mov r3, agc_low_ladder
+    mov r4, AGC_LOW_STEPS
+    mov r5, AGC_LOW_START
+    cmp r0, 3
+    blo prepare_agc_ladder
+    mov r3, agc_high_ladder
+    mov r4, AGC_HIGH_STEPS
+    mov r5, AGC_HIGH_START
+prepare_agc_ladder:
+    mov r1, 1
+    st r1, [r2, 0]
+    st r3, [r2, 4]
+    st r4, [r2, 8]
+    st r5, [r2, 12]
+    mov r1, 0
+    st r1, [r2, 16]
+    st r1, [r2, 20]
+    asl r5, r5, 2
+    add r5, r5, r3
+    ld r1, [r5]
+    mov r0, 0x852000
+    st.di r1, [r0]
+prepare_capture_clear:
     mov r0, 0xf68500
     mov r1, 0xf6f800
     mov r2, 0xa5a5a5a5
@@ -813,7 +860,8 @@ stream_idle:
     st.di r0, [r13, 8]
     ld.di r2, [r13, 4]
     breq r2, 0, stream_idle
-    mov r6, 0xc0017600
+    mov r0, r2
+    jl freq_to_pll
     jl capture_tune
     jl stream_run
     b stream_idle
@@ -828,6 +876,10 @@ stream_idle_wait:
 stream_run:
     push_s blink
     jl stream_init_slots
+    /* r24 は枠の中の何番目のブロックか、r25 は 1 回の送信にまとめるブロック数 */
+    mov r24, 0
+    mov r0, slot_config
+    ld.di r25, [r0, 28]
     mov r14, 0
     mov r17, 0
     mov r18, 2
@@ -860,11 +912,21 @@ stream_block:
     ld.di r1, [r13, 8]
     cmp r0, r1
     bne stream_stop
-    asl r16, r14, 14
-    add r16, r16, SAMPLE_PAYLOAD
+    /* 枠の配置は 2 領域に分かれうるため、送信先は DMA 記述子の先頭語から読む */
+    mov r0, slot_config
+    ld.di r1, [r0, 12]
+    asl r0, r14, 4
+    add r0, r0, r1
+    ld.di r16, [r0]
+    /* 枠の 2 番目のブロックは、1 番目の直後に詰める。枠が使用中かは 1 番目で判定した値を使う */
+    breq r24, 0, stream_block_first
+    add r16, r16, 14724
+    b stream_block_ready
+stream_block_first:
     mov r0, slot_busy
     add r0, r0, r14
     ldb.di r19, [r0]
+stream_block_ready:
     mov r15, 0
     mov r21, 1
     mov r22, 2000000
@@ -941,10 +1003,20 @@ stream_tail_done:
     mov_s r1, 0
     st.di r1, [r0]
     jl stream_submit
+    /* 詰めたブロックだけで受信レベルを測る */
+    brne r19, 0, stream_agc_done
+    jl agc_update
+stream_agc_done:
     mov r18, r21
     add r17, r17, 1
+    add r24, r24, 1
+    cmp r24, r25
+    blo stream_block
+    mov r24, 0
     add r14, r14, 1
-    cmp r14, STREAM_SLOTS
+    mov r0, slot_config
+    ld.di r1, [r0, 0]
+    cmp r14, r1
     mov.hs r14, 0
     b stream_block
 
@@ -959,6 +1031,8 @@ stream_timeout:
     mov_s r1, 0
     st.di r1, [r0]
     mov r18, 2
+    /* 詰めかけの枠は、最初のブロックから詰め直す */
+    mov r24, 0
     mov r0, 0x840280
     mov_s r1, 1
     st.di r1, [r0]
@@ -974,9 +1048,10 @@ stream_stop:
     /* USB の完了を最大 100 ms 待ち、送信中の枠を解放してから待機へ戻る */
     mov r15, 1000
 stream_stop_wait:
+    mov r0, slot_config
+    ld.di r2, [r0, 0]
     mov r0, slot_busy
     mov r1, 0
-    mov r2, STREAM_SLOTS
 stream_stop_scan:
     ldb.di r3, [r0]
     or r1, r1, r3
@@ -1052,6 +1127,13 @@ stream_submit:
     or r0, r0, r1
     add r1, r16, 14720
     st.di r0, [r1]
+    /* まとめる最後のブロックまでは送らない */
+    add r0, r24, 1
+    cmp r0, r25
+    bhs stream_submit_send
+    pop_s blink
+    j_s [blink]
+stream_submit_send:
     mov r0, slot_busy
     add r20, r0, r14
     mov_s r1, 1
@@ -1060,7 +1142,9 @@ stream_submit:
     asl r2, r14, 3
     asl r3, r14, 2
     add r2, r2, r3
-    add r2, r2, SAMPLE_HEADER
+    mov r3, slot_config
+    ld.di r3, [r3, 8]
+    add r2, r2, r3
     mov_s r0, 0
     mov_s r1, 1
     mov_s r3, 0
@@ -1068,16 +1152,21 @@ stream_submit:
     mov r1, stream_stats
     breq r0, 0, stream_submit_reject
     ld.di r2, [r1, 4]
-    add r2, r2, 1
+    add r2, r2, r25
     st.di r2, [r1, 4]
     pop_s blink
     j_s [blink]
 stream_submit_reject:
+    /* 送れなかった枠のブロックはすべて失う。errors は拒否の回数、dropped はブロック数 */
     mov_s r0, 0
     stb.di r0, [r20]
     ld.di r2, [r1, 20]
     add r2, r2, 1
     st.di r2, [r1, 20]
+    ld.di r2, [r1, 12]
+    add r2, r2, r25
+    sub r2, r2, 1
+    st.di r2, [r1, 12]
 stream_submit_drop:
     mov r1, stream_stats
     ld.di r2, [r1, 12]
@@ -1088,28 +1177,49 @@ stream_submit_drop:
 
 /* 12 枠の HIF ヘッダーと DMA 記述子。参照 firmware の 0x48984 と同じ配置 */
 stream_init_slots:
-    mov r0, SAMPLE_HEADER
-    mov r1, SAMPLE_DESCRIPTOR
-    mov r2, SAMPLE_PAYLOAD
-    mov r3, STREAM_SLOTS
+    /* 枠の数が上限を超えていれば上限に揃える */
+    mov r5, slot_config
+    ld.di r3, [r5, 0]
+    cmp r3, STREAM_SLOTS_MAX
+    mov.hi r3, STREAM_SLOTS_MAX
+    st.di r3, [r5, 0]
+    ld.di r2, [r5, 4]
+    ld.di r0, [r5, 8]
+    ld.di r1, [r5, 12]
+    ld.di r6, [r5, 16]
+    ld.di r7, [r5, 20]
+    ld.di r8, [r5, 24]
+    /* 1 回の送信にまとめるブロック数は 1 か 2。HIF の長さは 16 ビットのため 2 までとする */
+    ld.di r9, [r5, 28]
+    cmp r9, 2
+    mov.ne r9, 1
+    st.di r9, [r5, 28]
+    mov r10, 14724
+    cmp r9, 2
+    mov.eq r10, 29448
+    add r11, r10, 8
+    or r11, r11, 0x000d0000
     mov r5, slot_busy
 stream_init_next:
+    /* 最初の領域に split 枠を置いたら、2 番目の領域の先頭へ移る */
+    brne r7, 0, stream_init_place
+    mov r2, r8
+stream_init_place:
+    sub r7, r7, 1
     mov r4, 0x0100037c
     st.di r4, [r0, 0]
-    mov r4, 0x000d398c
-    st.di r4, [r0, 4]
+    st.di r11, [r0, 4]
     st.di r1, [r0, 8]
     st.di r2, [r1, 0]
     mov r4, 0
     st.di r4, [r1, 4]
     st.di r4, [r1, 8]
-    mov r4, 14724
-    st.di r4, [r1, 12]
+    st.di r10, [r1, 12]
     mov r4, 0
     stb.di r4, [r5]
     add r0, r0, 12
     add r1, r1, 16
-    add r2, r2, 0x4000
+    add r2, r2, r6
     add r5, r5, 1
     sub.f r3, r3, 1
     bne stream_init_next
@@ -1135,19 +1245,35 @@ pll_lock_sequence:
     ld.di r1, [r0]
     or r1, r1, 0x1000
     st.di r1, [r0]
-    mov r0, pll_uhf_masks
-    cmp r14, 0xc0017600
-    mov.eq r0, pll_cable_masks
+    mov r0, rf_band_table
+    mov r5, tune_sub
+    ld r5, [r5]
+    asl r5, r5, 2
 pll_mask_next:
-    ld.ab r1, [r0, 4]
-    breq r1, 0, pll_latch
-    ld.ab r2, [r0, 4]
-    ld.ab r3, [r0, 4]
+    ld r1, [r0, 0]
+    breq r1, 0, pll_band_bits
+    ld r2, [r0, 4]
+    add r3, r0, 8
+    add r3, r3, r5
+    ld r3, [r3]
     ld.di r4, [r1]
     bic r4, r4, r2
     or r4, r4, r3
     st.di r4, [r1]
+    add r0, r0, 24
     b pll_mask_next
+pll_band_bits:
+    /* 参照 firmware の 0x47c34 と同じく、0x852040 のビット 18 は 360 MHz 以下で立て、ビット 2 は落とす
+       (参照が入力の選択に使う値が 0 の場合)。360 MHz を超えると両方を落とす */
+    mov r1, 0x852040
+    ld.di r4, [r1]
+    bclr r4, r4, 2
+    bclr r4, r4, 18
+    cmp r5, 12
+    bhs pll_band_store
+    bset r4, r4, 18
+pll_band_store:
+    st.di r4, [r1]
 pll_latch:
     mov r0, 0x852008
     st.di r14, [r0]
@@ -1190,60 +1316,205 @@ pll_sequence_done:
     j_s [blink]
 
     .balign 4
-pll_uhf_masks:
-    .long 0x852040, 0x40004, 0
-    .long 0x852040, 0x80, 0x0
-    .long 0x852040, 0x100, 0x0
-    .long 0x852000, 0x80000, 0x80000
-    .long 0x85202c, 0xff00000, 0x0
-    .long 0x852034, 0xff0000, 0x0
-    .long 0x852040, 0x7e00, 0x2e00
-    .long 0x852040, 0x7000000, 0x0
-    .long 0x852040, 0x40, 0x40
-    .long 0x852040, 0x2, 0x0
-    .long 0x852040, 0x20000, 0x0
-    .long 0x852040, 0x10000, 0x10000
-    .long 0x852040, 0x8, 0x8
-    .long 0x852040, 0x20, 0x0
-    .long 0x852040, 0x10, 0x10
-    .long 0x852040, 0x8000, 0x0
-    .long 0x852034, 0x2, 0x0
-    .long 0x852034, 0x1, 0x0
-    .long 0x852040, 0x1, 0x0
-    .long 0x852004, 0x80, 0x80
-    .long 0x852040, 0x400000, 0x0
-    .long 0x852040, 0x40000000, 0x40000000
-    .long 0x852040, 0x80000, 0x0
-    .long 0x852008, 0x300, 0x0
+/* 帯域ごとの RF の設定。各行はアドレス、マスク、副帯域 0 から 3 の値。副帯域は 84 MHz 未満、150 MHz 未満、
+   360 MHz 未満、それ以上で、参照 firmware の 0x47afc と同じ境界。値は参照 firmware の 0x4ae84 の表と同じで、
+   副帯域 1 と 3 の列は実機の 138.75 MHz と 13ch の測定値とも一致した */
+rf_band_table:
+    .long 0x852040, 0x00000080, 0x00000080, 0x00000080, 0x00000080, 0x00000000
+    .long 0x852040, 0x00000100, 0x00000100, 0x00000100, 0x00000100, 0x00000000
+    .long 0x852000, 0x00080000, 0x00000000, 0x00000000, 0x00000000, 0x00080000
+    .long 0x85202c, 0x0ff00000, 0x00000000, 0x00000000, 0x00000000, 0x00000000
+    .long 0x852034, 0x00ff0000, 0x00000000, 0x00000000, 0x00000000, 0x00000000
+    .long 0x852040, 0x00007e00, 0x00007e00, 0x00007e00, 0x00007e00, 0x00002e00
+    .long 0x852040, 0x07000000, 0x07000000, 0x02000000, 0x00000000, 0x00000000
+    .long 0x852040, 0x00000040, 0x00000000, 0x00000000, 0x00000000, 0x00000040
+    .long 0x852040, 0x00000002, 0x00000000, 0x00000000, 0x00000000, 0x00000000
+    .long 0x852040, 0x00020000, 0x00020000, 0x00020000, 0x00020000, 0x00000000
+    .long 0x852040, 0x00010000, 0x00000000, 0x00000000, 0x00000000, 0x00010000
+    .long 0x852040, 0x00000008, 0x00000000, 0x00000000, 0x00000000, 0x00000008
+    .long 0x852040, 0x00000020, 0x00000020, 0x00000020, 0x00000020, 0x00000000
+    .long 0x852040, 0x00000010, 0x00000000, 0x00000000, 0x00000000, 0x00000010
+    .long 0x852040, 0x00008000, 0x00000000, 0x00000000, 0x00000000, 0x00000000
+    .long 0x852034, 0x00000002, 0x00000000, 0x00000000, 0x00000000, 0x00000000
+    .long 0x852034, 0x00000001, 0x00000000, 0x00000000, 0x00000000, 0x00000000
+    .long 0x852040, 0x00000001, 0x00000001, 0x00000001, 0x00000001, 0x00000000
+    .long 0x852004, 0x00000080, 0x00000000, 0x00000000, 0x00000000, 0x00000080
+    .long 0x852040, 0x00400000, 0x00400000, 0x00000000, 0x00000000, 0x00000000
+    .long 0x852040, 0x40000000, 0x40000000, 0x40000000, 0x40000000, 0x40000000
+    .long 0x852040, 0x00080000, 0x00000000, 0x00000000, 0x00000000, 0x00000000
+    .long 0x852008, 0x00000300, 0x00000200, 0x00000200, 0x00000200, 0x00000000
     .long 0
-    .balign 4
-pll_cable_masks:
-    .long 0x852040, 0x40004, 0
-    .long 0x852040, 0x80, 0x80
-    .long 0x852040, 0x100, 0x100
-    .long 0x852000, 0x80000, 0x0
-    .long 0x85202c, 0xff00000, 0x0
-    .long 0x852034, 0xff0000, 0x0
-    .long 0x852040, 0x7e00, 0x7e00
-    .long 0x852040, 0x7000000, 0x2000000
-    .long 0x852040, 0x40, 0x0
-    .long 0x852040, 0x2, 0x0
-    .long 0x852040, 0x20000, 0x20000
-    .long 0x852040, 0x10000, 0x0
-    .long 0x852040, 0x8, 0x0
-    .long 0x852040, 0x20, 0x20
-    .long 0x852040, 0x10, 0x0
-    .long 0x852040, 0x8000, 0x0
-    .long 0x852034, 0x2, 0x0
-    .long 0x852034, 0x1, 0x0
-    .long 0x852040, 0x1, 0x1
-    .long 0x852004, 0x80, 0x0
-    .long 0x852040, 0x400000, 0x0
-    .long 0x852040, 0x40000000, 0x40000000
-    .long 0x852040, 0x80000, 0x0
-    .long 0x852008, 0x300, 0x200
+/* 選局中の副帯域 (0 から 3) */
+tune_sub:
+    .long 3
+/* 0x852000 へ書く RF ゲインの指定 (0 は AGC) */
+gain_override:
     .long 0
+/* AGC の状態: 有効, 段列, 段数, 現在の段, 積算したブロック数, 振幅の積算 */
+agc_state:
+    .long 0, 0, 0, 0, 0, 0
+/* RF ゲインの段列 (0x852000 の値)。弱い側から強い側へ並べる。いずれも参照 firmware の AGC が送出中に
+   選んでいた値で、327.25 MHz と 333.75 MHz と 138.75 MHz で RMS がこの順に増えた (隣の段との比は約 1.3 から 2 倍)。
+   360 MHz 以上は 580.75 MHz で同じく順序を確かめた */
+    .equ AGC_LOW_STEPS, 10
+    .equ AGC_LOW_START, 1
+agc_low_ladder:
+    .long 0x001585d8, 0x00108d59, 0x001309d9, 0x001409d9, 0x001585dc
+    .long 0x001409dc, 0x0010915c, 0x001209df, 0x001409df, 0x00159959
+    .equ AGC_HIGH_STEPS, 5
+    .equ AGC_HIGH_START, 2
+agc_high_ladder:
+    .long 0x001d8a5f, 0x001a09f2, 0x001c897a, 0x001909fa, 0x001d9a5f
+/* 32 ブロックごとの振幅の積算に対する閾値 (下限, 上限)。各ブロックから 64 語 (256 標本) の絶対値を足す。
+   ガウス雑音に近い信号では、平均絶対値 14 と 32 が複素 RMS の約 25 と 57 に当たる。
+   下限を平均絶対値 11 (RMS 約 19) にすると、弱いチャンネルが RMS 20 前後で止まり、MER が参照より 1.5 から 2 dB
+   下がった (333.75 MHz で 27.9 dB)。参照 firmware は RMS 35 前後に保っている。隣の段との比は最大 2 倍のため、
+   上限と下限の比を 2 倍より大きくして段の間を行き来しないようにする。送出前なら引数 100 の書き込みで変えられる */
+    .equ AGC_BLOCKS, 32
+agc_limits:
+    .long 14 * 256 * 32, 32 * 256 * 32
 
+/* r16 のブロックから受信レベルを測り、AGC_BLOCKS ごとに RF ゲインを 1 段上げ下げする */
+agc_update:
+    mov r2, agc_state
+    ld r0, [r2, 0]
+    breq r0, 0, agc_return
+    /* 14720 バイトのブロック全体から間隔を空けて 64 語を取る */
+    mov r0, r16
+    mov r1, 64
+    ld r3, [r2, 20]
+agc_measure:
+    ld.ab r4, [r0, 228]
+    sexb r5, r4
+    abs r5, r5
+    add r3, r3, r5
+    asr r5, r4, 8
+    sexb r5, r5
+    abs r5, r5
+    add r3, r3, r5
+    asr r5, r4, 16
+    sexb r5, r5
+    abs r5, r5
+    add r3, r3, r5
+    asr r5, r4, 24
+    abs r5, r5
+    add r3, r3, r5
+    sub.f r1, r1, 1
+    bne agc_measure
+    st r3, [r2, 20]
+    ld r0, [r2, 16]
+    add r0, r0, 1
+    st r0, [r2, 16]
+    cmp r0, AGC_BLOCKS
+    blo agc_return
+    mov r0, 0
+    st r0, [r2, 16]
+    st r0, [r2, 20]
+    ld r1, [r2, 12]
+    mov r5, agc_limits
+    ld r4, [r5, 0]
+    cmp r3, r4
+    bhs agc_check_high
+    ld r0, [r2, 8]
+    sub r0, r0, 1
+    cmp r1, r0
+    bhs agc_return
+    add r1, r1, 1
+    b agc_apply
+agc_check_high:
+    ld r4, [r5, 4]
+    cmp r3, r4
+    bls agc_return
+    breq r1, 0, agc_return
+    sub r1, r1, 1
+agc_apply:
+    st r1, [r2, 12]
+    ld r0, [r2, 4]
+    asl r1, r1, 2
+    add r0, r0, r1
+    ld r1, [r0]
+    mov r0, 0x852000
+    st.di r1, [r0]
+agc_return:
+    j_s [blink]
+
+
+/* r0 の周波数 (Hz) から PLL 語を r6 へ求め、副帯域を tune_sub へ書く。参照 firmware の 0x47afc と 0x478b4 と同じ計算で、
+   12 MHz の基準に対する刻みは 84 MHz 未満が 1/16、360 MHz 未満が 1/8、それ以上が 2 倍。
+   N = round(f / 刻み) (半分は切り上げ)、frac = round((f - N * 刻み) * 8192 / 刻み) を符号つき 14 ビットで置く。
+   下位 10 ビットは帯域表の 0x852008 の値 (360 MHz 未満は 0x200) */
+freq_to_pll:
+    mov r2, 3
+    mov r3, 24000000
+    mov r4, 359999999
+    cmp r0, r4
+    bhi freq_band_done
+    mov r2, 2
+    mov r3, 1500000
+    mov r4, 149999999
+    cmp r0, r4
+    bhi freq_band_done
+    mov r2, 1
+    mov r4, 83999999
+    cmp r0, r4
+    bhi freq_band_done
+    mov r2, 0
+    mov r3, 750000
+freq_band_done:
+    mov r4, tune_sub
+    st r2, [r4]
+    mov r4, 0
+    mov r5, r0
+freq_div:
+    cmp r5, r3
+    blo freq_div_done
+    sub r5, r5, r3
+    add r4, r4, 1
+    b freq_div
+freq_div_done:
+    asl r7, r5, 1
+    cmp r7, r3
+    blo freq_frac
+    add r4, r4, 1
+    sub r5, r5, r3
+freq_frac:
+    mov r8, 0
+    brge r5, 0, freq_frac_abs
+    neg r5, r5
+    mov r8, 1
+freq_frac_abs:
+    mov r9, 0
+    mov r10, 13
+freq_frac_loop:
+    asl r5, r5, 1
+    asl r9, r9, 1
+    cmp r5, r3
+    blo freq_frac_next
+    sub r5, r5, r3
+    bset r9, r9, 0
+freq_frac_next:
+    sub.f r10, r10, 1
+    bne freq_frac_loop
+    asl r7, r5, 1
+    cmp r7, r3
+    blo freq_frac_rounded
+    add r9, r9, 1
+freq_frac_rounded:
+    breq r8, 0, freq_word
+    neg r9, r9
+freq_word:
+    and r9, r9, 0x3fff
+    asl r9, r9, 18
+    and r4, r4, 0xff
+    asl r4, r4, 10
+    or r6, r9, r4
+    cmp r2, 3
+    bhs freq_done
+    or r6, r6, 0x200
+freq_done:
+    j_s [blink]
+
+    .balign 4
 adc_path_setup:
     .long 0x8407f4, 3
     .long 0x841004, 0, 0x841008, 5, 0x84100c, 0
@@ -1267,9 +1538,15 @@ rf_setup:
 
 usb_complete:
     /* 送出の枠のヘッダーなら、その枠を空きに戻す。枠 0 は従来の単発送信と共用する */
-    mov r2, SAMPLE_HEADER
+    mov r2, slot_config
+    ld.di r4, [r2, 0]
+    asl r3, r4, 3
+    asl r4, r4, 2
+    add r4, r4, r3
+    ld.di r2, [r2, 8]
     sub r3, r1, r2
-    cmp r3, STREAM_SLOTS * 12
+    mov r2, SAMPLE_HEADER
+    cmp r3, r4
     bhs complete_single
     mov r4, slot_busy
 complete_find:
@@ -1356,8 +1633,14 @@ stream_state:
 /* filled, sent, late, dropped, timeouts, errors */
 stream_stats:
     .long 0, 0, 0, 0, 0, 0
+/* 送信枠の数、最初の領域の先頭、HIF ヘッダーの先頭 (12 バイト間隔)、DMA 記述子の先頭 (16 バイト間隔)、
+   枠の間隔、最初の領域に置く枠の数、2 番目の領域の先頭、1 回の送信にまとめるブロック数 (1 か 2)。
+   送出を始める前なら、引数 100 の書き込みで変えられる。
+   既定は参照 firmware と同じ 0xe20000 からの 0x4000 間隔の 12 枠で、1 ブロックずつ送る */
+slot_config:
+    .long 12, SAMPLE_PAYLOAD, SAMPLE_HEADER, SAMPLE_DESCRIPTOR, 0x4000, 0xffffffff, 0, 1
 slot_busy:
-    .space 12
+    .space STREAM_SLOTS_MAX
 task_name:
     .asciz "s1ud_iq"
     .balign 4
