@@ -371,3 +371,58 @@ completion before starting another capture. Each payload contains
 four-byte zero word. Negate the signed Q samples for the convention
 used by the host decoder. The probe uses a fixed-size capture ring
 and has no continuous-stream sequence counter.
+
+#### Capture window and 138.75 MHz test
+
+The standalone window probe polled the capture pointer for 10,000
+hardware timer ticks after one start. In nine trials across 13ch,
+14ch, and 138.75 MHz the pointer reached the end of the capture
+range, returned to the base once, and stayed there. The probe
+returned a burst for each trial. This confirms that one start
+does not produce a continuously wrapping stream in this setup.
+
+At 138.75 MHz the PLL locked and three standalone I/Q bursts were
+captured. Their complex RMS was 4.02 versus 35.94 for the reference
+capture at that frequency. Each burst was submitted separately to
+serve-s1ud with a zero tag. The decoder consumed the block, but did
+not acquire a frame or return a TS packet. The bursts have independent
+start times and do not provide a continuous stream for evaluating
+J.83B reception or measuring the sample loss rate.
+
+#### Back-to-back capture batches
+
+The batch probe alternates two DMA ranges and captures up to eight
+tagged blocks before the host reads them. The initial probes often
+stopped reporting after two blocks. Waiting for the next pointer to
+advance before packing the preceding block allowed the host to
+recognize a completed capture even when packing lasted through the
+entire DMA window. The corrected trial received eight unique blocks
+for 13ch and for each of five gain settings at 138.75 MHz, with
+48 accepted USB submissions, 48 completions, and no rejects.
+
+The completion-observation intervals alternated between 617–618 and
+844–856 timer ticks. These observations include polling and packing
+latency. They indicate a sample timing gap but do not give an exact
+sample loss count. The maximum mean-removed complex RMS among the
+138.75 MHz gain settings was 5.69 at field value 63, compared with
+35.94 for the earlier reference capture. Each eight-block batch was
+passed separately to serve-s1ud. No frame synchronization or TS
+packets were reported.
+
+The capture probe also supports a bounded batch test. Send argument
+11 to tune 138.75 MHz, or 8/9 for the terrestrial controls. An
+optional argument in the range 24–87 writes the six-bit RF gain
+field with the argument minus 24. Send argument 12 to acquire up
+to eight blocks and stop capture. This command returns after the
+batch finishes or its bounded DMA wait expires.
+
+Argument 2 returns the batch trace in 893. The first twelve
+(address, value) pairs contain the initial timer value, the number
+of completed slots, eight completion timestamps, the final observed
+DMA pointer, and the DMA base expected at exit. The remaining
+pairs read RF gain, PLL frequency, PLL status, and the capture
+pointer. Read only the completed slots with arguments 16–23,
+waiting for argument 0 to report USB completion before requesting
+the next slot or starting a new capture. Each 892 batch payload
+ends with its zero-based slot number as a 32-bit little-endian word.
+The tag restarts at zero for each batch.

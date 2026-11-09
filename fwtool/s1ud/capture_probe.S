@@ -60,9 +60,30 @@ fixed_data:
     beq capture_start
     cmp r1, 10
     beq capture_stop
+    cmp r1, 11
+    beq capture_start
+    cmp r1, 12
+    beq capture_batch
+    cmp r1, 24
+    bhs gain_test
+    cmp r1, 16
+    blo select_default_payload
+    cmp r1, 23
+    bhi status
+    sub r1, r1, 16
+    asl r1, r1, 14
+    add r1, r1, SAMPLE_PAYLOAD
+    b select_payload
+select_default_payload:
+    mov r1, SAMPLE_PAYLOAD
+select_payload:
+    mov r2, r1
+
     mov r0, stats
     ld r1, [r0, 20]
     brne r1, 0, status
+    mov r3, SAMPLE_DESCRIPTOR
+    st.di r2, [r3]
     mov_s r1, 1
     st r1, [r0, 20]
     mov_s r0, 0
@@ -151,6 +172,8 @@ capture_start:
     mov r6, 0xdb6c5000
     cmp r1, 9
     mov.eq r6, 0xfb6c5000
+    cmp r1, 11
+    mov.eq r6, 0xc0017600
     mov r0, 0x820000
     ld.di r1, [r0]
     bic r1, r1, 0x40004
@@ -402,6 +425,18 @@ capture_adc_record:
     mov r0, 0x852004
     mov r1, 0x001e50a0
     st.di r1, [r0]
+    mov r0, 0x852008
+    ld.di r1, [r0]
+    cmp r1, 0xc0017600
+    bne prepare_capture_ring
+    mov r0, 0x852000
+    mov r1, 0x00108d59
+    st.di r1, [r0]
+    mov r1, 0x001e5020
+    st.di r1, [r0, 4]
+    mov r1, 0x023c2216
+    st.di r1, [r0, 0x1c]
+prepare_capture_ring:
     mov r0, 0xf68500
     mov r1, 0xf6f800
     mov r2, 0xa5a5a5a5
@@ -431,6 +466,36 @@ capture_clear:
     st.di r1, [r0]
     mov r1, 0x2041a
     st.di r1, [r0]
+    mov r0, 0x856024
+    mov r1, 0x880040
+    ld.di r2, [r1]
+    ld.di r3, [r0]
+    mov r4, r3
+    mov r5, 0
+    mov r6, 0
+    mov r7, 0
+    mov r8, 500000
+capture_observe:
+    ld.di r9, [r0]
+    cmp r9, r3
+    add.ne r5, r5, 1
+    add.lo r6, r6, 1
+    cmp r9, r4
+    mov.hi r4, r9
+    mov r3, r9
+    ld.di r9, [r1]
+    sub r7, r2, r9
+    cmp r7, 10000
+    bhs capture_observed
+    sub.f r8, r8, 1
+    bne capture_observe
+capture_observed:
+    mov r0, observe_trace
+    st.di r3, [r0, 0]
+    st.di r4, [r0, 4]
+    st.di r5, [r0, 8]
+    st.di r6, [r0, 12]
+    st.di r7, [r0, 16]
     b status
 
 capture_stop:
@@ -458,6 +523,140 @@ capture_pack:
     bne capture_pack
     b status
 
+gain_test:
+    cmp r1, 87
+    bhi status
+    sub r1, r1, 24
+    mov r0, 0x852000
+    ld.di r2, [r0]
+    bic r2, r2, 0x3f
+    or r2, r2, r1
+    st.di r2, [r0]
+    b status
+
+/* Bounded experiment: fill eight USB slots while alternating two DMA ranges. */
+capture_batch:
+    push_s r14
+    push_s r15
+    mov r14, 0
+    mov r15, 0xf68500
+    mov r0, 0x880040
+    ld.di r1, [r0]
+    mov r0, batch_trace
+    st.di r1, [r0]
+    mov r1, 0
+    st.di r1, [r0, 4]
+    mov r0, r15
+    jl arm_capture
+    cmp r0, 0
+    beq batch_done
+batch_next:
+    mov r0, 0x856024
+    mov r1, 500000
+batch_wait_end:
+    ld.di r2, [r0]
+    cmp r2, r15
+    beq batch_full
+    sub.f r1, r1, 1
+    bne batch_wait_end
+    b batch_done
+batch_full:
+    mov r0, 0x880040
+    ld.di r3, [r0]
+    mov r0, batch_trace
+    asl r1, r14, 2
+    add r1, r1, r0
+    st.di r3, [r1, 8]
+    cmp r14, 7
+    beq batch_pack
+    mov r0, 0xe40000
+    cmp r15, 0xe40000
+    mov.eq r0, 0xf68500
+    jl arm_capture
+    cmp r0, 0
+    beq batch_done
+batch_pack:
+    mov r0, r15
+    asl r1, r14, 14
+    add r1, r1, SAMPLE_PAYLOAD
+    mov r2, 3680
+    mov r3, 0x00ff00ff
+batch_pack_next:
+    ld.di.ab r4, [r0, 4]
+    ld.di.ab r5, [r0, 4]
+    lsr r4, r4, 4
+    asl r5, r5, 4
+    and r4, r4, r3
+    bic r5, r5, r3
+    or r4, r4, r5
+    st.di.ab r4, [r1, 4]
+    sub.f r2, r2, 1
+    bne batch_pack_next
+    st.di r14, [r1]
+    add r14, r14, 1
+    mov r0, batch_trace
+    st.di r14, [r0, 4]
+    cmp r14, 8
+    beq batch_done
+    cmp r15, 0xe40000
+    beq batch_use_first
+    mov r15, 0xe40000
+    b batch_next
+batch_use_first:
+    mov r15, 0xf68500
+    b batch_next
+batch_done:
+    mov r0, 0x856024
+    ld.di r1, [r0]
+    mov r0, batch_trace
+    st.di r1, [r0, 40]
+    st.di r15, [r0, 44]
+    mov r0, 0x856000
+    ld.di r1, [r0]
+    bic r1, r1, 0x20008
+    st.di r1, [r0]
+    mov r0, 0x840280
+    mov r1, 0
+    st.di r1, [r0]
+    pop_s r15
+    pop_s r14
+    b status
+
+arm_capture:
+    mov r4, r0
+    mov r1, 0x856000
+    add r2, r0, 0x7300
+    ld.di r3, [r1, 0x14]
+    cmp r0, r3
+    blo arm_base_first
+    st.di r2, [r1, 0x18]
+    st.di r0, [r1, 0x14]
+    b arm_range_ready
+arm_base_first:
+    st.di r0, [r1, 0x14]
+    st.di r2, [r1, 0x18]
+arm_range_ready:
+    ld.di r0, [r1]
+    bic r0, r0, 0x400
+    st.di r0, [r1]
+    or r0, r0, 0x400
+    st.di r0, [r1]
+    mov r3, 500000
+arm_wait_started:
+    ld.di r0, [r1, 0x24]
+    cmp r0, r4
+    bls arm_wait_again
+    cmp r0, r2
+    blo arm_started
+arm_wait_again:
+    sub.f r3, r3, 1
+    bne arm_wait_started
+    mov r0, 0
+    j_s [blink]
+arm_started:
+    mov r0, 1
+    j_s [blink]
+
 pll_lock_sequence:
     push_s blink
     push_s r14
@@ -479,6 +678,8 @@ pll_lock_sequence:
     or r1, r1, 0x1000
     st.di r1, [r0]
     mov r0, pll_uhf_masks
+    cmp r14, 0xc0017600
+    mov.eq r0, pll_cable_masks
 pll_mask_next:
     ld.ab r1, [r0, 4]
     breq r1, 0, pll_latch
@@ -558,6 +759,33 @@ pll_uhf_masks:
     .long 0x852008, 0x300, 0x0
     .long 0
     .balign 4
+pll_cable_masks:
+    .long 0x852040, 0x40004, 0
+    .long 0x852040, 0x80, 0x80
+    .long 0x852040, 0x100, 0x100
+    .long 0x852000, 0x80000, 0x0
+    .long 0x85202c, 0xff00000, 0x0
+    .long 0x852034, 0xff0000, 0x0
+    .long 0x852040, 0x7e00, 0x7e00
+    .long 0x852040, 0x7000000, 0x2000000
+    .long 0x852040, 0x40, 0x0
+    .long 0x852040, 0x2, 0x0
+    .long 0x852040, 0x20000, 0x20000
+    .long 0x852040, 0x10000, 0x0
+    .long 0x852040, 0x8, 0x0
+    .long 0x852040, 0x20, 0x20
+    .long 0x852040, 0x10, 0x0
+    .long 0x852040, 0x8000, 0x0
+    .long 0x852034, 0x2, 0x0
+    .long 0x852034, 0x1, 0x0
+    .long 0x852040, 0x1, 0x1
+    .long 0x852004, 0x80, 0x0
+    .long 0x852040, 0x400000, 0x0
+    .long 0x852040, 0x40000000, 0x40000000
+    .long 0x852040, 0x80000, 0x0
+    .long 0x852008, 0x300, 0x200
+    .long 0
+
 adc_path_setup:
     .long 0x8407f4, 3
     .long 0x841004, 0, 0x841008, 5, 0x84100c, 0
@@ -645,31 +873,18 @@ pll_result:
     .long 0, 0, 0, 0, 0, 0
 
 rf_registers:
-    .long route_trace + 0
-    .long route_trace + 4
-    .long route_trace + 8
-    .long route_trace + 12
-    .long route_trace + 16
-    .long route_trace + 20
-    .long route_trace + 24
-    .long route_trace + 28
-    .long route_trace + 32
-    .long route_trace + 36
-    .long route_trace + 40
-    .long route_trace + 44
-    .long route_trace + 48
-    .long route_trace + 52
-    .long route_trace + 56
-    .long route_trace + 60
-    .long route_trace + 64
-    .long route_trace + 68
-    .long route_trace + 72
-    .long route_trace + 76
-    .long route_trace + 80
-    .long route_trace + 84
-    .long route_trace + 88
-    .long route_trace + 92
-    .long 0x852014, 0x856024
+    .long batch_trace + 0
+    .long batch_trace + 4
+    .long batch_trace + 8
+    .long batch_trace + 12
+    .long batch_trace + 16
+    .long batch_trace + 20
+    .long batch_trace + 24
+    .long batch_trace + 28
+    .long batch_trace + 32
+    .long batch_trace + 36
+    .long batch_trace + 40, batch_trace + 44
+    .long 0x852000, 0x852008, 0x852014, 0x856024
 rf_registers_end:
     .long 0
 
@@ -679,6 +894,10 @@ rf_snapshot:
     .short rf_snapshot_end - rf_snapshot, 0
     .space (rf_registers_end - rf_registers) * 2
 rf_snapshot_end:
+batch_trace:
+    .space 48
+observe_trace:
+    .space 20
 route_trace:
     .space 96
 adc_trace:
