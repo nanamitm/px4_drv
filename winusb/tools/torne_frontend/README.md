@@ -13,7 +13,7 @@ I2C要求を返す。元の高速USB I2C経路とのタイミング差を含め�
 本文1バイト`01`を返す。USB/I2Cエラーを表す`0xff`応答とは別で、sessionを壊さず
 次の明示的選局を許可する。ホストはこの結果だけを早期失敗に使い、探索中の未ロックや
 信号レベルでは打ち切らない。旧helperの空応答では従来のロック待ちを維持する。
-元の選局・AGC・探索の待ち時間は変更していない。追加アクセサーは`tune_result.go`。
+AGC起動待機は16・14・16 ms（詳細は `LOCAL-CHANGES.md`）。追加アクセサーは `tune_result.go`。
 
 ```text
 python winusb/tools/torne_frontend/build.py --go <go.exe>

@@ -18,7 +18,11 @@ capacitor-trim dispatch and the one-second initial-search retry.
 
 Upstream source is pinned by `upstream.json`. The native Bulk I2C path sets
 `settleBeforeFFT` to wait at least 100 ms between demodulator setup and FFT search start.
-The Go diagnostic keeps the original timing with this flag disabled.
+The Go diagnostic keeps this flag disabled.
+
+Both implementations use the AGC start-up timing from Till0196/coax
+`223f0b20ddc576df8a3280c6a33dead92eb41772`. The three delays are 16, 14, and 16 ms,
+up from 7, 5, and 7 ms.
 The local `internal/coaxd/demod/dib8096/tune_result.go` adds `SearchFailed()` to expose an existing
 terminal state (`statusTuneFailed` and `demodStop`) after `Tune` returns without an I/O error.
 It does not implement a signal-strength threshold or shorten acquisition timeouts.
