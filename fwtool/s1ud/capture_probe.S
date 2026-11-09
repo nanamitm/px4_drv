@@ -36,6 +36,7 @@
     .equ ROM_WORK_SAVE, 0xe50000
     .equ ROM_WARM_ENTRY, 0x40200
     .equ ROM_SOFT_RESET, 0x123c
+    .equ COLD_STACK_TOP, 0xe6f000
     /* warm 起動で ROM の USB の状態を保つための ROM の入口 (参照 firmware が同じ目的で呼ぶもの) */
     .equ ROM_ZERO, 0x488
     .equ ROM_USB_SUSPEND, 0x1604
@@ -83,8 +84,15 @@ reload_hang:
 
 cold_start:
     push_s blink
+    /* ROM の 0x19f0 は 0x1000 バイトの起動スタックで動作を確かめた。DriverHost の cold 起動は 0x200 バイトを
+       指定するため、未使用の RAM の末尾 (送出の枠と読み込み先より後ろ) のスタックへ切り替えて呼ぶ */
+    mov r1, sp
+    mov sp, COLD_STACK_TOP
+    push_s r1
     mov r0, board_clock_config
     jl 0x19f0
+    pop_s r1
+    mov sp, r1
     pop_s blink
 /* cold 起動と warm 起動の共通の初期化。ROM の主処理が 0x4021c の開始処理を重ねて呼ばないよう、先に消す */
 app_init:
@@ -116,8 +124,20 @@ handle_message:
     beq staging_check
     cmp r1, 704
     beq reload_request
+    cmp r1, 578
+    beq init_device
     mov_s r0, 0
     j_s [blink]
+
+/* 578 (INIT_DEVICE)。DriverHost は読み込み直した firmware が ISDB-T のモードでないときに送る。
+   この firmware は設定を持たないため、579 で 0 を返す */
+init_device:
+    push_s blink
+    push_s r13
+    mov r13, r0
+    mov r2, 0
+    mov r3, 579
+    b small_reply
 
 /* DriverHost の Reload と同じ手順 (702, 660, 662, 704) で別の firmware へ読み込み直す。
    702 は送出を止めて 703 を返す。送出の枠と読み込み先 (0xe20000 以降) が重なるため、先に止める */

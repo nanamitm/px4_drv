@@ -574,6 +574,28 @@ every phase. After a switch from the ISDB-T firmware, a 4 s recording at
 138.75 MHz decoded to 92,002 TS packets at MER 32.0 dB. The ISDB-T
 firmware reached mode 6 after `INIT_DEVICE`.
 
+#### Use as the DriverHost J.83B firmware
+
+The capture probe image can be set as `J83BFirmwarePath` in the
+`[PX-S1UD]` section. DriverHost sends `INIT_DEVICE` (578) after
+loading a firmware that is not in mode 6, and the probe replies 579.
+The DriverHost cold boot uses a 0x200-byte launch stack. Before calling
+ROM 0x19f0, the probe switches to its own stack at 0xe6f000.
+
+`siano_live_test j83b:138750 60` ran with the probe as the J.83B
+firmware. DriverHost cold-booted the normal firmware and loaded the
+probe by warm reload in about 0.8 s. It then streamed for 60 s:
+1,598,186 TS packets with no sync or TEI errors and 141 continuity
+errors. The chip statistics were filled 98,991, sent 98,931, and
+dropped 60. The next `siano_live_test 13 20` reloaded the normal
+firmware from the probe. ISDB-T channel 13 gave 232,960 packets with no
+continuity errors. The device still answered after 70 s idle in each
+firmware. Once, after a script switched from the probe to the ISDB-T
+firmware outside DriverHost, the device stopped answering about a
+minute later. That has not recurred under DriverHost, and its cause is
+unknown. Other channels, long recordings, and BonDriver or TVTest use
+are not tested.
+
 #### Send slots and dropped blocks
 
 With 32 overlapped 16 KB host reads, the standalone probe dropped 0.136%
