@@ -504,6 +504,42 @@ channel gave 178,053 packets, with 655 blocks dropped by the chip.
 DriverHost cold-boot loading, other frequencies, and long runs have not
 been tested.
 
+#### Reloading another firmware
+
+The first 0xa0 bytes of the image now use the reference layout. The
+cold entry is at offset 0, the warm entry address at 0x10, and the
+staging address 0xe00000 at 0x14. The probe handles the warm reload
+requests that DriverHost sends, in this order:
+
+- 702 stops any stream and replies 703.
+- 660 writes data at 0xe00000-based addresses into 0xe20000. RAM at
+  0xe00000 is only 64 KB, mirrored at 0xe10000, so it cannot hold
+  a whole image.
+- 662 returns the word sum of that staging area. 662 for other
+  addresses is left to the ROM.
+- 704 checks the staged warm entry (0x4025d–0x59fff) and the staging
+  word, as the ROM does. A routine in the first 0xa0 bytes then saves
+  the ROM work area 0x40240–0x4025f to 0xe50000, writes the warm entry
+  to 0x40200, and copies the image body to 0x40300. It then calls the
+  ROM soft reset at 0x123c.
+
+From the cold-booted probe, this sequence loaded the reference J.83B
+firmware without unplugging the device. Its IQ stream then worked.
+
+Loading this probe from another firmware is not implemented. The ROM
+reset handler calls the warm entry with the reset cause. When the entry
+returns nonzero, the ROM initializes the heap and USB stack, then calls
+the hook at 0x40218, and finally `_start` through 0x4021c. The reference
+warm entry saves the ROM USB state to 0xe40000, marked with 0xaa11bb22.
+Its 0x40218 hook rebuilds the ROM USB stack from that copy, so the host
+does not enumerate the device again. This probe's warm entry returns 0.
+After such a reset, the device stayed present but every request timed
+out. Without administrator rights, `CM_Reenumerate_DevNode` returned
+`CR_ACCESS_DENIED`. `pnputil /restart-device`, run as administrator,
+left the port showing "Device Descriptor Request Failed". A CPU soft
+reset does not appear to reset the USB controller for a new
+enumeration.
+
 #### Send slots and dropped blocks
 
 With 32 overlapped 16 KB host reads, the standalone probe dropped 0.136%

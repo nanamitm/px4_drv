@@ -25,10 +25,50 @@
     /* DMA は 1 ブロック分の環状領域の最後の語を書いて停止する。この語の変化で終端を検出する */
     .equ RING_LAST, 0xf6f7fc
     .equ RING_WORDS, 7360
+    /* 別の firmware への読み込み直し。参照 firmware と同じく、0xe00000 からのアドレスで受け取った
+       イメージを 0xe20000 へ置く (0xe00000 からの 64 KB は 0xe10000 に鏡像があり、イメージ全体を置けない)。
+       本体は先頭 0xa0 バイトを除いて 0x40300 へ写し、ROM のソフトリセットで新しい firmware の warm 入口へ移る */
+    .equ STAGING_ADDRESS, 0xe00000
+    .equ STAGING_BASE, 0xe20000
+    .equ STAGING_SIZE, 0x19da0
+    .equ IMAGE_PREFIX, 0xa0
+    .equ ROM_WORK, 0x40240
+    .equ ROM_WORK_SAVE, 0xe50000
+    .equ ROM_WARM_ENTRY, 0x40200
+    .equ ROM_SOFT_RESET, 0x123c
 
     .section .text
     .global _start
+/* 先頭 0xa0 バイトは参照 firmware と同じ配置にする。ROM と他の firmware は 0x10 の warm 入口と
+   0x14 の 0xe00000 を確かめ、読み込み直しでは 0xa0 以降だけを 0x40300 へ写す */
 _start:
+    b cold_start
+    .org 0x10
+    .long warm_entry
+    .long STAGING_ADDRESS
+
+/* 0x40300 以降を書き換える間も残る位置 (先頭 0xa0 バイト) で、読み込み直しを実行する。
+   r0 は新しい firmware の warm 入口。ROM の作業領域 0x40240 から 32 バイトを 0xe50000 へ退避し
+   (新しい firmware の warm 入口が戻す)、0x40200 に入口を置いてソフトリセットする */
+reload_exec:
+    mov r13, r0
+    jl ROM_IRQ_DISABLE
+    mov r0, ROM_WORK_SAVE
+    mov r1, ROM_WORK
+    mov r2, 0x20
+    jl ROM_COPY
+    mov r0, ROM_WARM_ENTRY
+    st.di r13, [r0]
+    mov r0, 0x40300
+    mov r1, STAGING_BASE + IMAGE_PREFIX
+    mov r2, 0x19d00
+    jl ROM_COPY
+    jl ROM_SOFT_RESET
+reload_hang:
+    b reload_hang
+    .org IMAGE_PREFIX
+
+cold_start:
     push_s blink
     mov r0, board_clock_config
     jl 0x19f0
@@ -48,6 +88,145 @@ handle_message:
     beq version
     cmp r1, 890
     beq fixed_data
+    cmp r1, 702
+    beq reload_start
+    cmp r1, 660
+    beq staging_write
+    cmp r1, 662
+    beq staging_check
+    cmp r1, 704
+    beq reload_request
+    mov_s r0, 0
+    j_s [blink]
+
+/* DriverHost の Reload と同じ手順 (702, 660, 662, 704) で別の firmware へ読み込み直す。
+   702 は送出を止めて 703 を返す。送出の枠と読み込み先 (0xe20000 以降) が重なるため、先に止める */
+reload_start:
+    push_s blink
+    push_s r13
+    mov r13, r0
+    mov r0, stream_state
+    ld r1, [r0, 0]
+    breq r1, 0, reload_start_reply
+    mov r0, stream_req
+    mov r1, 0
+    st.di r1, [r0, 4]
+    ld.di r1, [r0, 0]
+    add r1, r1, 1
+    st.di r1, [r0, 0]
+reload_start_reply:
+    mov r2, 0
+    mov r3, 703
+    b small_reply
+
+/* 660: 0xe00000 からのアドレスのデータを 0xe20000 以降へ書く。範囲外は 661 で 1 を返す */
+staging_write:
+    push_s blink
+    push_s r13
+    mov r13, r0
+    mov r2, 1
+    ldh r4, [r13, 4]
+    cmp r4, 12
+    bls staging_write_reply
+    sub r4, r4, 12
+    ld r0, [r13, 8]
+    jl staging_map
+    mov r2, 1
+    breq r0, 0, staging_write_reply
+    add r1, r13, 12
+    mov r2, r4
+    jl ROM_COPY
+    mov r2, 0
+staging_write_reply:
+    mov r3, 661
+    b small_reply
+
+/* 662: 読み込み先の範囲なら、その語の和を 663 で返す。それ以外は ROM に任せる (レジスターの読み出しに使う) */
+staging_check:
+    ld r2, [r0, 8]
+    mov r3, STAGING_ADDRESS
+    cmp r2, r3
+    blo staging_check_rom
+    mov r3, STAGING_ADDRESS + 0x20000
+    cmp r2, r3
+    bhs staging_check_rom
+    push_s blink
+    push_s r13
+    mov r13, r0
+    ld r4, [r13, 12]
+    mov r0, r2
+    jl staging_map
+    mov r2, 0
+    breq r0, 0, staging_check_reply
+    lsr r4, r4, 2
+staging_check_sum:
+    breq r4, 0, staging_check_reply
+    ld.ab r5, [r0, 4]
+    add r2, r2, r5
+    sub r4, r4, 1
+    b staging_check_sum
+staging_check_reply:
+    mov r3, 663
+    b small_reply
+staging_check_rom:
+    mov_s r0, 0
+    j_s [blink]
+
+/* r0 (0xe00000 からのアドレス) と r4 (バイト数) を読み込み先のアドレスへ変える。範囲外なら 0 */
+staging_map:
+    mov r1, STAGING_ADDRESS
+    sub r0, r0, r1
+    mov r3, STAGING_SIZE
+    cmp r0, r3
+    bhs staging_map_bad
+    add r2, r0, r4
+    cmp r2, r3
+    bhi staging_map_bad
+    mov r1, STAGING_BASE
+    add r0, r0, r1
+    j_s [blink]
+staging_map_bad:
+    mov r0, 0
+    j_s [blink]
+
+/* 704: ROM と同じく、置いたイメージの warm 入口 (0x10) が 0x4025d から 0x59fff、0x14 が 0xe00000 かを
+   確かめてから読み込み直す。条件を満たさなければ 705 で 1 を返す */
+reload_request:
+    push_s blink
+    push_s r13
+    mov r13, r0
+    mov r0, STAGING_BASE
+    ld r1, [r0, 0x14]
+    mov r2, STAGING_ADDRESS
+    brne r1, r2, reload_reject
+    ld r1, [r0, 0x10]
+    mov r2, 0x4025d
+    cmp r1, r2
+    blo reload_reject
+    mov r2, 0x5a000
+    cmp r1, r2
+    bhs reload_reject
+    mov r0, r1
+    j reload_exec
+reload_reject:
+    mov r2, 1
+    mov r3, 705
+    b small_reply
+
+/* r3 の種類と r2 の 1 語で応答する。入口で blink と r13 を退避し、r13 が要求を指す */
+small_reply:
+    mov r0, small_frame
+    sth r3, [r0, 0]
+    st r2, [r0, 8]
+    mov r0, r13
+    pop_s r13
+    pop_s blink
+    mov r1, small_frame
+    mov_s r2, 12
+    b send_reply
+
+/* warm 入口。USB の状態の復元は未実装のため 0 を返し、ROM の通常の初期化に任せる */
+warm_entry:
     mov_s r0, 0
     j_s [blink]
 
@@ -1601,6 +1780,11 @@ release_request:
     j_s [blink]
 
     .balign 4
+small_frame:
+    .short 0
+    .byte 11, 0
+    .short 12, 0
+    .long 0
 version_frame:
     .short 669
     .byte 11, 0
