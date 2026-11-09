@@ -146,7 +146,7 @@ void SourceFirmware::Write(uint32_t address, const Bytes &bytes, size_t chunk, b
         Control(address + static_cast<uint32_t>(i), const_cast<uint8_t *>(bytes.data() + i),
                 (std::min)(bytes.size() - i, chunk), false);
     if (verify && Read(address, bytes.size()) != bytes) {
-        msg_err("PIX-DT295 source-fr: RAM readback mismatch at %08x\n", address);
+        msg_err("PIX-DT295 %s: RAM readback mismatch at %08x\n", direct_ ? "direct-fr" : "source-fr", address);
         throw -EIO;
     }
 }
@@ -199,7 +199,7 @@ void SourceFirmware::Checked(uint32_t address, uint32_t value, unsigned width)
 {
     Put(address, value, width);
     if (Get(address, width) != value) {
-        msg_err("PIX-DT295 source-fr: MMIO readback mismatch at %08x\n", address);
+        msg_err("PIX-DT295 %s: MMIO readback mismatch at %08x\n", direct_ ? "direct-fr" : "source-fr", address);
         throw -EIO;
     }
 }
@@ -619,15 +619,15 @@ int SourceFirmware::Tune(bool satellite, uint32_t khz, uint32_t tsid)
             if (IsLocked()) {
                 tuned_ = true;
                 if (satellite)
-                    msg_info("PIX-DT295 source-fr: locked system=ISDB-S IF_kHz=%u TSID=%u\n", khz, tsid);
+                    msg_info("PIX-DT295 %s: locked system=ISDB-S IF_kHz=%u TSID=%u\n", direct_ ? "direct-fr" : "source-fr", khz, tsid);
                 else
-                    msg_info("PIX-DT295 source-fr: locked system=ISDB-T IF_kHz=%u\n", khz);
+                    msg_info("PIX-DT295 %s: locked system=ISDB-T IF_kHz=%u\n", direct_ ? "direct-fr" : "source-fr", khz);
                 return 0;
             }
             Delay(100);
         } while (io_.now_ms(io_.opaque) - start < 4000);
         // 無信号・TSID不一致は機器の異常ではない。USB転送の期限切れ(-ETIMEDOUT)と区別し、次の選局を受け付ける。
-        msg_info("PIX-DT295 source-fr: no lock system=%s IF_kHz=%u\n", satellite ? "ISDB-S" : "ISDB-T", khz);
+        msg_info("PIX-DT295 %s: no lock system=%s IF_kHz=%u\n", direct_ ? "direct-fr" : "source-fr", satellite ? "ISDB-S" : "ISDB-T", khz);
         return -ENOLINK;
     } catch (int error) {
         return Failure("frontend tune", error);
