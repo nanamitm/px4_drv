@@ -47,6 +47,10 @@ fixed_data:
     blo status
     ld r1, [r0, 8]
     breq r1, 0, status
+    cmp r1, 2
+    beq snapshot
+    breq r1, 3, pll_readback
+    breq r1, 4, pll_control_readback
     mov r0, stats
     ld r1, [r0, 20]
     brne r1, 0, status
@@ -74,6 +78,63 @@ status:
     pop_s blink
     mov r1, stats
     mov_s r2, 28
+    b send_reply
+
+/* Exercise only the PLL frequency field. Restore the original word. */
+pll_control_readback:
+    mov r5, 0x820010
+    ld.di r6, [r5]
+    bic r7, r6, 2
+    st.di r7, [r5]
+    b pll_test
+pll_readback:
+    mov r5, 0
+pll_test:
+    mov r0, 0x852008
+    ld.di r1, [r0]
+    and r2, r1, 0x3ff
+    or r2, r2, 0xdb6c5000
+    st.di r2, [r0]
+    ld.di r3, [r0]
+    st.di r1, [r0]
+    ld.di r4, [r0]
+    mov r7, 0
+    mov r8, 0
+    breq r5, 0, pll_reply
+    ld.di r7, [r5]
+    st.di r6, [r5]
+    ld.di r8, [r5]
+pll_reply:
+    mov r0, pll_result
+    st r1, [r0, 8]
+    st r2, [r0, 12]
+    st r3, [r0, 16]
+    st r4, [r0, 20]
+    st r7, [r0, 24]
+    st r8, [r0, 28]
+    mov r0, r13
+    pop_s r13
+    pop_s blink
+    mov r1, pll_result
+    mov_s r2, 32
+    b send_reply
+
+snapshot:
+    mov r1, rf_registers
+    mov r2, rf_snapshot + 8
+snapshot_next:
+    ld.ab r3, [r1, 4]
+    breq r3, 0, snapshot_done
+    st.ab r3, [r2, 4]
+    ld.di r3, [r3]
+    st.ab r3, [r2, 4]
+    b snapshot_next
+snapshot_done:
+    mov r0, r13
+    pop_s r13
+    pop_s blink
+    mov r1, rf_snapshot
+    mov r2, rf_snapshot_end - rf_snapshot
     b send_reply
 
 usb_complete:
@@ -134,6 +195,29 @@ stats:
     .short 28, 0
     /* Result, accepted, completed, busy, rejected. */
     .long 0, 0, 0, 0, 0
+
+pll_result:
+    .short 894
+    .byte 11, 0
+    .short 32, 0
+    .long 0, 0, 0, 0, 0, 0
+
+rf_registers:
+    /* Fixed read-only diagnostic list. Never accept an address from USB. */
+    .long 0x820010, 0x82005c, 0x820060, 0x8300f8
+    .long 0x850018, 0x85001c, 0x852000, 0x852004, 0x852008, 0x85200c
+    .long 0x852014, 0x852018, 0x85201c, 0x852020, 0x852024
+    .long 0x85202c, 0x852030, 0x852034, 0x852040
+    .long 0x856000, 0x856014, 0x856018, 0x856024
+rf_registers_end:
+    .long 0
+
+rf_snapshot:
+    .short 893
+    .byte 11, 0
+    .short rf_snapshot_end - rf_snapshot, 0
+    .space (rf_registers_end - rf_registers) * 2
+rf_snapshot_end:
 
 init_dma_buffers:
     /* ROM bulk DMA uses this RAM region. Write it without the ARC cache. */
