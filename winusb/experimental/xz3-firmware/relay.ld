@@ -6,7 +6,7 @@ SECTIONS
 {
     /* XZのブートストラップ本体用領域。ロード時の上書き範囲は別途検証する。 */
     . = 0x000ea61c;
-    .text : { KEEP(*(.text.entry)) *(.text*) *(.rodata*) . = ALIGN(4); }
+    .text : { KEEP(*(.text.entry)) *(.text*) *(.rodata*) *(.probe_state) . = ALIGN(4); }
     .hook 0x000e9a10 : { KEEP(*(.hook)) }
     .data : { *(.data*) }
     .bss (NOLOAD) : { *(.bss*) *(COMMON) }
