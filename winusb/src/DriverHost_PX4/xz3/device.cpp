@@ -19,7 +19,7 @@ namespace {
 using px4::torne::WinUsbControl;
 using Clock = WinUsbControl::Clock;
 constexpr unsigned Body = 0xea61c, Hook = 0xe9a10, Stage = 0xc4600;
-constexpr unsigned BodySize = 2144;
+constexpr unsigned BodySize = 2236;
 constexpr ULONG PumpSize = 3 * 1024 * 1024;
 constexpr UCHAR BulkIn = 0x81;
 using Packet = std::array<std::uint8_t, 64>;
@@ -67,7 +67,10 @@ public:
 
     bool Valid() const
     {
-        return i2c_.bytes && i2c_.size == 2120 && ts_.bytes && ts_.size == 1996 &&
+        const auto valid_body = [](const Image& image) {
+            return image.bytes && image.size && image.size <= BodySize && image.size % 4 == 0;
+        };
+        return valid_body(bootstrap_) && valid_body(runtime_) &&
                hook_.bytes && hook_.size == saved_hook_.size();
     }
 
@@ -85,11 +88,11 @@ public:
             !Read(0xc4810, data.data(), 4) || Word(data.data()) != 0x82000000 ||
             !Read(Hook, saved_hook_.data(), saved_hook_.size()) || saved_hook_ != expected_hook ||
             !Read(Body, saved_body_.data(), saved_body_.size()) ||
-            Fingerprint(saved_body_.data(), saved_body_.size()) != 0xfda21dc8113cfe4eull) {
+            Fingerprint(saved_body_.data(), saved_body_.size()) != 0x16073e2aa1fd67b1ull) {
             msg_err("GV-MVP/XZ3: unsupported boot RAM image or read failure\n");
             return -EIO;
         }
-        int result = Select(false);
+        int result = Install(bootstrap_);
         if (result)
             return result;
         Packet reply{};
@@ -100,14 +103,14 @@ public:
             if ((result = Exchange(5, reply, &step, 1)) || (result = Delay(delay[step])))
                 return result;
         }
-        return Exchange(3, reply);
+        if ((result = Exchange(3, reply)))
+            return result;
+        // ブートストラップは機器初期化だけを担当する。以降の選局・TS取得は共通版を使う。
+        return Install(runtime_);
     }
 
-    int Select(bool stream)
+    int Install(const Image& image)
     {
-        const auto image = stream ? ts_ : i2c_;
-        if (current_ == image.bytes)
-            return 0;
         control_.Begin(Clock::now() + 15s);
         if (!Unhook())
             return -EIO;
@@ -118,7 +121,6 @@ public:
         hook_changed_ = true;
         if (!Write(Hook + 4, hook_.bytes + 4) || !Write(Hook, hook_.bytes))
             return -EIO;
-        current_ = image.bytes;
         return 0;
     }
 
@@ -230,7 +232,6 @@ private:
 
     bool Unhook()
     {
-        current_ = nullptr;
         if (!hook_changed_)
             return true;
         if (!Write(Hook, saved_hook_.data()) || !Write(Hook + 4, saved_hook_.data() + 4) ||
@@ -242,10 +243,9 @@ private:
 
     px4::torne::NativeControlIo io_;
     WinUsbControl control_;
-    const Image i2c_ = Resource(IDR_XZ3_I2C);
-    const Image ts_ = Resource(IDR_XZ3_TS);
+    const Image bootstrap_ = Resource(IDR_XZ3_BOOTSTRAP);
+    const Image runtime_ = Resource(IDR_XZ3_RUNTIME);
     const Image hook_ = Resource(IDR_XZ3_HOOK);
-    const std::uint8_t* current_ = nullptr;
     std::array<std::uint8_t, BodySize> saved_body_{};
     std::array<std::uint8_t, 8> saved_hook_{};
     std::uint32_t sequence_ = 0;
@@ -422,12 +422,12 @@ protected:
             }
             initialized_ = true;
         }
-        if ((result = relay_.Select(false))) {
-            failed_ = true;
-            return result;
-        }
         const auto tsid = satellite ? params_.stream_id : 0;
         result = frontend_.Tune(satellite, params_.freq, tsid);
+        // 地デジはロック直後に訂正前のTSを出すことがある。
+        // ファームウェア交換による待ちがなくなったため、DMAを始める前に安定を待つ。
+        if (!result && !satellite)
+            result = relay_.Delay(350);
         if (result && result != -ENOLINK && result != -EINVAL)
             failed_ = true;
         if (!result) {
@@ -465,13 +465,10 @@ private:
             return worker_error_ ? -EIO : 0;
         if (!stream_buf_->AdvanceEpoch() || !WinUsb_FlushPipe(parent_.usb_dev_.winusb, BulkIn))
             return -EIO;
-        int result = relay_.Select(true);
-        if (result)
-            return result;
         Packet reply{};
         // 開始の応答を失った場合にも、停止を試してからファームウェアを差し替える。
         stream_started_ = true;
-        result = relay_.Exchange(11, reply);
+        const int result = relay_.Exchange(11, reply);
         if (result) {
             StopReader();
             return result;

@@ -12,6 +12,11 @@ static uint16_t read_reg16(uint32_t address);
 static void write_reg16(uint32_t address, uint16_t value);
 #define XZ_MMIO_WRITE16(address, value) write_reg16(address, value)
 #include "relay.c"
+#define XZ_TS_RUNTIME
+#define xz_i2c_relay xz_ts_runtime
+#include "ts_probe.c"
+#undef xz_i2c_relay
+#undef XZ_TS_RUNTIME
 
 static unsigned writes, starts, stops, received, control, owned;
 static unsigned control_log[64], control_count;
@@ -393,5 +398,35 @@ int main(void)
     packet[5] = 1;
     xz_i2c_relay(packet);
     assert(packet[3] == XZ_INVALID && packet[4] == 0 && writes == writes_before_bad_transfer);
+    /* 共通版でも40バイトは1転送。DMA動作中の選局要求ではI²Cに触れない。 */
+    sent_count = 0;
+    request(packet, XZ_TRANSFER, long_write, sizeof(long_write));
+    packet[4] = 0x18;
+    const unsigned before_active_transfer = writes;
+    capture.active = 1;
+    xz_ts_runtime(packet);
+    assert(packet[3] == XZ_INVALID && packet[4] == 0 && writes == before_active_transfer);
+    capture.active = 0;
+
+    request(packet, XZ_TRANSFER, long_write, sizeof(long_write));
+    packet[4] = 0x18;
+    xz_ts_runtime(packet);
+    assert(packet[2] == (XZ_REPLY | XZ_TRANSFER) && packet[3] == XZ_OK);
+    assert(packet[4] == 1 && packet[5] == 0 && sent_count == 41 && sent[0] == 0x30);
+    for (unsigned i = 0; i < sizeof(long_write); ++i)
+        assert(sent[i + 1] == i);
+
+    /* レジスター番号と受信データが同じペイロードでも、反復STARTまで送信値を保持する。 */
+    const uint8_t reg = 0xbc;
+    const unsigned before_read = received;
+    sent_count = 0;
+    request(packet, XZ_TRANSFER, &reg, 1);
+    packet[4] = 0x19;
+    packet[5] = 2;
+    xz_ts_runtime(packet);
+    assert(packet[3] == XZ_OK && packet[4] == 1 && packet[5] == 2);
+    assert(sent_count == 3 && sent[0] == 0x32 && sent[1] == reg && sent[2] == 0x33);
+    assert(reply[0] == (uint8_t)(0xa0 + before_read) &&
+           reply[1] == (uint8_t)(0xa1 + before_read));
     return 0;
 }

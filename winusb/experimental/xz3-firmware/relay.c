@@ -1,6 +1,9 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
 #include <stdint.h>
 
+#ifdef XZ_BOOTSTRAP
+#define XZ_I2C_INIT_ONLY
+#endif
 #include "i2c_transfer.h"
 
 #define PIN_DIRECTION 0x00f10014u
@@ -121,6 +124,10 @@ static void power_step(unsigned step)
     }
 }
 
+#define XZ_MAGIC 0x585a4931u
+#define XZ_REPLY 0x80000000u
+
+#ifndef XZ_BOOTSTRAP
 /*
  * XZ初期化表のクロックと端子の項目が対象とするレジスター。ホストのUSB
  * ウィンドウから読めないため、boot0での値をここから返す。表の書き込みと同じ幅で
@@ -132,9 +139,6 @@ static const uint32_t clock_regs16[] = {
 };
 /* 0x00f10004は常駐ファームウェアが表の条件付き項目 (0xf100f0) の要否判定に32ビットで読む。 */
 static const uint32_t clock_regs32[] = { 0x00f10004u, I2C_BLOCK_ENABLE, I2C_BLOCK_RESET };
-#define XZ_MAGIC 0x585a4931u
-#define XZ_REPLY 0x80000000u
-
 static unsigned validate(const uint8_t *payload, unsigned size)
 {
     unsigned reads = 0;
@@ -152,6 +156,8 @@ static unsigned validate(const uint8_t *payload, unsigned size)
     }
     return XZ_OK;
 }
+
+#endif
 
 /*
  * XZのUSBウィンドウは0x000fffffまでしか届かず、ホストから0x00fdxxxxの
@@ -175,6 +181,33 @@ static unsigned initialize(void)
     return wait_idle();
 }
 
+#ifdef XZ_BOOTSTRAP
+/* 初期化専用。本体は初回選局の前にI²C・TS共通版へ置き換わる。 */
+void xz_i2c_relay(uint32_t packet[16])
+{
+    if (packet[0] != XZ_MAGIC || (packet[2] & XZ_REPLY))
+        return;
+
+    const unsigned op = packet[2], size = packet[3];
+    const uint8_t step = ((const uint8_t *)(packet + 6))[0];
+    unsigned error = XZ_INVALID;
+    if (!packet[4] && !packet[5]) {
+        if (op == XZ_INIT && !size)
+            error = initialize();
+        if (op == XZ_POWER && size == 1 && step < XZ_POWER_STEPS) {
+            power_step(step);
+            error = XZ_OK;
+        }
+        if (op == XZ_CLOCK_SETUP && !size) {
+            error = XZ_NOT_READY;
+            if ((XZ_MMIO_READ16(0x00f10004u) & 0x0c00u) == 0x0800u)
+                error = clock_setup() ? XZ_VERIFY_FAILED : XZ_OK;
+        }
+    }
+    packet[2] |= XZ_REPLY;
+    packet[3] = error;
+}
+#else
 static void snapshot(uint32_t packet[16])
 {
     for (unsigned i = 6; i < 16; ++i)
@@ -287,3 +320,4 @@ reply:
     packet[5] = count;
     packet[2] |= XZ_REPLY;
 }
+#endif

@@ -1,8 +1,6 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
 #include <stdint.h>
 #ifdef XZ_TS_RUNTIME
-/* DMAの消費を止める時間を抑えるため、統計取得の待機上限を短くする。 */
-#define I2C_POLLS 4000u
 #include "i2c_transfer.h"
 #endif
 #define REG(address) (*(volatile uint32_t *)(uintptr_t)(address))
@@ -170,12 +168,30 @@ static uint32_t read_cn(unsigned address)
     const uint8_t reg = address == 0x18 ? 0x8b : 0xbc;
     const unsigned size = address == 0x18 ? 3 : 2;
     uint8_t bytes[3];
-    if (transfer(address, &reg, 1, bytes, size))
+    /* DMAの消費を止める時間を抑えるため、統計取得の待機上限を短くする。 */
+    if (transfer_with_budget(address, &reg, 1, bytes, size, 4000u))
         return 0;
     uint32_t raw = 0;
     for (unsigned i = 0; i < size; ++i)
         raw = (raw << 8) | bytes[i];
     return raw;
+}
+static void tune_transfer(uint32_t packet[16])
+{
+    const unsigned tx = packet[3], address = packet[4], rx = packet[5];
+    unsigned error = XZ_INVALID;
+    uint8_t *payload = (uint8_t *)(packet + 6);
+    /* 選局操作はDMAを止めてから。送信を終えたペイロードへ受信データを格納する。 */
+    if (!capture.active && (address == 0x18 || address == 0x19) &&
+        tx <= 40 && rx <= 40 - tx && (tx || rx)) {
+        error = XZ_NOT_READY;
+        if ((XZ_I2C_READ(I2C_DIVIDER) & 0x7fu) == 0x3cu)
+            error = transfer(address, payload, tx, payload, rx);
+    }
+    packet[2] |= 0x80000000u;
+    packet[3] = error;
+    packet[4] = error ? 0 : 1;
+    packet[5] = error ? 0 : rx;
 }
 #endif
 
@@ -183,8 +199,14 @@ void xz_i2c_relay(uint32_t packet[16])
 {
     const unsigned op=packet[2];
 #ifdef XZ_TS_RUNTIME
+    if(packet[0]!=MAGIC)
+        return;
+    if(op==7) {
+        tune_transfer(packet);
+        return;
+    }
     const unsigned cn_address=packet[4];
-    if(packet[0]!=MAGIC || op<11 || op>13 || packet[3] || packet[5] ||
+    if(op<11 || op>13 || packet[3] || packet[5] ||
        (cn_address && (op!=12 || (cn_address!=0x18 && cn_address!=0x19))))
         return;
     const unsigned stream=0;

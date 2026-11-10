@@ -23,14 +23,20 @@ enum {
     XZ_OK, XZ_INVALID, XZ_TIMEOUT, XZ_BUS_ERROR, XZ_NACK, XZ_STOP_TIMEOUT, XZ_NOT_READY,
     XZ_VERIFY_FAILED,
 };
-static unsigned wait_idle(void)
+static inline unsigned wait_idle_for(unsigned polls)
 {
-    for (unsigned n = 0; n < I2C_POLLS; ++n)
+    for (unsigned n = 0; n < polls; ++n)
         if (!(XZ_I2C_READ(I2C_STATUS) & 0x80))
             return XZ_OK;
     return XZ_TIMEOUT;
 }
 
+static inline unsigned wait_idle(void)
+{
+    return wait_idle_for(I2C_POLLS);
+}
+
+#ifndef XZ_I2C_INIT_ONLY
 static unsigned wait_byte(uint32_t *control, unsigned *budget)
 {
     while (*budget) {
@@ -66,12 +72,12 @@ static unsigned send_byte(uint32_t data, uint32_t flags, uint32_t *control,
 #define I2C_CONTROL_RESTART 0x70u
 #define I2C_CONTROL_STOP 0x40u
 
-static unsigned transfer(unsigned address, const uint8_t *tx, unsigned tx_size,
-                         uint8_t *rx, unsigned rx_size)
+static inline unsigned transfer_with_budget(unsigned address, const uint8_t *tx, unsigned tx_size,
+                                            uint8_t *rx, unsigned rx_size, unsigned polls)
 {
     uint32_t control;
-    unsigned budget = I2C_POLLS;
-    if (wait_idle())
+    unsigned budget = polls;
+    if (wait_idle_for(polls))
         return XZ_TIMEOUT;
     unsigned error = send_byte(address * 2 + !tx_size, I2C_CONTROL_BYTE, &control, &budget);
     for (unsigned i = 0; !error && i < tx_size; ++i)
@@ -87,7 +93,14 @@ static unsigned transfer(unsigned address, const uint8_t *tx, unsigned tx_size,
     }
     /* STARTを発行した場合は転送エラーでもSTOPを試みる。 */
     XZ_I2C_WRITE(I2C_CONTROL, I2C_CONTROL_STOP);
-    return wait_idle() ? XZ_STOP_TIMEOUT : error;
+    return wait_idle_for(polls) ? XZ_STOP_TIMEOUT : error;
 }
+
+static inline unsigned transfer(unsigned address, const uint8_t *tx, unsigned tx_size,
+                                uint8_t *rx, unsigned rx_size)
+{
+    return transfer_with_budget(address, tx, tx_size, rx, rx_size, I2C_POLLS);
+}
+#endif
 
 #endif

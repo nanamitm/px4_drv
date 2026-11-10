@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""Build the GV-MVP/XZ3 FR30 I2C relay or TS probe."""
+"""Build GV-MVP/XZ3 FR30 firmware."""
 import argparse
 from pathlib import Path
 import subprocess
@@ -17,7 +17,9 @@ def main():
     parser.add_argument("--objcopy", default="fr30-elf-objcopy")
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--ts-probe", action="store_true", help="build the TS ring and EP81 probe")
-    mode.add_argument("--ts-runtime", action="store_true", help="build continuous TS and C/N support")
+    mode.add_argument("--bootstrap", action="store_true", help="build the one-time board initializer")
+    mode.add_argument("--runtime", "--ts-runtime", action="store_true",
+                      help="build I2C tuning, continuous TS and C/N support")
     parser.add_argument("--out", type=Path, required=True)
     args = parser.parse_args()
     compiler = [args.compiler, *args.compiler_arg]
@@ -25,8 +27,12 @@ def main():
         parser.error("FR30 GCC is required")
     args.out.mkdir(parents=True, exist_ok=True)
     asm, obj, elf, image = (args.out / f"relay.{ext}" for ext in ("s", "o", "elf", "bin"))
-    source = "ts_probe.c" if args.ts_probe or args.ts_runtime else "relay.c"
-    defines = ["-DXZ_TS_RUNTIME"] if args.ts_runtime else []
+    source = "ts_probe.c" if args.ts_probe or args.runtime else "relay.c"
+    defines = []
+    if args.runtime:
+        defines.append("-DXZ_TS_RUNTIME")
+    if args.bootstrap:
+        defines.append("-DXZ_BOOTSTRAP")
     subprocess.run([*compiler, "-std=c11", "-Os", "-ffreestanding", "-fno-builtin",
                     "-Wall", "-Wextra", "-Werror", *defines, "-S", ROOT / source, "-o", asm],
                    check=True)
