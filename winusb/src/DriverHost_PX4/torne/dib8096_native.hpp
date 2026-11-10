@@ -5,11 +5,13 @@
 namespace px4::torne {
 class NativeFrontend final {
 public:
+    static constexpr std::uint8_t ReadOnlyStatus = 0x15;
     explicit NativeFrontend(dibnative::Bus& bus);
     ~NativeFrontend();
     NativeFrontend(const NativeFrontend&)=delete;
     NativeFrontend& operator=(const NativeFrontend&)=delete;
     // 模擬バスでは時刻だけを置き換え、実機と同じ状態遷移を検証できる。
+    void SetBulkTiming(bool enabled) noexcept;
     void SetClock(std::function<dibnative::Time()> now);
     bool Command(std::uint8_t kind,const std::vector<std::uint8_t>& body,std::vector<std::uint8_t>& response);
     const std::string& Error() const noexcept {return error_;}

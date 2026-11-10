@@ -16,8 +16,8 @@ public:
     std::map<std::uint16_t,std::uint16_t> tuner{{0x1a,0x0a27}};
     std::map<std::uint16_t,std::deque<std::uint16_t>> queues;
     std::ofstream out;
-    Time now{1000000000000};
-    unsigned count=0;
+    Time now{1000000000000}, fftStart{};
+    unsigned count=0, writes=0;
     bool failIO=false,failWait=false,jobs=false,changed=false;
     std::map<std::uint32_t,std::array<std::uint32_t,2>> kept;
     explicit FakeBus(const std::string& path):out(path){}
@@ -33,7 +33,14 @@ public:
         if(failIO&&count==12){out<<(length?" IOFAIL\n":"\nIOFAIL\n");return {{},MakeError("injected bus failure")};}
         if(address!=0x12&&(address!=0xc0||regs[1025]!=0xc000))throw std::runtime_error("invalid gate/address");
         if(length==0){
-            if(address==0x12){if(data.size()!=4)throw std::runtime_error("demod write shape");regs[(data[0]<<8)|data[1]]=(data[2]<<8)|data[3];}
+            ++writes;
+            if(address==0x12){
+                if(data.size()!=4)throw std::runtime_error("demod write shape");
+                const auto reg=static_cast<std::uint16_t>((data[0]<<8)|data[1]);
+                const auto value=static_cast<std::uint16_t>((data[2]<<8)|data[3]);
+                regs[reg]=value;
+                if(reg==357 && value==0x111)fftStart=now;
+            }
             else{if(data.size()!=3)throw std::runtime_error("tuner write shape");tuner[data[0]]=(data[1]<<8)|data[2];}
             out<<"\n";return {{},nullptr};
         }
@@ -73,9 +80,26 @@ int RunFixture(int argc,char** argv){
             if(Add<std::uint16_t>(65535,1)!=0||Sub<std::uint32_t>(0,1)!=0xffffffffu||Mul<std::int32_t>(INT32_MAX,2)!=-2||Shl<std::uint32_t>(1,32)!=0||Shr<std::int32_t>(-1,40)!=-1)throw std::runtime_error("integer semantics");
             std::array<int,2> array{};bool bounded=false;try{At(array,2);}catch(const std::out_of_range&){bounded=true;}if(!bounded)throw std::runtime_error("array bounds");
             Slice<int> original{1,2};auto shared=original.sub(1,2);shared[0]=3;if(original[1]!=3)throw std::runtime_error("slice ownership");
-            for(const auto* mode:{"locked","nosignal","timeout","unknown","iofail","waitfail","cband","jobs","retune"}){
+            for(const auto* mode:{"locked","nosignal","timeout","unknown","iofail","waitfail","cband","jobs","retune","passive"}){
                 char* fixture[]={argv[0],const_cast<char*>(mode),const_cast<char*>("NUL")};if(RunFixture(3,fixture))return 1;
             }
+            const auto fftStart=[](bool bulk) {
+                FakeBus bus("NUL");
+                bus.Locked();
+                NativeFrontend frontend(bus);
+                frontend.SetClock([&](){return bus.now;});
+                frontend.SetBulkTiming(bulk);
+                const auto hz=std::uint32_t(473143000);
+                std::vector<std::uint8_t> body(4),response;
+                for(unsigned i=0;i<4;++i)body[i]=std::uint8_t(hz>>(i*8));
+                if(!frontend.Command(0x10,{},response)||!frontend.Command(0x11,body,response)||
+                    !response.empty()||!bus.fftStart.Sub(Time{}))
+                    throw std::runtime_error("FFT timing fixture failed");
+                return bus.fftStart;
+            };
+            const auto extra=fftStart(true).Sub(fftStart(false));
+            if(extra<80000000||extra>100000000)
+                throw std::runtime_error("Bulk must wait before starting FFT");
             std::cout<<"PASS: native frontend mock states, failures, integer semantics and bounds. No USB access.\n";return 0;
         }
         if(argc!=3)return 2;std::string mode=argv[1];FakeBus bus(argv[2]);
@@ -91,6 +115,29 @@ int RunFixture(int argc,char** argv){
             if(kind==0x13){if(response.size()!=24||bool(response[0])!=(mode=="locked"||mode=="cband"||mode=="jobs"||mode=="retune"))throw std::runtime_error("lock outcome");}
         };
         run(0x10);if(mode=="unknown"||mode=="iofail"||mode=="waitfail")return 0;
+        if(mode=="passive") {
+            std::vector<std::uint8_t> body(4),response;
+            const auto hz=std::uint32_t(503143000);
+            for(unsigned i=0;i<4;++i)body[i]=std::uint8_t(hz>>(i*8));
+            bus.queues[1284]={1,0,1};
+            if(!frontend.Command(0x11,body,response)||response!=std::vector<std::uint8_t>{1})
+                throw std::runtime_error("passive status fixture did not miss lock");
+            bus.Wait(1200000000);
+            const auto writes=bus.writes;
+            const auto now=bus.now;
+            for(unsigned i=0;i<2;++i) {
+                if(!frontend.Command(NativeFrontend::ReadOnlyStatus,{},response)||response.size()!=24||response[0]||
+                    bus.writes!=writes||bus.now.Sub(now)!=0)
+                    throw std::runtime_error("status after no signal must not retune");
+            }
+            bus.Locked();
+            const auto good_hz=std::uint32_t(473143000);
+            for(unsigned i=0;i<4;++i)body[i]=std::uint8_t(good_hz>>(i*8));
+            if(!frontend.Command(0x11,body,response)||!response.empty()||
+                !frontend.Command(NativeFrontend::ReadOnlyStatus,{},response)||response.size()!=24||!response[0])
+                throw std::runtime_error("retune after passive status failed");
+            return 0;
+        }
         if(mode=="retune") {
             bus.queues[1284]={1,0,1,1,0,2};bus.queues[568]={0,0,0x3ffe};
             std::vector<std::uint8_t> body{0x49,0x9a,0x33,0x1c},response;

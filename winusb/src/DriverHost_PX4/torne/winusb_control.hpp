@@ -42,8 +42,12 @@ public:
 	int Transfer(const MemoryRequest &request, std::uint8_t *data,
 		std::size_t length, std::size_t &transferred) override;
 	int Pause(unsigned milliseconds) override;
+	int TransferPipe(UCHAR endpoint, std::uint8_t *data, std::size_t length,
+		std::size_t &transferred, Clock::time_point deadline);
 
 private:
+	template<class Submit>
+	int Execute(std::size_t length, std::size_t &transferred, Clock::time_point deadline, Submit submit);
 	HANDLE file_;
 	WINUSB_INTERFACE_HANDLE usb_;
 	HANDLE cancel_;

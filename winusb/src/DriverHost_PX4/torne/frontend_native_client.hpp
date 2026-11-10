@@ -10,6 +10,8 @@ public:
     NativeFrontendClient(MailboxI2c& bus,HANDLE cancel):bus_(bus),cancel_(cancel),frontend_(*this){}
     bool Command(std::uint8_t kind,const std::vector<std::uint8_t>& body,std::vector<std::uint8_t>& response,
         std::chrono::steady_clock::time_point deadline);
+    void SetBulkTiming() noexcept { frontend_.SetBulkTiming(true); }
+    void SetBatchWrites(bool enabled) noexcept { batch_writes_ = enabled; }
     void SetStop(HANDLE stop) noexcept {stop_=stop;}
     const std::string& Error() const noexcept{return error_;}
 private:
@@ -22,6 +24,10 @@ private:
     std::tuple<std::int64_t,std::int64_t,bool,dibnative::Error> Captrim(std::uint8_t address,std::uint16_t lo4,
         std::uint32_t key,std::int64_t start,std::int64_t step,std::int64_t target,std::int64_t write,std::int64_t read) override;
     dibnative::Error CheckState() const;
+    dibnative::Error FlushWrites();
+    std::array<MailboxI2c::RegisterWrite, MailboxI2c::MaxRegisterWrites> pending_{};
+    std::size_t pending_count_ = 0;
+    bool batch_writes_ = false;
     MailboxI2c& bus_;
     HANDLE cancel_;
     HANDLE stop_=nullptr;
