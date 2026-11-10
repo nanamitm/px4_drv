@@ -33,7 +33,7 @@ enum {
     XZ_OK, XZ_INVALID, XZ_TIMEOUT, XZ_BUS_ERROR, XZ_NACK, XZ_STOP_TIMEOUT, XZ_NOT_READY,
     XZ_VERIFY_FAILED,
 };
-enum { XZ_PROBE = 1, XZ_BATCH, XZ_INIT, XZ_CLOCKS, XZ_POWER, XZ_CLOCK_SETUP };
+enum { XZ_PROBE = 1, XZ_BATCH, XZ_INIT, XZ_CLOCKS, XZ_POWER, XZ_CLOCK_SETUP, XZ_TRANSFER };
 
 /*
  * 表でbit 18を立てる各ブロックの0x404 (常駐部の0x803b0000と同じ順)。
@@ -274,6 +274,21 @@ void xz_i2c_relay(uint32_t packet[16])
     uint8_t read[40];
     unsigned error = XZ_INVALID, count = 0, completed = 0;
     unsigned size = packet[3];
+    if (packet[2] == XZ_TRANSFER) {
+        const unsigned address = packet[4], rx = packet[5];
+        /* 初期化の連続書き込みは、途中でSTOPを発行せず1転送で送る。 */
+        if (address >= 0x08 && address <= 0x77 && size <= 40 &&
+            rx <= 40 - size && (size || rx)) {
+            error = XZ_NOT_READY;
+            if ((XZ_I2C_READ(I2C_DIVIDER) & I2C_DIVIDER_MASK) == I2C_DIVIDER_XZ)
+                error = transfer(address, payload, size, read, rx);
+            if (!error) {
+                completed = 1;
+                count = rx;
+            }
+        }
+        goto data_reply;
+    }
     if (!packet[4] && !packet[5]) {
         if ((packet[2] == XZ_PROBE || packet[2] == XZ_INIT) && !size) {
             /* PROBEはSTARTを発行せず、レジスターの状態だけを返す。 */
@@ -342,6 +357,7 @@ void xz_i2c_relay(uint32_t packet[16])
         pos += tx;
         count += rx;
     }
+data_reply:
     if (error)
         count = 0;
     for (unsigned i = 0; i < 40; ++i)

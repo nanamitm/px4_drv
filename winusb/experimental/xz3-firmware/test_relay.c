@@ -16,7 +16,7 @@ static void write_reg16(uint32_t address, uint16_t value);
 static unsigned writes, starts, stops, received, control, owned;
 static unsigned control_log[64], control_count;
 static unsigned nack, bus_error, byte_timeout, stuck_after_stop, busy;
-static unsigned sent[32], sent_count;
+static unsigned sent[64], sent_count;
 static unsigned divider = 0x3c;
 /* 初期化対象の他ビットが保持されることを確かめるため、既定値を非零にする。 */
 static unsigned block_enable = 0x0101, block_reset = 0xffff, port_c0 = 0x55, port_c4 = 0x55;
@@ -371,5 +371,27 @@ int main(void)
         const uint32_t initial = block_clock_regs[i] >> 8;
         assert(blocks_written[i] && blocks[i] == (initial | 0x00040000u));
     }
+    /* TRANSFERは40バイトを分割せず、STARTとSTOPを各1回だけ発行する。 */
+    uint8_t long_write[40];
+    for (unsigned i = 0; i < sizeof(long_write); ++i)
+        long_write[i] = (uint8_t)i;
+    stuck_after_stop = 0;
+    sent_count = 0;
+    const unsigned starts_before_long = starts, stops_before_long = stops;
+    request(packet, XZ_TRANSFER, long_write, sizeof(long_write));
+    packet[4] = 0x18;
+    xz_i2c_relay(packet);
+    assert(packet[2] == (XZ_REPLY | XZ_TRANSFER) && packet[3] == XZ_OK);
+    assert(packet[4] == 1 && packet[5] == 0 && sent_count == 41 && sent[0] == 0x30);
+    assert(starts == starts_before_long + 1 && stops == stops_before_long + 1);
+    for (unsigned i = 0; i < sizeof(long_write); ++i)
+        assert(sent[i + 1] == i);
+
+    const unsigned writes_before_bad_transfer = writes;
+    request(packet, XZ_TRANSFER, long_write, sizeof(long_write));
+    packet[4] = 0x18;
+    packet[5] = 1;
+    xz_i2c_relay(packet);
+    assert(packet[3] == XZ_INVALID && packet[4] == 0 && writes == writes_before_bad_transfer);
     return 0;
 }
