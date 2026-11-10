@@ -97,7 +97,7 @@ struct ExperimentalSession {
         }
 		return bus.BeginAfterBootstrap(bootstrap);
 	}
-	bool InitializeFrontend(bool output_error_packets)
+	bool InitializeFrontend(bool output_error_packets, bool batch_i2c_writes)
 	{
 		std::lock_guard<std::mutex> lock(control_mutex);
 		if (!healthy) return false;
@@ -115,6 +115,7 @@ struct ExperimentalSession {
 		frontend_started = true;
 #ifndef PX4_TORNE_EXPERIMENTAL
 		frontend.SetStop(nullptr);
+		frontend.SetBatchWrites(batch_i2c_writes);
 #endif
 		std::vector<std::uint8_t> response;
 		bool ok = frontend.Command(0x10, {}, response, deadline) && response.empty();
@@ -291,7 +292,7 @@ public:
 		try {
 			session_ = parent_.AcquireSession();
 			if (!session_) return -EIO;
-			if (!session_->InitializeFrontend(parent_.output_error_packets_)) {
+			if (!session_->InitializeFrontend(parent_.output_error_packets_, parent_.batch_i2c_writes_)) {
 				msg_err("torne: initialize failed (%s).\n", session_->FrontendError().c_str());
 				SleepFrontend();
 				session_.reset();
@@ -618,6 +619,7 @@ int ExperimentalDevice::Init()
         return -EINVAL;
     }
 	output_error_packets_=px4::util::wtob(device_def_.configs.Get(L"OutputErrorPackets",L"false"));
+	batch_i2c_writes_=px4::util::wtob(device_def_.configs.Get(L"BatchI2cWrites",L"false"));
     auto_recovery_=px4::util::wtob(device_def_.configs.Get(L"AutoRecovery",L"false"));
     initial_lock_retry_=px4::util::wtob(device_def_.configs.Get(L"InitialLockRetry",L"false"));
 	// autoでは個体ごとに登録し、ReceiverManagerがOpen可能な受信機を選ぶ。

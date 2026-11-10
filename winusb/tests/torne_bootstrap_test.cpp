@@ -51,6 +51,18 @@ public:
 		if (calls == fail_call) { transferred = 0; return 1167; }
 		if (calls == short_call) { transferred = length - 1; return 0; }
 		if (request.type == 0xc0) {
+			if (address == 0x17a3e40 && answer_ring) {
+				for (;;) {
+					const auto word = Get(0x17a3e00 + (ring_next & 15) * 4);
+					if ((word >> 31) != ((ring_next >> 4) & 1)) break;
+					ring_words.push_back(word);
+					const auto slot = static_cast<std::uint8_t>(ring_next++);
+					const auto error = slot == ring_error_slot ? 2u << 16 : 0u;
+					const auto answer = (std::uint32_t(slot) << 24) | error;
+					Put(0x17a3e40, answer);
+					if (error && !Get(0x17a3e44)) Put(0x17a3e44, answer);
+				}
+			}
 			for (std::size_t i = 0; i < length; ++i)
 				data[i] = memory[address + static_cast<std::uint32_t>(i)];
 			if (corrupt_address && address == corrupt_address)
@@ -119,7 +131,52 @@ public:
 	bool answer_job=false,spin_running=false;
 	std::uint32_t job_error=0;
 	std::vector<std::uint32_t> job_kinds;
+	bool answer_ring = false;
+	unsigned ring_next = 16, ring_error_slot = 256;
+	std::vector<std::uint32_t> ring_words;
 };
+
+static void RegisterWriteTests()
+{
+	Chip chip;
+	MemoryAccess memory(chip);
+	Bootstrap boot(memory, chip);
+	Check(boot.Initialize(1) == BootstrapResult::ok, "ring bootstrap");
+	MailboxI2c bus(memory, chip);
+	Check(bus.BeginAfterBootstrap(boot), "ring bus ready");
+	chip.answer_ring = true;
+	const auto deadline = chip.Now() + std::chrono::seconds(5);
+	std::array<MailboxI2c::RegisterWrite, MailboxI2c::MaxRegisterWrites> ops{};
+	for (std::size_t i = 0; i < ops.size(); ++i)
+		ops[i] = {static_cast<std::uint16_t>(0x70 + i), static_cast<std::uint16_t>(0x1234 + i), i % 2 != 0};
+	Check(bus.WriteRegisters(ops.data(), 15, deadline) == I2cResult::ok, "initial batch completes");
+	Check(chip.Get(0x17a3d40) == 0x12c00000 && chip.ring_words[0] == 0x80701234 &&
+		chip.ring_words[1] == 0xa0711235, "mixed register widths and addresses");
+	Check(bus.WriteRegisters(ops.data(), ops.size(), deadline) == I2cResult::ok, "batch crosses lap");
+	Check(chip.ring_words.size() == 31 && chip.ring_words[15] == 0x80701234 &&
+		chip.ring_words[16] == 0x20711235, "lap changes in order");
+	for (unsigned i = 0; i < 15; ++i)
+		Check(bus.WriteRegisters(ops.data(), ops.size(), deadline) == I2cResult::ok, "slot sequence wraps");
+	chip.ring_error_slot = static_cast<std::uint8_t>(chip.ring_next);
+	Check(bus.WriteRegisters(ops.data(), 3, deadline) == I2cResult::address_nack, "earlier NACK survives later success");
+	Check(chip.ring_words.size() == 274, "error batch fully observed");
+	Check(bus.WriteRegisters(ops.data(), 1, deadline) == I2cResult::not_ready, "failed batch invalidates bus");
+
+	Chip stalled;
+	MemoryAccess stalled_memory(stalled);
+	Bootstrap stalled_boot(stalled_memory, stalled);
+	Check(stalled_boot.Initialize(1) == BootstrapResult::ok, "stalled ring bootstrap");
+	MailboxI2c stalled_bus(stalled_memory, stalled);
+	Check(stalled_bus.BeginAfterBootstrap(stalled_boot), "stalled ring bus ready");
+	Check(stalled_bus.WriteRegisters(ops.data(), 2, stalled.Now() + std::chrono::milliseconds(2)) ==
+		I2cResult::timeout, "ring completion shares absolute deadline");
+	const auto calls = stalled.calls;
+	const std::uint8_t command[]{0, 1};
+	std::uint8_t reply[2]{};
+	Check(stalled_bus.Transfer(0x12, command, sizeof(command), reply, sizeof(reply), deadline) == I2cResult::not_ready &&
+		stalled_bus.WriteRegisters(ops.data(), 1, deadline) == I2cResult::not_ready && stalled.calls == calls,
+		"timeout blocks both mailbox and ring operations");
+}
 
 static void JobTests()
 {
@@ -249,6 +306,7 @@ static void I2cTests()
 int main()
 {
 	JobTests();
+	RegisterWriteTests();
 	I2cTests();
 	StreamTests();
 	Chip chip;

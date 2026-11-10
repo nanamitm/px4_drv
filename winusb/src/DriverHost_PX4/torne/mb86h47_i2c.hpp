@@ -24,6 +24,13 @@ public:
 	void Invalidate() noexcept { ready_ = false; }
 	I2cResult Transfer(std::uint8_t address, const std::uint8_t *write, std::size_t write_size,
 		std::uint8_t *read, std::size_t read_size, Clock::time_point deadline);
+	// core 1 の既存リングは 16 個のレジスター書き込みを保持する。
+	struct RegisterWrite {
+		std::uint16_t number, value;
+		bool tuner;
+	};
+	static constexpr std::size_t MaxRegisterWrites = 16;
+	I2cResult WriteRegisters(const RegisterWrite *writes, std::size_t count, Clock::time_point deadline);
 	MemoryResult LastMemoryResult() const noexcept { return memory_result_; }
 	int LastSystemError() const noexcept { return memory_.LastTransportError(); }
 	// 制御 mutex の所有者だけが呼ぶ。同期 mailbox と job の同時実行は不要で、
@@ -38,6 +45,8 @@ private:
 	MemoryAccess &memory_;
 	BootstrapWait &clock_;
 	std::uint8_t sequence_ = 0;
+	std::uint8_t next_slot_ = MaxRegisterWrites;
+	bool ring_configured_ = false;
 	bool ready_ = false;
 	MemoryResult memory_result_ = MemoryResult::ok;
 	const Bootstrap *bootstrap_ = nullptr;

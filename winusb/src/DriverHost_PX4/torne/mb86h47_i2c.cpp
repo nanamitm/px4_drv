@@ -17,6 +17,8 @@ bool MailboxI2c::BeginAfterBootstrap(const Bootstrap &bootstrap) noexcept
 	bootstrap_ = &bootstrap;
 	generation_ = bootstrap.Generation();
 	sequence_ = 0;
+	next_slot_ = MaxRegisterWrites;
+	ring_configured_ = false;
 	job_sequence_ = 0;
 	spin_rate_ = 0;
 	memory_result_ = MemoryResult::ok;
@@ -91,6 +93,87 @@ I2cResult MailboxI2c::Transfer(std::uint8_t address, const std::uint8_t *write, 
 	case 4: return failed(I2cResult::stuck);
 	default: return failed(I2cResult::malformed_answer);
 	}
+}
+
+I2cResult MailboxI2c::WriteRegisters(const RegisterWrite *writes, std::size_t count, Clock::time_point deadline)
+{
+	memory_result_ = MemoryResult::ok;
+	if (!writes || !count || count > MaxRegisterWrites)
+		return I2cResult::invalid_argument;
+	if (!ready_ || !bootstrap_ || !bootstrap_->IsInitialized() || bootstrap_->Generation() != generation_) {
+		ready_ = false;
+		return I2cResult::not_ready;
+	}
+	if (clock_.Now() >= deadline)
+		return I2cResult::timeout;
+
+	constexpr std::uint32_t ring = 0x17a3e00, ring_address = 0x17a3d40, ring_answer = 0x17a3e40;
+	constexpr std::uint32_t lap = 1u << 31, short_register = 1u << 29;
+	std::array<std::uint8_t, MaxRegisterWrites * 4> payload{};
+	for (std::size_t i = 0; i < count; ++i) {
+		const auto &op = writes[i];
+		if (op.number > (op.tuner ? 0xff : 0x7ff))
+			return I2cResult::invalid_argument;
+		const auto slot = next_slot_ + i;
+		const auto word = (slot & MaxRegisterWrites ? lap : 0) | (op.tuner ? short_register : 0) |
+			(std::uint32_t(op.number) << 16) | op.value;
+		for (unsigned j = 0; j < 4; ++j)
+			payload[i * 4 + j] = static_cast<std::uint8_t>(word >> (24 - 8 * j));
+	}
+	auto fail = [this](I2cResult result) {
+		// 一部だけ実行された操作列を再送せず、同期 mailbox も含めて無効化する。
+		Invalidate();
+		return result;
+	};
+	if (!ring_configured_) {
+		// core 1 の長いレジスター番号は DiB8000、短い番号は DiB0090 に対応する。
+		memory_result_ = memory_.Write32(ring_address, 0x12c00000);
+		if (memory_result_ != MemoryResult::ok)
+			return fail(I2cResult::memory_error);
+		ring_configured_ = true;
+	}
+	if (clock_.Now() >= deadline)
+		return fail(I2cResult::timeout);
+	const auto slot = next_slot_ % MaxRegisterWrites;
+	const auto first = (std::min)(count, MaxRegisterWrites - slot);
+	memory_result_ = memory_.Transfer(ring + static_cast<std::uint32_t>(slot * 4), false, payload.data(), first * 4);
+	if (memory_result_ != MemoryResult::ok)
+		return fail(I2cResult::memory_error);
+	if (first < count) {
+		if (clock_.Now() >= deadline)
+			return fail(I2cResult::timeout);
+		memory_result_ = memory_.Transfer(ring, false, payload.data() + first * 4, (count - first) * 4);
+		if (memory_result_ != MemoryResult::ok)
+			return fail(I2cResult::memory_error);
+	}
+
+	const auto last = static_cast<std::uint8_t>(next_slot_ + count - 1);
+	std::uint8_t error = 0;
+	while (clock_.Now() < deadline) {
+		std::array<std::uint8_t, 8> status{};
+		memory_result_ = memory_.Transfer(ring_answer, true, status.data(), status.size());
+		if (memory_result_ != MemoryResult::ok)
+			return fail(I2cResult::memory_error);
+		// 最後の操作で失敗した場合は、sticky failure の公開より先に answer が見えることがある。
+		if (!error)
+			error = status[5] ? status[5] : status[1];
+		if (clock_.Now() >= deadline)
+			break;
+		if (status[0] != last)
+			continue;
+		// 公開済みのスロットを最後まで回収してから、最初の失敗を返す。
+		switch (error) {
+		case 0:
+			next_slot_ = static_cast<std::uint8_t>(last + 1);
+			return I2cResult::ok;
+		case 1: return fail(I2cResult::bus_error);
+		case 2: return fail(I2cResult::address_nack);
+		case 3: return fail(I2cResult::data_nack);
+		case 4: return fail(I2cResult::stuck);
+		default: return fail(I2cResult::malformed_answer);
+		}
+	}
+	return fail(I2cResult::timeout);
 }
 
 // coax job.go の同期ジョブ経路。mailbox 操作は完了応答まで待つため、
