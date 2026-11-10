@@ -7,6 +7,7 @@
 #include <windows.h>
 #include <setupapi.h>
 
+#include "util.hpp"
 #include "msg.h"
 #include "px4_device.hpp"
 #include "pxmlt_device.hpp"
@@ -17,6 +18,7 @@
 #include "rtlsdr/device.hpp"
 #include "msi2500/device.hpp"
 #include "siano/device.hpp"
+#include "xz3/device.hpp"
 #include "dt295/device.hpp"
 
 namespace px4 {
@@ -67,6 +69,8 @@ DeviceManager::DeviceManager(const px4::DeviceDefinitionSet &device_defs, px4::R
 			type = DeviceType::PXBCUD;
 		else if (it->first == L"SIANO")
 			type = DeviceType::SIANO;
+		else if (it->first == L"GVMVPXZ3")
+			type = DeviceType::GVMVPXZ3;
 		else if (it->first == L"PIXDT295")
 			type = DeviceType::PIXDT295;
 		else if (it->first == L"RTLSDR")
@@ -152,6 +156,18 @@ void DeviceManager::Add(const std::wstring &path, const std::pair<DeviceType, px
 
 	/* 機種追加時に型と DeviceType の対応をこの場で確認できるよう生成分岐を明示する */
 	switch (def.first) {
+	case px4::DeviceType::GVMVPXZ3:
+	{
+		// Zadigの共通WinUSB GUIDには他機種も現れるため、デバイスを開く前に絞る。
+		if (path.rfind(L"\\\\?\\usb#vid_04bb&pid_0530#", 0) != 0 ||
+		    !px4::util::wtob(def.second.configs.Get(L"Experimental", L"false")))
+			break;
+		auto dev = std::make_shared<px4::xz3::Device>(path, def.second, ++index_, receiver_manager_);
+		const int ret = dev->Init();
+		if (!ret) devices_.emplace(path, std::move(dev));
+		else msg_err("GV-MVP/XZ3: device initialization failed ret=%d\n", ret);
+		break;
+	}
 	case px4::DeviceType::PIXDT295:
 	{
 		auto dev = std::make_shared<px4::dt295::Device>(path, def.second, ++index_, receiver_manager_);
