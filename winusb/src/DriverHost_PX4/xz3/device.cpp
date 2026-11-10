@@ -378,7 +378,7 @@ public:
         locked = false;
         if (!open_ || !parent_.available_ || failed_ || worker_error_)
             return -ECANCELED;
-        // TS転送中は同じRAM領域を転送用コードが使うので、最後の選局結果を返す。
+        // TS転送中の制御転送はworkerが担当するため、最後の選局結果を返す。
         locked = tuned_;
         return 0;
     }
@@ -392,7 +392,7 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         if (!open_ || !parent_.available_ || failed_ || worker_error_)
             return -ECANCELED;
-        // TS workerが転送応答から更新した値を返す。統計要求はUSBへ送らない。
+        // 選局後に取得し、TS workerが転送応答から更新した値を返す。
         value = cnr_.load();
         return 0;
     }
@@ -465,8 +465,11 @@ private:
             return worker_error_ ? -EIO : 0;
         if (!stream_buf_->AdvanceEpoch() || !WinUsb_FlushPipe(parent_.usb_dev_.winusb, BulkIn))
             return -EIO;
+        // 最初の3 MiBを待つと、スキャン側の最初の統計取得に間に合わない場合がある。
+        // DMAを始める前に新しいチャンネルの値を1回読み、以後はTS転送応答で更新する。
+        cnr_ = px4::tc90522::CnrMilliDb(satellite_, frontend_.ReadCndat());
         Packet reply{};
-        // 開始の応答を失った場合にも、停止を試してからファームウェアを差し替える。
+        // 開始の応答を失った場合にも、停止を試してからRAMを復元する。
         stream_started_ = true;
         const int result = relay_.Exchange(11, reply);
         if (result) {

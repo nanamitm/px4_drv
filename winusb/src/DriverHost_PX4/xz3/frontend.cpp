@@ -163,6 +163,20 @@ int Frontend::Locked(bool& locked)
     return result;
 }
 
+std::uint32_t Frontend::ReadCndat()
+{
+    const std::uint8_t address = satellite_ ? SatelliteAddress : TerrestrialAddress;
+    const std::uint8_t reg = satellite_ ? 0xbc : 0x8b;
+    const unsigned size = satellite_ ? 2 : 3;
+    std::uint8_t data[3]{};
+    if (io_.I2c(address, &reg, 1, data, size))
+        return 0;
+    std::uint32_t raw = 0;
+    for (unsigned i = 0; i < size; ++i)
+        raw = (raw << 8) | data[i];
+    return raw;
+}
+
 int Frontend::Tune(bool satellite, std::uint32_t frequency_khz, std::uint32_t tsid)
 {
     if (satellite ? frequency_khz < 950000 || frequency_khz > 2150000 || tsid > 0xffff

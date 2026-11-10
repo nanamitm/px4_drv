@@ -22,6 +22,7 @@ public:
     int Initialize();
     int Tune(bool satellite, std::uint32_t frequency_khz, std::uint32_t tsid);
     int Locked(bool& locked);
+    std::uint32_t ReadCndat();
 
     static std::uint16_t TerrestrialDivider(std::uint32_t frequency_khz);
     static std::array<std::uint8_t, 4> SatellitePll(std::uint32_t frequency_khz);
