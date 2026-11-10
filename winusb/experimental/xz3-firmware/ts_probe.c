@@ -1,5 +1,10 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
 #include <stdint.h>
+#ifdef XZ_TS_RUNTIME
+/* DMAの消費を止める時間を抑えるため、統計取得の待機上限を短くする。 */
+#define I2C_POLLS 4000u
+#include "i2c_transfer.h"
+#endif
 #define REG(address) (*(volatile uint32_t *)(uintptr_t)(address))
 #define REG16(address) (*(volatile uint16_t *)(uintptr_t)(address))
 #define RING 0x80a90000u
@@ -55,6 +60,7 @@ static unsigned ep_ready(void)
     return 0;
 }
 
+#ifndef XZ_TS_RUNTIME
 static void bulk_snapshot(uint32_t *reply)
 {
     reply[4]=REG(EP_MODE);
@@ -74,6 +80,8 @@ static void bulk_snapshot(uint32_t *reply)
     reply[8]=ep_ready();
     reply[9]=REG(EP_STATUS);
 }
+#endif
+
 static void stream_ring(uint32_t *reply,unsigned target)
 {
     unsigned cursor=capture.cursor, sent=0, peak=0, producer=0;
@@ -156,13 +164,36 @@ static void restore_capture(uint32_t state)
     capture.active=0;
 }
 
+#ifdef XZ_TS_RUNTIME
+static uint32_t read_cn(unsigned address)
+{
+    const uint8_t reg = address == 0x18 ? 0x8b : 0xbc;
+    const unsigned size = address == 0x18 ? 3 : 2;
+    uint8_t bytes[3];
+    if (transfer(address, &reg, 1, bytes, size))
+        return 0;
+    uint32_t raw = 0;
+    for (unsigned i = 0; i < size; ++i)
+        raw = (raw << 8) | bytes[i];
+    return raw;
+}
+#endif
+
 void xz_i2c_relay(uint32_t packet[16])
 {
     const unsigned op=packet[2];
+#ifdef XZ_TS_RUNTIME
+    const unsigned cn_address=packet[4];
+    if(packet[0]!=MAGIC || op<11 || op>13 || packet[3] || packet[5] ||
+       (cn_address && (op!=12 || (cn_address!=0x18 && cn_address!=0x19))))
+        return;
+    const unsigned stream=0;
+#else
     if(packet[0]!=MAGIC || op<8 || op>13 || packet[3] || packet[4] || packet[5])
         return;
     const unsigned stream=op==10;
     const unsigned bulk=op==9;
+#endif
     const unsigned stream_target=STREAM_UNIT;
     uint32_t *reply=packet+6;
     for(unsigned i=0;i<10;++i) reply[i]=0;
@@ -184,6 +215,10 @@ void xz_i2c_relay(uint32_t packet[16])
             reply[1]=REG(RUN);
             reply[2]=REG(PRODUCER);
             packet[3]=reply[7]==stream_target ? 0 : 2;
+#ifdef XZ_TS_RUNTIME
+            /* DMAは動作したまま。I²C失敗はC/Nだけを無効にし、TSの結果に伝播させない。 */
+            packet[4]=!packet[3] && cn_address ? read_cn(cn_address) : 0;
+#endif
         }
         return;
     }
@@ -202,6 +237,7 @@ void xz_i2c_relay(uint32_t packet[16])
         packet[3]=0;
         return;
     }
+#ifndef XZ_TS_RUNTIME
     if(stream) stream_ring(reply,stream_target);
     const unsigned target=bulk ? BULK_SIZE : 576;
     uint32_t producer=0;
@@ -228,4 +264,5 @@ void xz_i2c_relay(uint32_t packet[16])
         if(reply[7]!=BULK_SIZE || !reply[8]) packet[3]=2;
     }
     restore_capture(reply[3]);
+#endif
 }

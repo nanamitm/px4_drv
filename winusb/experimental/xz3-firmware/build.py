@@ -15,7 +15,9 @@ def main():
     parser.add_argument("--assembler", default="fr30-elf-as")
     parser.add_argument("--linker", default="fr30-elf-ld")
     parser.add_argument("--objcopy", default="fr30-elf-objcopy")
-    parser.add_argument("--ts-probe", action="store_true", help="build the TS ring and EP81 probe")
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--ts-probe", action="store_true", help="build the TS ring and EP81 probe")
+    mode.add_argument("--ts-runtime", action="store_true", help="build continuous TS and C/N support")
     parser.add_argument("--out", type=Path, required=True)
     args = parser.parse_args()
     compiler = [args.compiler, *args.compiler_arg]
@@ -23,9 +25,10 @@ def main():
         parser.error("FR30 GCC is required")
     args.out.mkdir(parents=True, exist_ok=True)
     asm, obj, elf, image = (args.out / f"relay.{ext}" for ext in ("s", "o", "elf", "bin"))
-    source = "ts_probe.c" if args.ts_probe else "relay.c"
+    source = "ts_probe.c" if args.ts_probe or args.ts_runtime else "relay.c"
+    defines = ["-DXZ_TS_RUNTIME"] if args.ts_runtime else []
     subprocess.run([*compiler, "-std=c11", "-Os", "-ffreestanding", "-fno-builtin",
-                    "-Wall", "-Wextra", "-Werror", "-S", ROOT / source, "-o", asm],
+                    "-Wall", "-Wextra", "-Werror", *defines, "-S", ROOT / source, "-o", asm],
                    check=True)
     subprocess.run([args.assembler, "-o", obj, asm], check=True)
     entry = args.out / "entry.o"

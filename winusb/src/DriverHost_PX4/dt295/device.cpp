@@ -2,11 +2,11 @@
 #include "device.hpp"
 #include "winusb_transport.hpp"
 #include "source_firmware.hpp"
+#include "../tc90522_cnr.hpp"
 #include "msg.h"
 #include "util.hpp"
 #include "ts_continuity.hpp"
 #include <algorithm>
-#include <cmath>
 #include <condition_variable>
 #include <cstdio>
 #include <thread>
@@ -19,20 +19,6 @@ constexpr wchar_t LegacyDirectFirmwarePath[]=L"firmware\\dt295-direct-fr.bin";
 constexpr wchar_t LegacyDirectFirmwareSha256[]=L"ba6496cf022cc3ebb1626446484b072f83fbba019d11700c1d08c1c7b75d204a";
 constexpr wchar_t LegacySourceFirmwarePath[]=L"firmware\\dt295-source-fr.bin";
 constexpr wchar_t LegacySourceFirmwareSha256[]=L"92d2373945c03bd7978ed710ba283946d355e9383f163896b2d5517c3612ccbe";
-std::int32_t CnrMilliDb(bool satellite,uint32_t raw)
-{
-    double cnr=0;
-    if(satellite){
-        if(raw<3000)return 0;
-        const double p=std::sqrt(static_cast<double>(raw-3000))/64;
-        cnr=(-1634.6*p*p*p*p*p)+(14341*p*p*p*p)-(50259*p*p*p)+(88977*p*p)-(89565*p)+58857;
-    }else{
-        if(!raw)return 0;
-        const double p=10*std::log10(5505024/static_cast<double>(raw));
-        cnr=(0.024*p*p*p*p)-(1.6*p*p*p)+(39.8*p*p)+(549.1*p)+3096.5;
-    }
-    return std::isnan(cnr)?0:static_cast<std::int32_t>(cnr);
-}
 struct Event {
     HANDLE value=CreateEventW(nullptr,TRUE,FALSE,nullptr);
     ~Event(){if(value)CloseHandle(value);}
@@ -119,7 +105,7 @@ public:
             const int rc=source_->ReadCn(satellite,raw);
             if(rc){cn_failed_=true;return rc;}
         }
-        value=CnrMilliDb(satellite,raw);
+        value=px4::tc90522::CnrMilliDb(satellite,raw);
         return 0;
     }
 protected:

@@ -3,6 +3,7 @@
 #include "frontend.hpp"
 
 #include "../resource.h"
+#include "../tc90522_cnr.hpp"
 #include "../torne/winusb_control.hpp"
 #include "msg.h"
 
@@ -66,7 +67,7 @@ public:
 
     bool Valid() const
     {
-        return i2c_.bytes && i2c_.size == 2120 && ts_.bytes && ts_.size == BodySize &&
+        return i2c_.bytes && i2c_.size == 2120 && ts_.bytes && ts_.size == 1996 &&
                hook_.bytes && hook_.size == saved_hook_.size();
     }
 
@@ -326,6 +327,7 @@ public:
         open_ = true;
         failed_ = capture_ = tuned_ = initialized_ = false;
         worker_error_ = 0;
+        cnr_ = 0;
         return 0;
     }
 
@@ -382,10 +384,17 @@ public:
     }
 
     int SetLnbVoltage(std::int32_t voltage) override { return voltage ? -ENOSYS : 0; }
-    int ReadStat(px4::command::StatType, std::int32_t& value) override
+    int ReadStat(px4::command::StatType type, std::int32_t& value) override
     {
         value = 0;
-        return -ENOSYS;
+        if (type != px4::command::StatType::CNR)
+            return -ENOSYS;
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!open_ || !parent_.available_ || failed_ || worker_error_)
+            return -ECANCELED;
+        // TS workerが転送応答から更新した値を返す。統計要求はUSBへ送らない。
+        value = cnr_.load();
+        return 0;
     }
 
 protected:
@@ -422,6 +431,7 @@ protected:
         if (result && result != -ENOLINK && result != -EINVAL)
             failed_ = true;
         if (!result) {
+            satellite_ = satellite;
             tuned_ = true;
             if (capture_)
                 result = StartReader();
@@ -469,9 +479,9 @@ private:
         stop_ = false;
         stream_buf_->Start();
         try {
-            worker_ = std::thread([this] {
+            worker_ = std::thread([this, satellite = satellite_] {
                 int result = 0;
-                try { result = ReadLoop(); }
+                try { result = ReadLoop(satellite); }
                 catch (const std::bad_alloc&) { result = -ENOMEM; }
                 // 同じBonDriverセッションから再選局できるよう、接続は維持する。
                 if (result && !stop_ && parent_.available_) {
@@ -491,6 +501,7 @@ private:
         stop_ = true;
         if (worker_.joinable())
             worker_.join();
+        cnr_ = 0;
         if (!stream_started_ || !parent_.available_)
             return 0;
         Packet reply{};
@@ -505,16 +516,17 @@ private:
         return 0;
     }
 
-    int ReadLoop()
+    int ReadLoop(bool satellite)
     {
         auto& usb = parent_.usb_dev_;
         BulkRead reads[]{{usb.dev, usb.winusb}, {usb.dev, usb.winusb}};
         if (!reads[0].Submit() || !reads[1].Submit())
             return -EIO;
         Packet reply{};
+        const unsigned cn_address = satellite ? 0x19 : 0x18;
         for (unsigned head = 0; parent_.available_ && !stop_; head ^= 1) {
             auto& read = reads[head];
-            if (relay_.Exchange(12, reply) || Word(reply.data() + 52) != PumpSize ||
+            if (relay_.Exchange(12, reply, nullptr, 0, cn_address) || Word(reply.data() + 52) != PumpSize ||
                 !read.Collect(parent_.removed_))
                 return -EIO;
             if (stop_)
@@ -523,6 +535,8 @@ private:
                 return result;
             if (!read.Submit())
                 return -EIO;
+            // op 12の応答ワード4はCNDAT。読み出し失敗時の0も反映して古い値を残さない。
+            cnr_ = px4::tc90522::CnrMilliDb(satellite, Word(reply.data() + 16));
         }
         return 0;
     }
@@ -550,6 +564,8 @@ private:
     std::thread worker_;
     std::atomic_bool stop_{false};
     std::atomic_int worker_error_{0};
+    std::atomic<std::int32_t> cnr_{0};
+    bool satellite_ = false;
     bool open_ = false, capture_ = false, tuned_ = false, initialized_ = false;
     bool stream_started_ = false, failed_ = false, restore_failed_ = false;
 };
