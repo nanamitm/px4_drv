@@ -5,6 +5,7 @@
 namespace px4::torne {
 class NativeFrontend final {
 public:
+    static constexpr std::uint8_t ReadOnlyStatus = 0x15;
     explicit NativeFrontend(dibnative::Bus& bus);
     ~NativeFrontend();
     NativeFrontend(const NativeFrontend&)=delete;

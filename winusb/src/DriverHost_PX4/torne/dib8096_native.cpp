@@ -122,9 +122,16 @@ bool NativeFrontend::Execute(std::uint8_t kind,const std::vector<std::uint8_t>& 
     case 0x12:
         if(body.size()!=1||body[0]>v_OutputFIFO){error_="invalid output command";return false;}
         err=m_Demod_SetOutputMode(board,body[0]);break;
-    case 0x13:{
+    case 0x13:
+    case ReadOnlyStatus:{
         if(!body.empty()){error_="invalid status command";return false;}
-        auto result=m_Demod_Status(board);err=std::get<1>(result);if(err)break;
+        // 統計取得から再選局すると、その短い期限で I2C が中断されて
+        // 同じセッションの次の選局まで失敗する。
+        const bool searching=board->v_searching;
+        if(kind==ReadOnlyStatus)board->v_searching=false;
+        auto result=m_Demod_Status(board);
+        if(kind==ReadOnlyStatus)board->v_searching=searching;
+        err=std::get<1>(result);if(err)break;
         const auto& status=std::get<0>(result);response.resize(24);
         response[0]=status.v_Locked;response[1]=status.v_HasCNR;response[2]=status.v_HasStrength;
         // Windows x86/x64はlittle endian。元helperと同じIEEE754バイト列を維持する。
