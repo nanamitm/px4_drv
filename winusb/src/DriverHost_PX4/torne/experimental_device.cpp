@@ -98,15 +98,37 @@ struct ExperimentalSession {
 		std::lock_guard<std::mutex> lock(control_mutex);
 		return frontend.Error();
 	}
-	bool InitializeBridge()
+	bool InitializeBridge(bool bulk_i2c)
 	{
-		const auto deadline=Clock::now()+std::chrono::seconds(8);
+		const auto deadline = Clock::now() + std::chrono::seconds(8);
 		control.Begin(deadline);
-        if(bootstrap.Initialize(GetTickCount()|1u)!=BootstrapResult::ok) {
-            msg_err("torne: bootstrap failed result=%u address=%08x os_error=%d\n",static_cast<unsigned>(bootstrap.Result()),bootstrap.LastAddress(),bootstrap.LastSystemError());
-            return false;
-        }
-		return bus.BeginAfterBootstrap(bootstrap);
+		const auto seed = (GetTickCount() & 0x7fffffffu) | 1u;
+		if (bootstrap.Initialize(seed) != BootstrapResult::ok) {
+			msg_err("torne: bootstrap failed result=%u address=%08x os_error=%d\n",
+				static_cast<unsigned>(bootstrap.Result()), bootstrap.LastAddress(), bootstrap.LastSystemError());
+			return false;
+		}
+		if (!bus.BeginAfterBootstrap(bootstrap))
+			return false;
+#ifndef PX4_TORNE_EXPERIMENTAL
+		if (bulk_i2c) {
+			const auto result = bus.EnableBulk(seed, [this](std::uint8_t ep, std::uint8_t *data,
+				std::size_t length, std::size_t &transferred, Clock::time_point limit) {
+				const auto error = control.TransferPipe(ep, data, length, transferred, limit);
+				if (error == ERROR_TIMEOUT || error == ERROR_SEM_TIMEOUT)
+					return I2cResult::timeout;
+				if (error)
+					msg_err("torne: Bulk I2C endpoint 0x%02x failed, os_error=%d\n", unsigned(ep), error);
+				return error ? I2cResult::memory_error : I2cResult::ok;
+			}, deadline);
+			if (result != I2cResult::ok) {
+				msg_err("torne: Bulk I2C startup failed, result=%u\n", static_cast<unsigned>(result));
+				return false;
+			}
+			frontend.SetBulkTiming();
+		}
+#endif
+		return true;
 	}
 	bool InitializeFrontend(bool output_error_packets, bool batch_i2c_writes)
 	{
@@ -285,7 +307,7 @@ std::shared_ptr<ExperimentalSession> ExperimentalDevice::AcquireSession()
 	if (!available_) return {};
 	if (auto current = shared_session_.lock()) return current;
 	auto created = std::make_shared<ExperimentalSession>(usb_dev_.dev, usb_dev_.winusb, cancel_);
-	if (!created->InitializeBridge() || !available_) return {};
+	if (!created->InitializeBridge(bulk_i2c_) || !available_) return {};
 	shared_session_ = created;
 	return created;
 }
@@ -303,7 +325,7 @@ public:
 		try {
 			session_ = parent_.AcquireSession();
 			if (!session_) return -EIO;
-			if (!session_->InitializeFrontend(parent_.output_error_packets_, parent_.batch_i2c_writes_)) {
+			if (!session_->InitializeFrontend(parent_.output_error_packets_, (parent_.batch_i2c_writes_ || parent_.bulk_i2c_))) {
 				msg_err("torne: initialize failed (%s).\n", session_->FrontendError().c_str());
 				SleepFrontend();
 				session_.reset();
@@ -632,6 +654,9 @@ int ExperimentalDevice::Init()
     }
 	output_error_packets_=px4::util::wtob(device_def_.configs.Get(L"OutputErrorPackets",L"false"));
 	batch_i2c_writes_=px4::util::wtob(device_def_.configs.Get(L"BatchI2cWrites",L"false"));
+#ifndef PX4_TORNE_EXPERIMENTAL
+	bulk_i2c_=px4::util::wtob(device_def_.configs.Get(L"BulkI2c",L"false"));
+#endif
     auto_recovery_=px4::util::wtob(device_def_.configs.Get(L"AutoRecovery",L"false"));
     initial_lock_retry_=px4::util::wtob(device_def_.configs.Get(L"InitialLockRetry",L"false"));
 	// autoでは個体ごとに登録し、ReceiverManagerがOpen可能な受信機を選ぶ。

@@ -56,28 +56,54 @@ int WinUsbControl::Pause(unsigned milliseconds)
 int WinUsbControl::Transfer(const MemoryRequest &request, std::uint8_t *data,
 	std::size_t length, std::size_t &transferred)
 {
+	if (!data || !length || length > 64) {
+		transferred = 0;
+		return ERROR_INVALID_PARAMETER;
+	}
+	return Execute(length, transferred, deadline_, [&](OVERLAPPED &operation) {
+		return io_.Submit(usb_, request, data, static_cast<USHORT>(length), operation);
+	});
+}
+
+int WinUsbControl::TransferPipe(UCHAR endpoint, std::uint8_t *data, std::size_t length,
+	std::size_t &transferred, Clock::time_point deadline)
+{
+	if (!data || !length || length > 512) {
+		transferred = 0;
+		return ERROR_INVALID_PARAMETER;
+	}
+	return Execute(length, transferred, (std::min)(deadline, deadline_), [&](OVERLAPPED &operation) {
+		const auto submit = endpoint & 0x80 ? WinUsb_ReadPipe : WinUsb_WritePipe;
+		return submit(usb_, endpoint, data, static_cast<ULONG>(length), nullptr, &operation) ?
+			ERROR_SUCCESS : GetLastError();
+	});
+}
+
+template<class Submit>
+int WinUsbControl::Execute(std::size_t length, std::size_t &transferred, Clock::time_point deadline, Submit submit)
+{
 	transferred = 0;
-	if (!data || !length || length > 64 || file_ == INVALID_HANDLE_VALUE || !file_ || !usb_ || !cancel_)
+	if (file_ == INVALID_HANDLE_VALUE || !file_ || !usb_ || !cancel_)
 		return ERROR_INVALID_PARAMETER;
 	if(auto error=Cancellation())return static_cast<int>(error);
-	if (Clock::now() >= deadline_)
+	if (Clock::now() >= deadline)
 		return ERROR_TIMEOUT;
 
 	OVERLAPPED operation{};
 	operation.hEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
 	if (!operation.hEvent)
 		return static_cast<int>(GetLastError());
-	const DWORD submitted = io_.Submit(usb_, request, data, static_cast<USHORT>(length), operation);
+	const DWORD submitted = submit(operation);
 	if (submitted != ERROR_SUCCESS && submitted != ERROR_IO_PENDING) {
 		CloseHandle(operation.hEvent);
 		return static_cast<int>(submitted);
 	}
 
 	DWORD reason = ERROR_SUCCESS;
-	if (Clock::now() >= deadline_) {
+	if (Clock::now() >= deadline) {
 		reason = ERROR_TIMEOUT;
 	} else if (submitted == ERROR_IO_PENDING) {
-		const auto remaining = deadline_ - Clock::now();
+		const auto remaining = deadline - Clock::now();
 		// 切り捨てで期限より早く切らないよう、残時間をミリ秒へ切り上げる。
 		const auto millis = std::chrono::ceil<std::chrono::milliseconds>(remaining).count();
 		const auto timeout = static_cast<DWORD>(std::clamp<decltype(millis)>(millis, 0, MAXDWORD - 1));
@@ -93,7 +119,7 @@ int WinUsbControl::Transfer(const MemoryRequest &request, std::uint8_t *data,
 	if (!reason) {
 		// 完了とcancelが競合した場合も、停止後の結果を新しい選局へ渡さない。
 		reason=Cancellation();
-        if(!reason && Clock::now()>=deadline_)reason=ERROR_TIMEOUT;
+        if(!reason && Clock::now()>=deadline)reason=ERROR_TIMEOUT;
 	}
 	if (reason)
 		io_.Cancel(file_, operation);

@@ -103,6 +103,7 @@ struct NativeFrontend::State {
 };
 NativeFrontend::NativeFrontend(Bus& bus):state_(std::make_unique<State>(bus)){}
 NativeFrontend::~NativeFrontend()=default;
+void NativeFrontend::SetBulkTiming(bool enabled) noexcept {state_->demod.v_settleBeforeFFT=enabled;}
 void NativeFrontend::SetClock(std::function<Time()> now){state_->demod.v_now=std::move(now);}
 bool NativeFrontend::Command(std::uint8_t kind,const std::vector<std::uint8_t>& body,std::vector<std::uint8_t>& response){
     try{return Execute(kind,body,response);}

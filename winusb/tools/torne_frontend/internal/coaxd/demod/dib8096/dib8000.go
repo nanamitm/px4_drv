@@ -105,10 +105,11 @@ type dib8000 struct {
 	differentialConstellation uint8
 	diversityOnOff            int
 
-	revision       uint16
-	isdbtCfgLoaded uint8
-	tuneState      int
-	status         int32
+	revision        uint16
+	isdbtCfgLoaded  uint8
+	settleBeforeFFT bool
+	tuneState       int
+	status          int32
 
 	currentDemodBW uint16
 

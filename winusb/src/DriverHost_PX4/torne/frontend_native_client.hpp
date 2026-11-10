@@ -10,6 +10,7 @@ public:
     NativeFrontendClient(MailboxI2c& bus,HANDLE cancel):bus_(bus),cancel_(cancel),frontend_(*this){}
     bool Command(std::uint8_t kind,const std::vector<std::uint8_t>& body,std::vector<std::uint8_t>& response,
         std::chrono::steady_clock::time_point deadline);
+    void SetBulkTiming() noexcept { frontend_.SetBulkTiming(true); }
     void SetBatchWrites(bool enabled) noexcept { batch_writes_ = enabled; }
     void SetStop(HANDLE stop) noexcept {stop_=stop;}
     const std::string& Error() const noexcept{return error_;}

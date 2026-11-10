@@ -1202,7 +1202,13 @@ func (state *dib8000) setFrontend() error {
 		}
 
 		if active {
-			state.sleep(max(callbackTime.Sub(state.now()), minTuneStep))
+			floor := minTuneStep
+			// The Bulk transport reaches FFT start sooner than the register mailbox.
+			if state.settleBeforeFFT && state.tuneState == demodSearchNext &&
+				state.autosearchState == autosearchSearchingFFT {
+				floor = 100 * time.Millisecond
+			}
+			state.sleep(max(callbackTime.Sub(state.now()), floor))
 		}
 
 		if state.failure.err != nil {

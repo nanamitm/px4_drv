@@ -39,7 +39,7 @@ private:
 	HANDLE cancel_ = nullptr;
 	std::string id_;
 	bool registered_ = false;
-	bool output_error_packets_ = false, batch_i2c_writes_ = false;
+	bool output_error_packets_ = false, batch_i2c_writes_ = false, bulk_i2c_ = false;
     bool auto_recovery_=false,initial_lock_retry_=false;
 };
 } // namespace px4::torne

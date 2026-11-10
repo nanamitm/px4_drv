@@ -5,6 +5,7 @@
 #pragma once
 
 #include "mb86h47_bootstrap.hpp"
+#include <functional>
 #include <vector>
 
 namespace px4::torne {
@@ -21,6 +22,9 @@ public:
 	using Clock = std::chrono::steady_clock;
 	MailboxI2c(MemoryAccess &memory, BootstrapWait &clock) noexcept : memory_(memory), clock_(clock) {}
 	bool BeginAfterBootstrap(const Bootstrap &bootstrap) noexcept;
+	using PipeTransfer = std::function<I2cResult(std::uint8_t, std::uint8_t *, std::size_t,
+		std::size_t &, Clock::time_point)>;
+	I2cResult EnableBulk(std::uint32_t seed, PipeTransfer transfer, Clock::time_point deadline);
 	void Invalidate() noexcept { ready_ = false; }
 	I2cResult Transfer(std::uint8_t address, const std::uint8_t *write, std::size_t write_size,
 		std::uint8_t *read, std::size_t read_size, Clock::time_point deadline);
@@ -53,6 +57,12 @@ private:
 	std::uint64_t generation_ = 0;
 	std::uint32_t job_sequence_ = 0;
 	double spin_rate_ = 0;
+	PipeTransfer bulk_transfer_;
+	std::uint32_t bulk_sequence_ = 0;
+	unsigned bulk_slot_ = 0;
+	I2cResult BulkRegisters(const RegisterWrite *writes, std::size_t count,
+		std::uint8_t *read, Clock::time_point deadline);
+	I2cResult ConfigureRegisterAddresses();
 	I2cResult SpinRate(Clock::time_point deadline);
 	I2cResult StartJob(std::uint32_t kind,const std::vector<std::uint32_t> &parameters,Clock::time_point deadline);
 };

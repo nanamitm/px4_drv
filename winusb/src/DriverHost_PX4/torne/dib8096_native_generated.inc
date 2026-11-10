@@ -365,6 +365,7 @@ std::uint8_t v_differentialConstellation{};
 std::int64_t v_diversityOnOff{};
 std::uint16_t v_revision{};
 std::uint8_t v_isdbtCfgLoaded{};
+bool v_settleBeforeFFT{};
 std::int64_t v_tuneState{};
 std::int32_t v_status{};
 std::uint16_t v_currentDemodBW{};
@@ -652,6 +653,7 @@ std::uint8_t v_differentialConstellation{};
 std::int64_t v_diversityOnOff{};
 std::uint16_t v_revision{};
 std::uint8_t v_isdbtCfgLoaded{};
+bool v_settleBeforeFFT{};
 std::int64_t v_tuneState{};
 std::int32_t v_status{};
 std::uint16_t v_currentDemodBW{};
@@ -4489,7 +4491,12 @@ v_active = false;
 }
 if (v_active)
 {
-(v_state)->v_sleep(GoMax(v_callbackTime.Sub((v_state)->v_now()),v_minTuneStep));
+std::int64_t v_floor = v_minTuneStep;
+if ((((v_state)->v_settleBeforeFFT && ((v_state)->v_tuneState == v_demodSearchNext)) && ((v_state)->v_autosearchState == v_autosearchSearchingFFT)))
+{
+v_floor = Mul<std::int64_t>(100,INT64_C(1000000));
+}
+(v_state)->v_sleep(GoMax(v_callbackTime.Sub((v_state)->v_now()),v_floor));
 }
 if ((((v_state)->v_failure)->v_err != nullptr))
 {

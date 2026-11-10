@@ -6,6 +6,25 @@
 #include <array>
 
 namespace px4::torne {
+namespace {
+constexpr std::uint8_t bulk_command = 0x02, bulk_answer = 0x83;
+constexpr std::uint32_t bulk_base = 0x82100000;
+constexpr unsigned bulk_slots = 16, bulk_size = 512;
+constexpr auto bulk_timeout = std::chrono::milliseconds(500);
+
+std::uint32_t ReadWord(const std::uint8_t *p)
+{
+	return (std::uint32_t(p[0]) << 24) | (std::uint32_t(p[1]) << 16) |
+		(std::uint32_t(p[2]) << 8) | p[3];
+}
+
+void PutWord(std::uint8_t *p, std::uint32_t word)
+{
+	for (unsigned i = 0; i < 4; ++i)
+		p[i] = static_cast<std::uint8_t>(word >> (24 - 8 * i));
+}
+}
+
 
 bool MailboxI2c::BeginAfterBootstrap(const Bootstrap &bootstrap) noexcept
 {
@@ -19,6 +38,7 @@ bool MailboxI2c::BeginAfterBootstrap(const Bootstrap &bootstrap) noexcept
 	sequence_ = 0;
 	next_slot_ = MaxRegisterWrites;
 	ring_configured_ = false;
+	bulk_transfer_ = {};
 	job_sequence_ = 0;
 	spin_rate_ = 0;
 	memory_result_ = MemoryResult::ok;
@@ -38,6 +58,15 @@ I2cResult MailboxI2c::Transfer(std::uint8_t address, const std::uint8_t *write, 
 	}
 	if (clock_.Now() >= deadline)
 		return I2cResult::timeout;
+	if (bulk_transfer_ && read_size == 2) {
+		const bool tuner = address == 0xc0 && write_size == 1;
+		const bool demod = address == 0x12 && write_size == 2 && write[0] <= 7;
+		if (tuner || demod) {
+			const auto number = static_cast<std::uint16_t>(tuner ? write[0] : (write[0] << 8) | write[1]);
+			const RegisterWrite op{number, 0, tuner};
+			return BulkRegisters(&op, 1, read, deadline);
+		}
+	}
 	++sequence_;
 	if (!sequence_)
 		sequence_ = 1;
@@ -107,13 +136,17 @@ I2cResult MailboxI2c::WriteRegisters(const RegisterWrite *writes, std::size_t co
 	if (clock_.Now() >= deadline)
 		return I2cResult::timeout;
 
-	constexpr std::uint32_t ring = 0x17a3e00, ring_address = 0x17a3d40, ring_answer = 0x17a3e40;
+	constexpr std::uint32_t ring = 0x17a3e00, ring_answer = 0x17a3e40;
+	for (std::size_t i = 0; i < count; ++i)
+		if (writes[i].number > (writes[i].tuner ? 0xff : 0x7ff))
+			return I2cResult::invalid_argument;
+	if (bulk_transfer_)
+		return BulkRegisters(writes, count, nullptr, deadline);
+
 	constexpr std::uint32_t lap = 1u << 31, short_register = 1u << 29;
 	std::array<std::uint8_t, MaxRegisterWrites * 4> payload{};
 	for (std::size_t i = 0; i < count; ++i) {
 		const auto &op = writes[i];
-		if (op.number > (op.tuner ? 0xff : 0x7ff))
-			return I2cResult::invalid_argument;
 		const auto slot = next_slot_ + i;
 		const auto word = (slot & MaxRegisterWrites ? lap : 0) | (op.tuner ? short_register : 0) |
 			(std::uint32_t(op.number) << 16) | op.value;
@@ -125,13 +158,8 @@ I2cResult MailboxI2c::WriteRegisters(const RegisterWrite *writes, std::size_t co
 		Invalidate();
 		return result;
 	};
-	if (!ring_configured_) {
-		// core 1 の長いレジスター番号は DiB8000、短い番号は DiB0090 に対応する。
-		memory_result_ = memory_.Write32(ring_address, 0x12c00000);
-		if (memory_result_ != MemoryResult::ok)
-			return fail(I2cResult::memory_error);
-		ring_configured_ = true;
-	}
+	if (const auto configured = ConfigureRegisterAddresses(); configured != I2cResult::ok)
+		return fail(configured);
 	if (clock_.Now() >= deadline)
 		return fail(I2cResult::timeout);
 	const auto slot = next_slot_ % MaxRegisterWrites;
@@ -174,6 +202,134 @@ I2cResult MailboxI2c::WriteRegisters(const RegisterWrite *writes, std::size_t co
 		}
 	}
 	return fail(I2cResult::timeout);
+}
+
+I2cResult MailboxI2c::ConfigureRegisterAddresses()
+{
+	if (ring_configured_)
+		return I2cResult::ok;
+	// core 1 の長いレジスター番号は DiB8000、短い番号は DiB0090 に対応する。
+	memory_result_ = memory_.Write32(0x17a3d40, 0x12c00000);
+	ring_configured_ = memory_result_ == MemoryResult::ok;
+	return ring_configured_ ? I2cResult::ok : I2cResult::memory_error;
+}
+
+I2cResult MailboxI2c::EnableBulk(std::uint32_t seed, PipeTransfer transfer, Clock::time_point deadline)
+{
+	if (!ready_)
+		return I2cResult::not_ready;
+	if (!seed || !transfer || bulk_transfer_)
+		return I2cResult::invalid_argument;
+	auto update = [this](std::uint32_t address, std::uint32_t clear, std::uint32_t set) {
+		std::uint32_t value = 0;
+		auto result = memory_.Read32(address, value);
+		return result == MemoryResult::ok ? memory_.Write32(address, (value & ~clear) | set) : result;
+	};
+	// coax の commandSetupLocked と同じ DMA スロットを使う。USB 電源断後は
+	// 受信側の初期化より先にここへ来るため、DMA の有効化と reset 解除も行う。
+	for (const auto &reg : std::array<std::array<std::uint32_t, 3>, 9>{{
+		{0xfd8010, 0, 0xf0000}, {0xfd8014, 0xf0000, 0},
+		{0xfd8300, UINT32_MAX, 1}, {0xfd8304, UINT32_MAX, 0x8004},
+		{0xfdbc14, 0, 0x40000}, {0xfd80b4, 0, 4},
+		{0xfd8510, UINT32_MAX, bulk_size}, {0xfd8508, UINT32_MAX, bulk_base},
+		{0xfd8504, UINT32_MAX, 1}
+	}}) {
+		if (clock_.Now() >= deadline) {
+			Invalidate();
+			return I2cResult::timeout;
+		}
+		memory_result_ = reg[1] == UINT32_MAX ? memory_.Write32(reg[0], reg[2]) : update(reg[0], reg[1], reg[2]);
+		if (memory_result_ != MemoryResult::ok) {
+			Invalidate();
+			return I2cResult::memory_error;
+		}
+	}
+
+	// 電源断直後にも旧応答が残り得る。最初のコマンドを送る前に回収する。
+	std::array<std::uint8_t, 64> stale{};
+	for (unsigned i = 0; i < 8; ++i) {
+		std::size_t size = 0;
+		const auto result = transfer(bulk_answer, stale.data(), stale.size(), size,
+			(std::min)(deadline, clock_.Now() + std::chrono::milliseconds(5)));
+		if (result == I2cResult::timeout || (result == I2cResult::ok && !size))
+			break;
+		if (result != I2cResult::ok) {
+			Invalidate();
+			return result;
+		}
+	}
+	bulk_transfer_ = std::move(transfer);
+	bulk_sequence_ = seed;
+	bulk_slot_ = 0;
+	return BulkRegisters(nullptr, 0, nullptr, deadline);
+}
+
+I2cResult MailboxI2c::BulkRegisters(const RegisterWrite *writes, std::size_t count,
+	std::uint8_t *read, Clock::time_point deadline)
+{
+	const auto limit = (std::min)(deadline, clock_.Now() + bulk_timeout);
+	auto fail = [this](I2cResult result) {
+		// OUT 完了後に応答を失った操作をリングで再送すると二重実行になり得る。
+		Invalidate();
+		return result;
+	};
+	if (count) {
+		const auto configured = ConfigureRegisterAddresses();
+		if (configured != I2cResult::ok)
+			return fail(configured);
+	}
+	std::array<std::uint8_t, bulk_size> packet{};
+	PutWord(packet.data(), bulk_sequence_);
+	PutWord(packet.data() + 4, 0x80000000u | static_cast<std::uint32_t>(count));
+	PutWord(packet.data() + packet.size() - 4, bulk_sequence_);
+	for (std::size_t i = 0; i < count; ++i) {
+		const auto &op = writes[i];
+		PutWord(packet.data() + 8 + i * 4, (read ? 1u << 30 : 0) |
+			(op.tuner ? 1u << 29 : 0) | (std::uint32_t(op.number) << 16) | op.value);
+	}
+	std::size_t size = 0;
+	auto result = bulk_transfer_(bulk_command, packet.data(), packet.size(), size, limit);
+	if (result != I2cResult::ok)
+		return fail(result);
+	if (size != packet.size())
+		return fail(I2cResult::malformed_answer);
+
+	std::array<std::uint8_t, 64> answer{};
+	for (;;) {
+		if (clock_.Now() >= limit)
+			return fail(I2cResult::timeout);
+		result = bulk_transfer_(bulk_answer, answer.data(), answer.size(), size, limit);
+		if (result != I2cResult::ok)
+			return fail(result);
+		if (size >= 4 && ReadWord(answer.data()) == bulk_sequence_)
+			break;
+	}
+	if (size != (read ? 12u : 8u) || answer[4] || answer[6] || answer[7] != (read ? 1 : 0))
+		return fail(I2cResult::malformed_answer);
+	switch (answer[5]) {
+	case 0: break;
+	case 1: return fail(I2cResult::bus_error);
+	case 2: return fail(I2cResult::address_nack);
+	case 3: return fail(I2cResult::data_nack);
+	case 4: return fail(I2cResult::stuck);
+	default: return fail(I2cResult::malformed_answer);
+	}
+	++bulk_sequence_;
+	if (++bulk_slot_ == bulk_slots) {
+		bulk_slot_ = 0;
+		memory_result_ = memory_.Write32(0xfd8508, bulk_base);
+		if (memory_result_ == MemoryResult::ok && clock_.Now() < limit)
+			memory_result_ = memory_.Write32(0xfd8504, 1);
+		if (memory_result_ != MemoryResult::ok)
+			return fail(I2cResult::memory_error);
+	}
+	if (clock_.Now() >= limit)
+		return fail(I2cResult::timeout);
+	if (read) {
+		read[0] = answer[10];
+		read[1] = answer[11];
+	}
+	return I2cResult::ok;
 }
 
 // coax job.go の同期ジョブ経路。mailbox 操作は完了応答まで待つため、
