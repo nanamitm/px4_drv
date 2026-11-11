@@ -1,4 +1,5 @@
 #include "card_client.hpp"
+#include "ipc_names.hpp"
 
 #include <algorithm>
 #include <array>
@@ -87,7 +88,8 @@ bool CardClient::Connect() noexcept try
 	config.stream_read = false;
 	config.timeout = 1000;
 
-	if (!pipe->Connect(L"px4_card_pipe", config, nullptr)) {
+	/* DriverHost のカードサーバーと同じ名前を使い、実機試験用ビルドでも接続先を分離する */
+	if (!pipe->Connect(px4::ipc::Card, config, nullptr)) {
 		if (!StartDriverHost())
 			return false;
 
@@ -97,7 +99,7 @@ bool CardClient::Connect() noexcept try
 		bool is_connected = false;
 		do {
 			std::this_thread::sleep_for(std::chrono::milliseconds(50));
-			if (pipe->Connect(L"px4_card_pipe", config, nullptr)) {
+			if (pipe->Connect(px4::ipc::Card, config, nullptr)) {
 				is_connected = true;
 				break;
 			}
