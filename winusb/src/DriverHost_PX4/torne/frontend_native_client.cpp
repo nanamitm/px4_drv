@@ -5,6 +5,7 @@
 namespace px4::torne {
 dibnative::Bus::MemoryResult NativeFrontendClient::TMCC(std::uint32_t kind,const std::vector<std::uint32_t>& parameters) {
     if(auto error=CheckState())return {{},false,true,error};
+    if(auto error=FlushWrites())return {{},false,true,error};
     std::array<std::uint32_t,3> results{};
     const auto result=bus_.RunJob(kind,parameters,0,results,deadline_);
     if(result!=I2cResult::ok)return {{},false,true,dibnative::MakeError("TMCC job failed",static_cast<unsigned>(result),static_cast<unsigned>(bus_.LastMemoryResult()),bus_.LastSystemError())};
@@ -16,6 +17,7 @@ dibnative::Bus::MemoryResult NativeFrontendClient::RememberTMCC(std::uint8_t add
 std::tuple<std::int64_t,std::int64_t,bool,dibnative::Error> NativeFrontendClient::Captrim(std::uint8_t address,std::uint16_t lo4,
     std::uint32_t key,std::int64_t start,std::int64_t step,std::int64_t target,std::int64_t write,std::int64_t read) {
     if(auto error=CheckState())return {0,0,true,error};
+    if(auto error=FlushWrites())return {0,0,true,error};
     int best=0,diff=0;
     const auto result=bus_.Captrim(address,lo4,key,static_cast<int>(start),static_cast<int>(step),static_cast<int>(target),write,read,best,diff,deadline_);
     if(result!=I2cResult::ok)return {0,0,true,dibnative::MakeError("Captrim job failed",static_cast<unsigned>(result),static_cast<unsigned>(bus_.LastMemoryResult()),bus_.LastSystemError())};
@@ -33,6 +35,17 @@ std::tuple<dibnative::Slice<std::uint8_t>,dibnative::Error> NativeFrontendClient
     std::uint8_t address,dibnative::Slice<std::uint8_t> write,std::int64_t length){
     if(auto err=CheckState())return {{},err};
     if(address&1||write.size()>32||length<0||length>32||(!write.size()&&!length))return {{},dibnative::MakeError("invalid native I2C request")};
+    const bool tuner = address == 0xc0 && write.size() == 3;
+    const bool demod = address == 0x12 && write.size() == 4 && write[0] <= 7;
+    if(batch_writes_ && !length && (tuner || demod)) {
+        const auto number = static_cast<std::uint16_t>(tuner ? write[0] : (write[0] << 8) | write[1]);
+        const auto offset = tuner ? 1 : 2;
+        const auto value = static_cast<std::uint16_t>((write[offset] << 8) | write[offset + 1]);
+        pending_[pending_count_++] = {number,value,tuner};
+        if(pending_count_ == pending_.size())return {{},FlushWrites()};
+        return {{},nullptr};
+    }
+    if(auto error=FlushWrites())return {{},error};
     std::array<std::uint8_t,32> output{},input{};
     for(std::size_t i=0;i<write.size();++i)output[i]=write[i];
     const auto result=bus_.Transfer(address,output.data(),write.size(),input.data(),static_cast<std::size_t>(length),deadline_);
@@ -42,7 +55,19 @@ std::tuple<dibnative::Slice<std::uint8_t>,dibnative::Error> NativeFrontendClient
     for(std::int64_t i=0;i<length;++i)response[i]=input[static_cast<std::size_t>(i)];
     return {response,nullptr};
 }
+dibnative::Error NativeFrontendClient::FlushWrites() {
+    if(!pending_count_)return nullptr;
+    const auto count = pending_count_;
+    pending_count_ = 0;
+    if(auto error=CheckState())return error;
+    const auto result=bus_.WriteRegisters(pending_.data(),count,deadline_);
+    if(result!=I2cResult::ok)
+        return dibnative::MakeError("native I2C write batch failed",static_cast<unsigned>(result),static_cast<unsigned>(bus_.LastMemoryResult()),bus_.LastSystemError());
+    return CheckState();
+}
 dibnative::Error NativeFrontendClient::Wait(std::int64_t duration){
+    // レジスターの待機時間は、先行する書き込みの完了後から数える。
+    if(auto error=FlushWrites())return error;
     // 直前の書込みは同期I2C完了時に届いている。待機だけを切り詰め、
     // 操作全体の期限を延長せず、抜去時には同じイベントで中断する。
     const auto result=WaitFrontendDelay(cancel_,deadline_,duration,stop_);
@@ -53,7 +78,8 @@ bool NativeFrontendClient::Command(std::uint8_t kind,const std::vector<std::uint
     deadline_=deadline;error_.clear();response.clear();
     if(auto err=CheckState()){error_=*err;return false;}
     const bool ok=frontend_.Command(kind,body,response);
-    if(!ok){error_=frontend_.Error();return false;}
+    if(!ok){pending_count_=0;error_=frontend_.Error();return false;}
+    if(auto err=FlushWrites()){error_=*err;response.clear();return false;}
     if(auto err=CheckState()){error_=*err;response.clear();return false;}
     return true;
 }

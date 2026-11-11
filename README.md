@@ -13,8 +13,12 @@ PLEX 社の [Webサイト](http://plex-net.co.jp) にて配布されている公
 - USB 転送終了時の完了回収、RAW_IO 上限検査、カード接続の世代管理、PX-MLT 共有電源のエラー管理、同型機の明示選択を補強しました。高精度待機は比較測定用の任意設定です。[Windows デバイス操作の設定と検証](winusb/docs/device-operations.md)を参照してください。
 
 - RTL2838UHIDIR（USB ID `0BDA:2838`）向けに、受信用 Interface 0 の WinUSB INF、機器診断・I/Q 収録ツールと、独立したソフトウェア復調 helper を使うワンセグ BonDriver を追加（Windows WinUSB 版のみ、実験的）。[診断・収録手順](winusb/tools/rtlsdr/README.md)と[導入手順](docs/rtlsdr-install.md)と[技術資料・検証記録](winusb/docs/rtlsdr-bondriver.md)を参照。
+- SDRplay RSP1 の互換機（Mirics MSi2500 + MSi001、USB ID `1DF7:2500`）向けに、ソフトウェアで OFDM 復調・誤り訂正・A/B 階層の再多重を行う helper を使うフルセグ BonDriver を追加（Windows WinUSB 版のみ、実験的。USB ドライバーは SDRplay のものを使用）。USB の等時転送の遅れで数分〜十数分に 1 回、約 2 秒の欠落が起きることがあり、32 ビット版の実機受信・USB の抜き差し・長時間受信は未確認です。[導入手順](docs/msi2500-install.md)と[技術資料・検証記録](winusb/docs/msi2500-fullseg-design.md)を参照。
+- 同じ `BonDriver_MSI2500` に、スカパー！プレミアムサービス光の ITU-T J.83 Annex B（256QAM、5.6 Msps）をソフトウェアで復調するチューニング空間を追加（実験的）。検証環境では H007・H008 を受信でき、MER が約 23 dB の H004・H005 と UHF の搬送波は受信できる帯域として扱っていません。64 ビット版の TVTest での選局と視聴を確認済みで、32 ビット版の実機受信と長時間の視聴は未確認です。[導入手順](docs/msi2500-install.md#j83b-の受信)と[技術資料・検証記録](winusb/docs/msi2500-j83b-design.md)を参照。
 - PLEX PX-BCUD に実験的に対応（Windows WinUSB版のみ、アンテナへの外部給電が必要）。通常配布に専用BonDriverとINFを同梱します。BS/CS受信、チャンネル切り替え、TVTestでのチャンネルスキャン・視聴、USBの抜き差しを確認済み。長時間録画とスリープ復帰後の動作は未確認です。導入方法と検証範囲は[PX-BCUD対応の詳細](docs/px-bcud-winusb.md)を参照。
 - Sony torne CECH-ZD1J に実験的に対応（Windows WinUSB版のみ）。復調と内蔵カードリーダーの制御を `DriverHost_PX4.exe` に統合。現行の統合版と配布設定の組み合わせは実機未検証です。過去の別設定・旧実装での実測結果とは区別し、検証範囲と導入方法は[統合手順](winusb/docs/cech-zd1j-integration.md)を参照。
+- I-O DATA GV-MVP/XZ3（USB ID `04BB:0530`）に実験的に対応（Windows WinUSB版のみ、アンテナへの外部給電が必要）。通常配布に専用BonDriverとINFを同梱し、選局・TS転送用のファームウェアは `DriverHost_PX4.exe` に内蔵します。x64とx86で地デジ・BS・110度CSの選局と受信を確認済み。専用INFでの導入、長時間録画、USBの抜き差しは未確認です。導入方法と検証範囲は[GV-MVP/XZ3対応の詳細](winusb/docs/gv-mvp-xz3.md)を参照。
+- PIX-DT295 (`06b8:103b`) 向けにmAgicVISION常駐方式の実験的バックエンドを追加（Windows WinUSB版のみ、DT295実機は未検証）。既定では無効です。[導入と制約](winusb/docs/pix-dt295.md)、共通経路を検証した[torne常駐方式の実機記録](winusb/docs/torne-resident-validation.md)を参照。
 - 最新coaxの選局改善、複数台管理、初回ロック待ちと自動復帰の設定は[統合版の保守情報](winusb/docs/torne-integration-notes.md)、DLL・EXEの署名と信頼登録は[アプリケーション署名](winusb/docs/application-signing.md)を参照。
 
 動作確認は Windows 10 / Windows 11 (x64) で行っています。
@@ -67,7 +71,7 @@ PX-BCUDの長時間録画・スリープ復帰と、torneの現行統合版で�
 - BonDriver の ini の節に `=` を含まない行があると、設定の読み込みが無限ループに陥る問題を修正 (v0.7.0 以降)
 - コピー型の `GetTsStream()` で、呼び出し元のバッファを越えて TS を書き込むことがある問題を修正 (v0.7.0 以降)
 - DriverHost_PX4 のログファイルの末尾に、前回起動時のログが残る問題を修正 (v0.7.0 以降)
-- 少なくとも PX-M1UR で、内蔵カードリーダーの利用中にチューナー本体へ給電され、同じ PC に接続した別のチューナーの受信品質が下がることがある問題を修正 (v0.7.1 以降)
+- PX-M1UR などの USB バスパワーで動作するチューナーで、内蔵カードリーダーを使っている間に未使用の受信回路へ給電され、同じ PC に接続した別のチューナーの受信品質が下がることがある問題を修正 (v0.7.1 以降)
 
 #### ビルド・ドキュメント
 
@@ -123,7 +127,7 @@ PLEX PX-S1UD（USB ID `3275:0080`）向けに、WinUSB を直接使う地デジ1
 - Linux 4.15 (Ubuntu 18.04 の初期カーネル) 以降でビルドできるように修正 (v0.7.0 以降)
 - WinUSB 版と同じく、PX-S1UR を ISDB2056 系の共通処理に統合し、設計の異なる DTV03A-1TU (ISDBT2071) を単独の実装に分離 (v0.7.0 以降)
 - 少なくとも PX-W3U4 で、チューナーを使っていない間にカードを抜いても、挿入済みのまま検出され続ける問題を修正 (v0.7.1 以降)
-- 少なくとも PX-M1UR で、内蔵カードリーダーの利用中にチューナー本体へ給電され、同じ PC に接続した別のチューナーの受信品質が下がることがある問題を修正 (v0.7.1 以降)
+- PX-M1UR などの USB バスパワーで動作するチューナーで、内蔵カードリーダーを使っている間に未使用の受信回路へ給電され、同じ PC に接続した別のチューナーの受信品質が下がることがある問題を修正 (v0.7.1 以降)
 - 内蔵カードリーダーのカード検出が一時的に失敗すると、録画中の復号がその録画の終わりまで再開しなくなることがある問題を修正 (v0.7.1 以降)
 - pcscd の起動時や USB の接続直後に、内蔵カードリーダーが認識されないことがある問題を修正 (v0.7.1 以降)
 
@@ -162,7 +166,7 @@ PLEX PX-S1UD（USB ID `3275:0080`）向けに、WinUSB を直接使う地デジ1
 	  - チップ構成が大幅に変更された、ロット番号 2021-11 以降の個体のみ対応しています。
 
 > [!NOTE]  
-> 2021 年以降メンテナンスされていない [nns779/px4_drv](https://github.com/nns779/px4_drv) と異なり、新規に下記チューナーのサポートを追加しています。
+> 2021 年以降メンテナンスされていない [nns779/px4_drv](https://github.com/nns779/px4_drv) から、新規に下記チューナーのサポートを追加しています。
 > 
 > - PLEX PX-M1UR
 > - PLEX PX-S1UR
@@ -216,7 +220,9 @@ certutil.exe -addstore TrustedPublisher ".\px4_drv_winusb.cer"
 - PX-S1UR: `BonDriver_PX-S1UR`
 
 - RTL2838UHIDIR: `BonDriver_RTLSDR`（[導入手順](docs/rtlsdr-install.md)を参照。`rtlsdr` サブフォルダーも必須）
+- SDRplay RSP1 互換機 (MSi2500): `BonDriver_MSI2500`（[導入手順](docs/msi2500-install.md)を参照。`msi2500` サブフォルダーも必須）
 - Sony torne CECH-ZD1J: `BonDriver_Torne`
+- GV-MVP/XZ3: `BonDriver_XZ3`（[Windows導入手順](winusb/docs/gv-mvp-xz3.md)を参照）
 - PX-S1UD: `BonDriver_PX-S1UD`（[導入手順と検証範囲](winusb/docs/px-s1ud.md)を参照。`firmware` と `licenses` フォルダーも必要）
 - PX-BCUD: `BonDriver_PX-BCUD`（アンテナ給電非対応。外部給電と `LNBPower=0` が必要）
 
@@ -451,17 +457,18 @@ Ubuntu 20.04 以降と、同じ世代以降の Debian 系ディストリビュ�
 
 `udevadm` の2行は、すでに接続しているチューナーのカードリーダーを、新しくインストールした pcscd から開けるようにするためのものです。
 
-> [!IMPORTANT]  
-> 基本的に、異なるバージョンの px4_drv と px4-drv-pcsc を混在させて利用することはできません。  
-> px4_drv と px4-drv-pcsc の更新後は、必ず pcscd を再起動してください。
+> [!NOTE]  
+> 基本的に、**異なるバージョンの px4_drv と px4-drv-pcsc を混在させて利用することはできません。** 必ず同一バージョンのドライバで揃えてください。    
+> また、**px4_drv と px4-drv-pcsc を更新した後は、必ず pcscd を再起動してください。**
 
 > [!IMPORTANT]  
-> **カードの抜き差しを検出するため、pcscd が内蔵カードリーダーを認識している間は、チューナーの未使用時でも PX4 系・PX-MLT 系チューナーと DTV03A-1TU の本体へ給電されます。**  
-> DTV02A-1T1S-U / PX-M1UR などは、内蔵カードリーダーの利用のためにチューナー本体へ給電しません。  
+> **PX4 系・PX-MLT 系チューナーでは、カードの抜き差しを検出するため、pcscd が内蔵カードリーダーを認識している間は、チューナーを使っていなくてもチューナー本体に給電されます。**  
 > Ubuntu や Debian 標準の pcscd は、カードリーダーを使用するアプリケーションの終了から約1分で自動停止するため、給電もあわせて停止します。
 > 
 > 一方、 **Docker コンテナ内などで pcscd を常駐させている場合は、pcscd の動作中は給電が継続します。**  
 > pcscd を Docker コンテナで運用する際のチューナーへの常時給電を避けたい方は、pcscd をホスト側で実行してカードリーダー利用終了後に自動停止できるようにするか、内蔵カードリーダーが不要であれば px4-drv-pcsc 自体をコンテナ上から削除してください。
+> 
+> USB バスパワーで動作する DTV02A-1T1S-U / PX-M1UR / DTV03A-1TU などでは、受信回路に給電されるのはチューナーを使っている間だけです (DTV03A-1TU は実機での動作を確認できていません)。
 
 > [!TIP]  
 > ソースからビルドしてインストールすることもできます。  
@@ -519,7 +526,7 @@ Ubuntu 24.04 / Debian 13 以降の pcscd は、接続してきたプログラム
 
 > [!NOTE]  
 > この問題は内蔵カードリーダー固有の問題ではなく、外付けカードリーダーでも同様に発生します。  
-> カードリーダーへのアクセスが拒否された場合、pcscd のログに `is NOT authorized for action: access_pcsc` が出力されます。
+> カードリーダーへのアクセスが拒否された場合、pcscd のログに `is NOT authorized for action: access_pcsc` が出力されます。  
 > なお、Ubuntu 22.04 / Debian 12 以前の pcscd は当該チェックを行わないため、この設定を記述する必要はありません。
 
 カードリーダーへのアクセスが拒否される場合には、次の polkit ルールを `/etc/polkit-1/rules.d/50-pcscd-recorder.rules` に配置し、  
@@ -537,7 +544,7 @@ polkit.addRule(function(action, subject) {
 
 > [!NOTE]  
 > recisdb などの受信ソフトウェアは、カードリーダーのデバイスファイルには直接アクセスせず、pcscd 経由で間接的にアクセスします。  
-> チューナーデバイスの `video` グループと異なり、recisdb を実行するユーザーを `pcscd` グループに追加する必要はありません。
+> チューナーデバイスへのアクセスに必要な `video` グループとは異なり、recisdb を実行するユーザーを `pcscd` グループに追加する必要はありません。
 
 #### Docker 環境からカードリーダーにアクセスする場合
 
@@ -596,34 +603,75 @@ Mirakurun の場合は、環境変数 `DISABLE_PCSCD=1` を設定した上で、
 
 ## アンインストール (Linux)
 
-### 1. ドライバのアンインストール
+### 1. チューナーとカードリーダーを使っているプロセスの停止
+
+**px4_drv のカーネルモジュールは、チューナーやカードリーダーのデバイスファイルが開かれている間はアンロードできません。**  
+Mirakurun や EDCB などの録画ソフトウェアを停止したうえで、pcscd も停止してください。  
+pcscd は、内蔵カードリーダーを認識している間、カードリーダー用デバイスファイル (`/dev/px4card/*`) を開き続けています。
+
+	$ sudo systemctl stop pcscd.socket pcscd.service
+
+Docker コンテナ内で pcscd を動かしている場合は、そのコンテナを停止してください。
+
+### 2. pcscd 用ドライバ (px4-drv-pcsc) のアンインストール
+
+px4-drv-pcsc をインストールしていない場合は、この手順は不要です。
 
 #### Debian パッケージを使用してインストールした場合
 
+	$ sudo apt purge px4-drv-pcsc
+
+#### ソースコードからビルドしてインストールした場合
+
+	$ sudo make -C pcsc uninstall
+
+> [!NOTE]  
+> Docker イメージに px4-drv-pcsc を追加していた場合は、Dockerfile から px4-drv-pcsc をインストールする行を削除し、イメージをビルドし直してください。
+
+### 3. ドライバのアンインストール
+
+#### Debian パッケージを使用してインストールした場合
+
+	$ sudo modprobe -r px4_drv
 	$ sudo apt purge px4-drv-dkms
 
 #### DKMS を使用してインストールした場合
 
+	$ sudo modprobe -r px4_drv
 	$ sudo dkms remove px4_drv/0.7.1 --all
 	$ sudo rm -rf /usr/src/px4_drv-0.7.1
 
+> [!IMPORTANT]  
+> **Debian パッケージや DKMS でのアンインストールでは、ロード中のカーネルモジュールはアンロードされません。**  
+> `modprobe -r` を実行せずにアンインストールすると、ディスク上のファイルが削除された後も、PC を再起動するまで古いカーネルモジュールが動作し続けます。  
+> この状態で別のバージョンの px4_drv をインストールすると、動作中のカーネルモジュールと px4-drv-pcsc のバージョンが食い違うため、必ず先にアンロードしてください。
+
 #### DKMS を使用せずにインストールした場合
 
-内蔵カードリーダーを pcscd で使っている場合は、pcscd がデバイスファイルを開いたままでモジュールを外せないため、先に pcscd を止めます。
-
-	$ sudo systemctl stop pcscd.socket pcscd.service
-	$ sudo modprobe -r px4_drv
 	$ cd driver
 	$ sudo make uninstall
 	$ cd ../
 
-### 2. ファームウェアのアンインストール
+`make uninstall` は、カーネルモジュールをアンロードしてから、インストール済みのすべてのカーネル向けのカーネルモジュールを削除します。
+
+> [!TIP]  
+> `modprobe -r` や `make uninstall` が `Module px4_drv is in use` で失敗した場合は、チューナーかカードリーダーを使っているプロセスが残存しています。  
+> [1. の手順](#1-チューナーとカードリーダーを使っているプロセスの停止) で停止したプロセスを確認してから、再度実行してください。
+
+### 4. ファームウェアのアンインストール
 
 > [!NOTE]  
 > **px4_drv を Debian パッケージや DKMS を使用してインストールした場合、ファームウェアは自動的にアンインストールされます。**  
 > Debian パッケージや DKMS を使用してインストールを行った場合は、この手順はスキップしてください。
 
 	$ sudo rm /lib/firmware/it930x-firmware.bin
+
+### 5. pcscd の再開
+
+外付けカードリーダーを引き続き利用する場合は、[1. の手順](#1-チューナーとカードリーダーを使っているプロセスの停止) で停止した pcscd を再開してください。  
+なお、ドライバのアンインストール後に PC を再起動した場合、pcscd も外付けカードリーダーの接続に合わせて再度自動的に起動するため、手動での起動は不要です。
+
+	$ sudo systemctl start pcscd.socket
 
 ## 受信方法
 

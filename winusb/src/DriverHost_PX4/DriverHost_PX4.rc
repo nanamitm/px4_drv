@@ -36,3 +36,9 @@ BEGIN
 END
 
 ICON1	ICON	"icon.ico"
+
+IDR_DT295_DIRECT_FIRMWARE RCDATA "../../pkg/DriverHost_PX4/firmware/dt295-direct-fr.bin"
+IDR_DT295_SOURCE_FIRMWARE RCDATA "../../pkg/DriverHost_PX4/firmware/dt295-source-fr.bin"
+IDR_XZ3_BOOTSTRAP RCDATA "../../pkg/DriverHost_PX4/firmware/xz3-bootstrap.bin"
+IDR_XZ3_RUNTIME RCDATA "../../pkg/DriverHost_PX4/firmware/xz3-runtime.bin"
+IDR_XZ3_HOOK RCDATA "../../pkg/DriverHost_PX4/firmware/xz3-hook.bin"

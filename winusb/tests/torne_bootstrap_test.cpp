@@ -6,6 +6,7 @@
 #include "../src/DriverHost_PX4/torne/mb86h47_stream.hpp"
 
 #include <cstdlib>
+#include <algorithm>
 #include <iostream>
 #include <map>
 #include <vector>
@@ -50,6 +51,18 @@ public:
 		if (calls == fail_call) { transferred = 0; return 1167; }
 		if (calls == short_call) { transferred = length - 1; return 0; }
 		if (request.type == 0xc0) {
+			if (address == 0x17a3e40 && answer_ring) {
+				for (;;) {
+					const auto word = Get(0x17a3e00 + (ring_next & 15) * 4);
+					if ((word >> 31) != ((ring_next >> 4) & 1)) break;
+					ring_words.push_back(word);
+					const auto slot = static_cast<std::uint8_t>(ring_next++);
+					const auto error = slot == ring_error_slot ? 2u << 16 : 0u;
+					const auto answer = (std::uint32_t(slot) << 24) | error;
+					Put(0x17a3e40, answer);
+					if (error && !Get(0x17a3e44)) Put(0x17a3e44, answer);
+				}
+			}
 			for (std::size_t i = 0; i < length; ++i)
 				data[i] = memory[address + static_cast<std::uint32_t>(i)];
 			if (corrupt_address && address == corrupt_address)
@@ -118,7 +131,123 @@ public:
 	bool answer_job=false,spin_running=false;
 	std::uint32_t job_error=0;
 	std::vector<std::uint32_t> job_kinds;
+	bool answer_ring = false;
+	unsigned ring_next = 16, ring_error_slot = 256;
+	std::vector<std::uint32_t> ring_words;
 };
+
+static void RegisterWriteTests()
+{
+	Chip chip;
+	MemoryAccess memory(chip);
+	Bootstrap boot(memory, chip);
+	Check(boot.Initialize(1) == BootstrapResult::ok, "ring bootstrap");
+	MailboxI2c bus(memory, chip);
+	Check(bus.BeginAfterBootstrap(boot), "ring bus ready");
+	chip.answer_ring = true;
+	const auto deadline = chip.Now() + std::chrono::seconds(5);
+	std::array<MailboxI2c::RegisterWrite, MailboxI2c::MaxRegisterWrites> ops{};
+	for (std::size_t i = 0; i < ops.size(); ++i)
+		ops[i] = {static_cast<std::uint16_t>(0x70 + i), static_cast<std::uint16_t>(0x1234 + i), i % 2 != 0};
+	Check(bus.WriteRegisters(ops.data(), 15, deadline) == I2cResult::ok, "initial batch completes");
+	Check(chip.Get(0x17a3d40) == 0x12c00000 && chip.ring_words[0] == 0x80701234 &&
+		chip.ring_words[1] == 0xa0711235, "mixed register widths and addresses");
+	Check(bus.WriteRegisters(ops.data(), ops.size(), deadline) == I2cResult::ok, "batch crosses lap");
+	Check(chip.ring_words.size() == 31 && chip.ring_words[15] == 0x80701234 &&
+		chip.ring_words[16] == 0x20711235, "lap changes in order");
+	for (unsigned i = 0; i < 15; ++i)
+		Check(bus.WriteRegisters(ops.data(), ops.size(), deadline) == I2cResult::ok, "slot sequence wraps");
+	chip.ring_error_slot = static_cast<std::uint8_t>(chip.ring_next);
+	Check(bus.WriteRegisters(ops.data(), 3, deadline) == I2cResult::address_nack, "earlier NACK survives later success");
+	Check(chip.ring_words.size() == 274, "error batch fully observed");
+	Check(bus.WriteRegisters(ops.data(), 1, deadline) == I2cResult::not_ready, "failed batch invalidates bus");
+
+	Chip stalled;
+	MemoryAccess stalled_memory(stalled);
+	Bootstrap stalled_boot(stalled_memory, stalled);
+	Check(stalled_boot.Initialize(1) == BootstrapResult::ok, "stalled ring bootstrap");
+	MailboxI2c stalled_bus(stalled_memory, stalled);
+	Check(stalled_bus.BeginAfterBootstrap(stalled_boot), "stalled ring bus ready");
+	Check(stalled_bus.WriteRegisters(ops.data(), 2, stalled.Now() + std::chrono::milliseconds(2)) ==
+		I2cResult::timeout, "ring completion shares absolute deadline");
+	const auto calls = stalled.calls;
+	const std::uint8_t command[]{0, 1};
+	std::uint8_t reply[2]{};
+	Check(stalled_bus.Transfer(0x12, command, sizeof(command), reply, sizeof(reply), deadline) == I2cResult::not_ready &&
+		stalled_bus.WriteRegisters(ops.data(), 1, deadline) == I2cResult::not_ready && stalled.calls == calls,
+		"timeout blocks both mailbox and ring operations");
+}
+
+static void BulkTests()
+{
+	Chip chip;
+	MemoryAccess memory(chip);
+	Bootstrap boot(memory, chip);
+	constexpr std::uint32_t seed = 0x12345679;
+	Check(boot.Initialize(seed) == BootstrapResult::ok, "Bulk bootstrap");
+	MailboxI2c bus(memory, chip);
+	Check(bus.BeginAfterBootstrap(boot), "Bulk bus ready");
+	const auto deadline = chip.Now() + std::chrono::seconds(5);
+	unsigned drains = 0, commands = 0;
+	bool pending = false, reading = false, stale = true, bad_length = false;
+	std::uint32_t sequence = 0;
+	auto pipe = [&](std::uint8_t ep, std::uint8_t *data, std::size_t length,
+		std::size_t &size, auto limit) {
+		size = 0;
+		Check(limit <= deadline && limit > chip.Now(), "Bulk shares the operation deadline");
+		if (ep == 0x02) {
+			Check(!pending && length == 512, "complete Bulk OUT");
+			sequence = (std::uint32_t(data[0]) << 24) | (std::uint32_t(data[1]) << 16) |
+				(std::uint32_t(data[2]) << 8) | data[3];
+			Check(sequence == seed + commands && std::equal(data, data + 4, data + 508),
+				"matching command sequence bookends");
+			Check(data[4] == 0x80 && data[7] == (commands ? 1 : 0), "command flags");
+			reading = (data[8] & 0x40) != 0;
+			if (commands == 1)
+				Check(data[8] == 0x20 && data[9] == 0x12 && data[10] == 0xab && data[11] == 0xcd,
+					"short register write encoding");
+			if (commands == 2)
+				Check(data[8] == 0x42 && data[9] == 0x38, "long register read encoding");
+			++commands;
+			pending = true;
+			size = length;
+			return I2cResult::ok;
+		}
+		Check(ep == 0x83 && length == 64, "interrupt answer endpoint");
+		if (!commands) {
+			if (++drains > 1) return I2cResult::timeout;
+			size = 3;
+			return I2cResult::ok;
+		}
+		Check(pending, "read follows a command");
+		const auto reply = stale ? sequence - 1 : sequence;
+		for (unsigned i = 0; i < 4; ++i)
+			data[i] = static_cast<std::uint8_t>(reply >> (24 - 8 * i));
+		std::fill_n(data + 4, 8, std::uint8_t{});
+		data[7] = reading ? 1 : 0;
+		data[10] = 0x12;
+		data[11] = 0x34;
+		size = bad_length ? 7 : reading ? 12 : 8;
+		if (!stale) pending = false;
+		stale = false;
+		return I2cResult::ok;
+	};
+	Check(bus.EnableBulk(seed, pipe, deadline) == I2cResult::ok && drains == 2, "drain then probe Bulk");
+	const MailboxI2c::RegisterWrite op{0x12, 0xabcd, true};
+	Check(bus.WriteRegisters(&op, 1, deadline) == I2cResult::ok, "Bulk register write");
+	const std::uint8_t reg[]{0x02, 0x38};
+	std::uint8_t value[2]{};
+	Check(bus.Transfer(0x12, reg, sizeof(reg), value, sizeof(value), deadline) == I2cResult::ok &&
+		value[0] == 0x12 && value[1] == 0x34, "Bulk register read");
+	for (unsigned i = commands; i < 16; ++i)
+		Check(bus.WriteRegisters(&op, 1, deadline) == I2cResult::ok, "complete DMA slot sequence");
+	Check(chip.writes[chip.writes.size() - 2] == 0xfd8508 && chip.writes.back() == 0xfd8504,
+		"rearm DMA only after last slot acknowledgement");
+	bad_length = true;
+	Check(bus.WriteRegisters(&op, 1, deadline) == I2cResult::malformed_answer, "reject matching short response");
+	Check(bus.WriteRegisters(&op, 1, deadline) == I2cResult::not_ready && commands == 17,
+		"malformed response never replays the command");
+}
 
 static void JobTests()
 {
@@ -248,6 +377,8 @@ static void I2cTests()
 int main()
 {
 	JobTests();
+	RegisterWriteTests();
+	BulkTests();
 	I2cTests();
 	StreamTests();
 	Chip chip;

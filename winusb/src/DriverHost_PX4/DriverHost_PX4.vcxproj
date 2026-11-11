@@ -274,6 +274,7 @@
     <ClCompile Include="device_manager.cpp" />
     <ClCompile Include="pxbcud\device.cpp" />
     <ClCompile Include="rtlsdr\rtl_device.cpp" />
+    <ClCompile Include="msi2500\msi2500_device.cpp" />
     <ClCompile Include="pxbcud\frontend.cpp" />
     <ClCompile Include="siano\device.cpp">
       <ObjectFileName>$(IntDir)siano_device.obj</ObjectFileName>
@@ -282,6 +283,13 @@
       <ObjectFileName>$(IntDir)siano_frontend.obj</ObjectFileName>
     </ClCompile>
     <ClCompile Include="siano\protocol.c" />
+    <ClCompile Include="xz3\device.cpp"><ObjectFileName>$(IntDir)xz3_device.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="xz3\frontend.cpp"><ObjectFileName>$(IntDir)xz3_frontend.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="dt295\device.cpp"><ObjectFileName>$(IntDir)dt295_device.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="dt295\winusb_transport.cpp" />
+    <ClCompile Include="dt295\card_uart.cpp"><ObjectFileName>$(IntDir)dt295_card_uart.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="dt295\source_firmware.cpp"><ObjectFileName>$(IntDir)dt295_source_firmware.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="dt295\frontend_init.cpp"><ObjectFileName>$(IntDir)dt295_frontend_init.obj</ObjectFileName></ClCompile>
     <ClCompile Include="torne\experimental_device.cpp" />
     <ClCompile Include="torne\frontend_native_client.cpp" />
     <ClCompile Include="torne\dib8096_native.cpp" />
@@ -329,11 +337,15 @@
 	<ClInclude Include="card_server.hpp" />
 	<ClInclude Include="card_status_lock.hpp" />
 	<ClInclude Include="card_device.hpp" />
+    <ClInclude Include="tc90522_cnr.hpp" />
+    <ClInclude Include="xz3\device.hpp" />
+    <ClInclude Include="xz3\frontend.hpp" />
     <ClInclude Include="device_base.hpp" />
     <ClInclude Include="device_definition_set.hpp" />
     <ClInclude Include="device_manager.hpp" />
     <ClInclude Include="pxbcud\device.hpp" />
     <ClInclude Include="rtlsdr\device.hpp" />
+    <ClInclude Include="msi2500\device.hpp" />
     <ClInclude Include="siano\device.hpp" />
     <ClInclude Include="siano\capture_gate.hpp" />
     <ClInclude Include="siano\firmware_path.hpp" />
@@ -371,6 +383,8 @@
   <ItemGroup>
     <ResourceCompile Include="DriverHost_PX4.rc" />
   </ItemGroup>
+  <PropertyGroup><Dt295HostBuild>true</Dt295HostBuild></PropertyGroup>
+  <Import Project="dt295\upstream.props" />
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">
   </ImportGroup>

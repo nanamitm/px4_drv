@@ -1,0 +1,94 @@
+// SPDX-License-Identifier: GPL-2.0-only
+#include "winusb_transport.hpp"
+#include "msg.h"
+#include <algorithm>
+#include <cerrno>
+#include <array>
+#include <cstring>
+
+namespace px4::dt295 {
+namespace {
+int Error(DWORD code) {
+    switch(code) {
+    case ERROR_OPERATION_ABORTED:return -ECANCELED;
+    case ERROR_DEVICE_NOT_CONNECTED:case ERROR_NO_SUCH_DEVICE:return -ENODEV;
+    case ERROR_TIMEOUT:case ERROR_SEM_TIMEOUT:return -ETIMEDOUT;
+    case ERROR_INVALID_DATA:return -EPROTO;
+    default:return -EIO;
+    }
+}
+}
+DWORD NativeControlIo::Submit(WINUSB_INTERFACE_HANDLE usb,WINUSB_SETUP_PACKET setup,PUCHAR data,ULONG size,ULONG &actual,OVERLAPPED &operation) {
+    return WinUsb_ControlTransfer(usb,setup,data,size,&actual,&operation)?ERROR_SUCCESS:GetLastError();
+}
+DWORD NativeControlIo::Collect(WINUSB_INTERFACE_HANDLE usb,OVERLAPPED &operation,ULONG &actual) {
+    return WinUsb_GetOverlappedResult(usb,&operation,&actual,TRUE)?ERROR_SUCCESS:GetLastError();
+}
+void NativeControlIo::Cancel(HANDLE file,OVERLAPPED &operation) noexcept {CancelIoEx(file,&operation);}
+dt295_io Transport::Callbacks() { return {Control,Now,Delay,nullptr,this,nullptr,nullptr}; }
+int Transport::Control(void *ctx,uint8_t type,uint8_t request,uint16_t value,uint16_t index,void *data,uint16_t size,unsigned timeout)
+{
+    return static_cast<Transport *>(ctx)->Transfer(type,request,value,index,data,size,timeout);
+}
+uint32_t Transport::Now(void *) { return GetTickCount(); }
+void Transport::Delay(void *ctx,unsigned ms) {
+    auto &self=*static_cast<Transport *>(ctx);
+    const auto begin=Clock::now();
+    const auto left=std::chrono::duration_cast<std::chrono::milliseconds>(self.deadline_-Clock::now()).count();
+    if(left>0)WaitForSingleObject(self.removed_,static_cast<DWORD>((std::min<long long>)(left,ms)));
+    ++self.delays_;self.requested_delay_us_+=static_cast<uint64_t>(ms)*1000;
+    self.delay_us_+=static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(Clock::now()-begin).count());
+}
+void Transport::ReportTiming(const char *stage) {
+    msg_info("PIX-DT295: transport stage=%s transfers=%llu in=%llu out=%llu in_us=%llu out_us=%llu control_us=%llu mean_control_us=%llu max_control_us=%llu delays=%llu requested_delay_us=%llu actual_delay_us=%llu\n",
+        stage,transfers_,in_,out_,in_us_,out_us_,control_us_,transfers_?control_us_/transfers_:0,max_control_us_,
+        delays_,requested_delay_us_,delay_us_);
+    transfers_=control_us_=max_control_us_=in_=out_=delays_=requested_delay_us_=delay_us_=0;
+    in_us_=out_us_=0;
+}
+int Transport::Transfer(uint8_t type,uint8_t request,uint16_t value,uint16_t index,void *data,uint16_t size,unsigned timeout)
+{
+    // 応答不明の要求を再送すると二重実行になるため、通信失敗後は同じセッションを再利用しない。
+    if(failed_)return failed_;
+    if(WaitForSingleObject(removed_,0)!=WAIT_TIMEOUT){last_error_=ERROR_DEVICE_NOT_CONNECTED;return failed_=-ENODEV;}
+    auto left=std::chrono::duration_cast<std::chrono::milliseconds>(deadline_-Clock::now()).count();
+    if(left<=0){last_error_=ERROR_TIMEOUT;return failed_=-ETIMEDOUT;}
+    // WinUSBはOUTにも書込み可能なユーザーバッファを要求する。上流のconst表を直接渡すと998になる。
+    // コピーとOVERLAPPEDは転送完了の回収まで同じスコープで保持する。
+    std::array<uint8_t,64> outbound{};
+    if(!(type&0x80)){
+        if(size>outbound.size() || (size && !data))return -EINVAL;
+        if(size)std::memcpy(outbound.data(),data,size);
+        data=outbound.data();
+    }
+    OVERLAPPED operation{};
+    operation.hEvent=CreateEventW(nullptr,TRUE,FALSE,nullptr);
+    if(!operation.hEvent){last_error_=GetLastError();return failed_=Error(last_error_);}
+    WINUSB_SETUP_PACKET setup{type,request,value,index,size};
+    ULONG actual=0;
+    const auto begin=Clock::now();
+    DWORD code=io_.Submit(usb_,setup,static_cast<PUCHAR>(data),size,actual,operation);
+    if(code==ERROR_IO_PENDING) {
+        HANDLE events[]{removed_,operation.hEvent};
+        DWORD wait=WaitForMultipleObjects(2,events,FALSE,static_cast<DWORD>((std::min<long long>)(left,timeout)));
+        if(wait!=WAIT_OBJECT_0+1) {
+            code=wait==WAIT_OBJECT_0?ERROR_DEVICE_NOT_CONNECTED:wait==WAIT_TIMEOUT?ERROR_TIMEOUT:GetLastError();
+            io_.Cancel(file_,operation);
+        } else code=ERROR_SUCCESS;
+        // bufferとeventは、キャンセルを含む完了の回収が済むまで保持する。
+        DWORD collected=io_.Collect(usb_,operation,actual);
+        if(!code)code=collected;
+    }
+    const auto elapsed=static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(Clock::now()-begin).count());
+    ++transfers_;if(type&0x80){++in_;in_us_+=elapsed;}else{++out_;out_us_+=elapsed;}
+    control_us_+=elapsed;max_control_us_=(std::max)(max_control_us_,elapsed);
+    CloseHandle(operation.hEvent);
+    if(!code && actual!=size)code=ERROR_INVALID_DATA;
+    if(code) {
+        last_error_=code;failed_=Error(code);
+        msg_err("PIX-DT295: USB control type=%02x request=%02x value=%04x index=%04x bytes=%u actual=%lu win32=%lu errno=%d\n",
+            type,request,value,index,size,actual,code,failed_);
+    }
+    return failed_;
+}
+}

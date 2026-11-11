@@ -66,8 +66,31 @@ jobs:
         with:
           name: px4_drv_winusb_signed
           path: release
+      # 展開検証用ディレクトリにも依存ライブラリの ZIP があるため、同名の添付は内容を照合して1つにまとめる。
+      - name: Prepare unique release assets
+        shell: python
+        run: |
+          import hashlib
+          import shutil
+          from pathlib import Path
+
+          output = Path('release-assets')
+          output.mkdir()
+          assets = {}
+          for source in sorted(Path('release').rglob('*')):
+              if not source.is_file() or not (source.suffix == '.zip' or source.name == 'SHA256SUMS.txt'):
+                  continue
+              digest = hashlib.sha256(source.read_bytes()).hexdigest()
+              if source.name in assets:
+                  if assets[source.name] != digest:
+                      raise RuntimeError(f'Conflicting release assets: {source.name}')
+                  continue
+              assets[source.name] = digest
+              shutil.copyfile(source, output / source.name)
+          if not assets:
+              raise RuntimeError('No release assets found')
       - uses: softprops/action-gh-release@v3
         with:
           files: |
-            release/**/*.zip
-            release/**/SHA256SUMS.txt
+            release-assets/*
+          fail_on_unmatched_files: true

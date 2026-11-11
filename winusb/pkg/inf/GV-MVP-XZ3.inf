@@ -1,0 +1,38 @@
+[Version]
+Signature   = "$Windows NT$"
+Class       = Media
+ClassGuid   = {4D36E96C-E325-11CE-BFC1-08002BE10318}
+Provider    = %ProviderName%
+CatalogFile = px4_drv_winusb.cat
+DriverVer   = 11/11/2026,1.0.0.0
+
+[Manufacturer]
+%ManufacturerName% = DeviceList,NTx86,NTamd64,NTarm64
+
+[DeviceList.NTx86]
+%DeviceName% = WinUSBInstall, USB\VID_04BB&PID_0530
+
+[DeviceList.NTamd64]
+%DeviceName% = WinUSBInstall, USB\VID_04BB&PID_0530
+
+[DeviceList.NTarm64]
+%DeviceName% = WinUSBInstall, USB\VID_04BB&PID_0530
+
+[WinUSBInstall]
+Include = winusb.inf
+Needs   = WINUSB.NT
+
+[WinUSBInstall.Services]
+Include = winusb.inf
+Needs   = WINUSB.NT.Services
+
+[WinUSBInstall.HW]
+AddReg = DeviceInterfaceGUID
+
+[DeviceInterfaceGUID]
+HKR,,DeviceInterfaceGUIDs,0x10000,"{44e46df4-5fbd-40c8-84d6-e56ddceb12be}"
+
+[Strings]
+ProviderName     = "px4_drv"
+ManufacturerName = "I-O DATA"
+DeviceName       = "I-O DATA GV-MVP/XZ3 ISDB-T/S Receiver Device (WinUSB)"

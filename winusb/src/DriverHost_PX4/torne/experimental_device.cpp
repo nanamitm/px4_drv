@@ -29,6 +29,11 @@
 namespace px4::torne {
 using Clock = std::chrono::steady_clock;
 namespace {
+// BulkI2c=false の選局コマンドは DiB8000・DiB0090 のレジスターを1件ずつ USB 制御転送で操作するため、
+// 所要時間は USB ホストの制御転送の往復時間に比例する。制御転送が平均約3.0msの環境では、
+// ホスト起動後に初めて選ぶ周波数で選局コマンドだけに4.7～4.8秒、TS開始までに約5.1秒かかった。
+// 確定した検索失敗は期限を待たずに返るため、無信号チャンネルの判定時間はこの値に依存しない。
+constexpr auto TuneBudget = std::chrono::seconds(10);
 struct Event {
 	HANDLE value = CreateEventW(nullptr, TRUE, FALSE, nullptr);
 	~Event() { if (value) CloseHandle(value); }
@@ -76,6 +81,17 @@ struct ExperimentalSession {
 		if (!ok) { healthy = false; bus.Invalidate(); }
 		return ok;
 	}
+	bool ReadStatus(std::vector<std::uint8_t> &response, Clock::time_point deadline,
+		HANDLE stop=nullptr, bool retry=false)
+	{
+#ifdef PX4_TORNE_EXPERIMENTAL
+		// 旧診断ヘルパーのプロトコルは 0x13 を使用する。
+		const auto command=0x13;
+#else
+		const auto command=retry ? 0x13 : NativeFrontend::ReadOnlyStatus;
+#endif
+		return Command(static_cast<std::uint8_t>(command), {}, response, deadline, stop) && response.size() == 24;
+	}
 	void Invalidate()
 	{
 		std::lock_guard<std::mutex> lock(control_mutex);
@@ -87,12 +103,39 @@ struct ExperimentalSession {
 		std::lock_guard<std::mutex> lock(control_mutex);
 		return frontend.Error();
 	}
-	bool InitializeBridge()
+	bool InitializeBridge(bool bulk_i2c)
 	{
-		control.Begin(Clock::now() + std::chrono::seconds(8));
-		return bootstrap.Initialize(GetTickCount() | 1u) == BootstrapResult::ok && bus.BeginAfterBootstrap(bootstrap);
+		const auto deadline = Clock::now() + std::chrono::seconds(8);
+		control.Begin(deadline);
+		const auto seed = (GetTickCount() & 0x7fffffffu) | 1u;
+		if (bootstrap.Initialize(seed) != BootstrapResult::ok) {
+			msg_err("torne: bootstrap failed result=%u address=%08x os_error=%d\n",
+				static_cast<unsigned>(bootstrap.Result()), bootstrap.LastAddress(), bootstrap.LastSystemError());
+			return false;
+		}
+		if (!bus.BeginAfterBootstrap(bootstrap))
+			return false;
+#ifndef PX4_TORNE_EXPERIMENTAL
+		if (bulk_i2c) {
+			const auto result = bus.EnableBulk(seed, [this](std::uint8_t ep, std::uint8_t *data,
+				std::size_t length, std::size_t &transferred, Clock::time_point limit) {
+				const auto error = control.TransferPipe(ep, data, length, transferred, limit);
+				if (error == ERROR_TIMEOUT || error == ERROR_SEM_TIMEOUT)
+					return I2cResult::timeout;
+				if (error)
+					msg_err("torne: Bulk I2C endpoint 0x%02x failed, os_error=%d\n", unsigned(ep), error);
+				return error ? I2cResult::memory_error : I2cResult::ok;
+			}, deadline);
+			if (result != I2cResult::ok) {
+				msg_err("torne: Bulk I2C startup failed, result=%u\n", static_cast<unsigned>(result));
+				return false;
+			}
+			frontend.SetBulkTiming();
+		}
+#endif
+		return true;
 	}
-	bool InitializeFrontend(bool output_error_packets)
+	bool InitializeFrontend(bool output_error_packets, bool batch_i2c_writes)
 	{
 		std::lock_guard<std::mutex> lock(control_mutex);
 		if (!healthy) return false;
@@ -110,6 +153,7 @@ struct ExperimentalSession {
 		frontend_started = true;
 #ifndef PX4_TORNE_EXPERIMENTAL
 		frontend.SetStop(nullptr);
+		frontend.SetBatchWrites(batch_i2c_writes);
 #endif
 		std::vector<std::uint8_t> response;
 		bool ok = frontend.Command(0x10, {}, response, deadline) && response.empty();
@@ -268,7 +312,7 @@ std::shared_ptr<ExperimentalSession> ExperimentalDevice::AcquireSession()
 	if (!available_) return {};
 	if (auto current = shared_session_.lock()) return current;
 	auto created = std::make_shared<ExperimentalSession>(usb_dev_.dev, usb_dev_.winusb, cancel_);
-	if (!created->InitializeBridge() || !available_) return {};
+	if (!created->InitializeBridge(bulk_i2c_) || !available_) return {};
 	shared_session_ = created;
 	return created;
 }
@@ -286,7 +330,7 @@ public:
 		try {
 			session_ = parent_.AcquireSession();
 			if (!session_) return -EIO;
-			if (!session_->InitializeFrontend(parent_.output_error_packets_)) {
+			if (!session_->InitializeFrontend(parent_.output_error_packets_, (parent_.batch_i2c_writes_ || parent_.bulk_i2c_))) {
 				msg_err("torne: initialize failed (%s).\n", session_->FrontendError().c_str());
 				SleepFrontend();
 				session_.reset();
@@ -335,7 +379,7 @@ public:
 		if (!open_ || !parent_.available_) return -ECANCELED;
 		if (failed_) return -ECANCELED;
 		std::vector<std::uint8_t> response;
-		if (!session_->Command(0x13, {}, response, Clock::now() + std::chrono::seconds(1)) || response.size() != 24) return -ECANCELED;
+		if (!session_->ReadStatus(response, Clock::now() + std::chrono::seconds(1))) return -ECANCELED;
 		locked = tuned_ && response[0] == 1;
 		if (capture_) {
 			std::lock_guard<std::mutex> state(state_mutex_);
@@ -349,7 +393,7 @@ public:
 		value = 0;
 		if (!open_ || !parent_.available_) return -ENODEV;
 		std::vector<std::uint8_t> response;
-		if (!session_->Command(0x13, {}, response, Clock::now() + std::chrono::seconds(1)) || response.size() != 24) return -EIO;
+		if (!session_->ReadStatus(response, Clock::now() + std::chrono::seconds(1))) return -EIO;
 		double reading = 0;
 		std::size_t offset = 0;
 		if (type == px4::command::StatType::CNR && response[1]) offset = 8;
@@ -373,7 +417,7 @@ protected:
 		if (!stream_buf_->AdvanceEpoch()) return -EIO;
 		stream_buf_->ResetInputPacketCount();
 		failed_ = false;
-        const auto deadline=Clock::now()+std::chrono::seconds(5);
+        const auto deadline=Clock::now()+TuneBudget;
         const int tuned=TuneFrequency(params_.freq,deadline,nullptr,parent_.initial_lock_retry_);
         if(tuned){failed_=true;return tuned;}
 		tuned_ = true;
@@ -406,7 +450,8 @@ private:
         // Tune は一度だけ発行し、Status 内の上流の再試行時刻を保持する。
         // USB/カードとの待機を含む操作全体の期限は各ポーリングで更新しない。
         const auto result=WaitInitialLock(deadline,[]{return Clock::now();},[&] {
-            if(!command(0x13,{}) || response.size()!=24)return RecoveryResult::fatal;
+            if((stop && !WaitStop(0)) || !session_->ReadStatus(response,deadline,stop,retry_initial))
+                return RecoveryResult::fatal;
             return response[0]==1?RecoveryResult::ready:RecoveryResult::no_lock;
         },[&](unsigned ms) {
             const HANDLE events[]{parent_.cancel_,stop};
@@ -469,7 +514,7 @@ private:
                     const auto now=Clock::now();
                     if(now>=next_status) {
                         std::vector<std::uint8_t> response;
-                        if(!session_->Command(0x13,{},response,now+std::chrono::seconds(1),stop_.value) || response.size()!=24){worker_error_=ERROR_GEN_FAILURE;return;}
+                        if(!session_->ReadStatus(response,now+std::chrono::seconds(1),stop_.value)){worker_error_=ERROR_GEN_FAILURE;return;}
                         watch.Lock(response[0]==1,Clock::now());
                         next_status=Clock::now()+std::chrono::seconds(1);
                     }
@@ -544,7 +589,7 @@ private:
                     ++attempt;
                     msg_warn("torne: recovery attempt id=%s freq_khz=%u attempt=%llu cause=%u error=%lu\n",parent_.id_.c_str(),frequency,static_cast<unsigned long long>(attempt),static_cast<unsigned>(fault),worker_error_);
                     std::vector<std::uint8_t> response;
-                    const auto deadline=Clock::now()+std::chrono::seconds(5);
+                    const auto deadline=Clock::now()+TuneBudget;
                     if(!session_->Command(0x12,{0},response,deadline,stop_.value))return RecoveryResult::fatal;
                     const int result=TuneFrequency(frequency,deadline,stop_.value,parent_.initial_lock_retry_);
                     if(!WaitStop(0))return RecoveryResult::stopped;
@@ -603,7 +648,20 @@ ExperimentalDevice::ExperimentalDevice(const std::wstring &path, const px4::Devi
 ExperimentalDevice::~ExperimentalDevice() { Term(); if (cancel_) CloseHandle(cancel_); }
 int ExperimentalDevice::Init()
 {
+    const auto backend=device_def_.configs.Get(L"I2cBackend",L"native");
+    if (backend == L"source-fr") {
+        msg_err("torne: I2cBackend=source-fr has been removed. Set I2cBackend=native or remove the setting.\n");
+        return -EINVAL;
+    }
+    if (backend != L"native") {
+        msg_err("torne: invalid I2cBackend (expected native).\n");
+        return -EINVAL;
+    }
 	output_error_packets_=px4::util::wtob(device_def_.configs.Get(L"OutputErrorPackets",L"false"));
+	batch_i2c_writes_=px4::util::wtob(device_def_.configs.Get(L"BatchI2cWrites",L"false"));
+#ifndef PX4_TORNE_EXPERIMENTAL
+	bulk_i2c_=px4::util::wtob(device_def_.configs.Get(L"BulkI2c",L"false"));
+#endif
     auto_recovery_=px4::util::wtob(device_def_.configs.Get(L"AutoRecovery",L"false"));
     initial_lock_retry_=px4::util::wtob(device_def_.configs.Get(L"InitialLockRetry",L"false"));
 	// autoでは個体ごとに登録し、ReceiverManagerがOpen可能な受信機を選ぶ。

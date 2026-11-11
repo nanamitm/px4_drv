@@ -22,4 +22,5 @@ struct TorneCaptureStats {
 bool CaptureFirstTs(HANDLE file, WINUSB_INTERFACE_HANDLE usb, HANDLE cancel,
 	px4::torne::StreamEngine &engine, std::chrono::steady_clock::time_point deadline, TorneCaptureStats &stats,
 	unsigned duration_ms = 0,
-	std::function<bool(const std::uint8_t *, std::size_t)> output = {});
+	std::function<bool(const std::uint8_t *, std::size_t)> output = {},
+	std::function<bool(const std::uint8_t *, std::size_t)> raw_observer = {});

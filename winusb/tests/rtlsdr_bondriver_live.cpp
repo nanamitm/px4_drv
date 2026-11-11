@@ -9,6 +9,13 @@
 #include <stdexcept>
 
 void Require(bool value,const char *message){if(!value)throw std::runtime_error(message);}
+// 環境変数の非負の整数 (なければ既定値)
+unsigned long EnvNumber(const wchar_t *name,unsigned long fallback)
+{
+    wchar_t value[32]{};
+    const DWORD size=GetEnvironmentVariableW(name,value,32);
+    return (size>0 && size<32)?std::stoul(value):fallback;
+}
 std::uint32_t Crc(const BYTE *data,std::size_t size)
 {
     std::uint32_t value=0xffffffff;
@@ -23,8 +30,12 @@ int wmain(int argc,wchar_t **argv)
     try{
         const auto seconds=std::stoul(argv[3]),cycles=std::stoul(argv[4]);
         const auto alternate=argc==6?std::stoul(argv[5]):0;
+        // 既定は地上デジタル放送の空間 0 の先頭のチャンネルと、ワンセグの PMT の確認。
+        // J.83B などの別の空間を試すときは、空間と基準のチャンネルを指定し、ワンセグの PMT の確認を外す
+        const auto space=EnvNumber(L"BONDRIVER_LIVE_SPACE",0),base_channel=EnvNumber(L"BONDRIVER_LIVE_CHANNEL",0);
+        const bool require_pmt=EnvNumber(L"BONDRIVER_LIVE_ONESEG_PMT",1)!=0;
         Require(seconds>=1&&seconds<=600&&cycles>=1&&cycles<=10,"Invalid duration/cycles");
-        Require(argc!=6 || (alternate>=1 && alternate<=39 && cycles>=2),"Invalid alternate channel/cycles");
+        Require(argc!=6 || (alternate>=1 && alternate<=199 && alternate!=base_channel && cycles>=2),"Invalid alternate channel/cycles");
         module=LoadLibraryW(argv[1]);Require(module!=nullptr,"Cannot load BonDriver");
         using Factory=IBonDriver *(*)();
 #pragma warning(suppress:4191)
@@ -34,16 +45,16 @@ int wmain(int argc,wchar_t **argv)
         std::array<int,2> expected_tsid={-1,-1};
         for(unsigned long cycle=1;cycle<=cycles;++cycle){
             const auto slot=argc==6?(cycle-1)%2:0;
-            const auto channel=slot?alternate:0;
+            const auto channel=slot?alternate:base_channel;
             if(argc==5 || cycle==1)Require(driver->OpenTuner()!=FALSE,"OpenTuner failed");
             const auto tune_start=GetTickCount64();
-            Require(driver->SetChannel(0,channel)!=FALSE,"SetChannel failed");
+            Require(driver->SetChannel(space,channel)!=FALSE,"SetChannel failed");
             const auto tune_ms=GetTickCount64()-tune_start;
             if(GetEnvironmentVariableW(L"RTLSDR_EXPECT_ASYNC_TUNE",nullptr,0)){
                 Require(tune_ms<500,"Async tune response exceeded 500 ms");
                 Require(driver->GetSignalLevel()==0,"Async request acceptance falsely reported RF lock");
             }
-            Require(driver->GetCurSpace()==0&&driver->GetCurChannel()==channel,"Current channel mismatch");
+            Require(driver->GetCurSpace()==space&&driver->GetCurChannel()==channel,"Current channel mismatch");
             const std::wstring output=std::wstring(argv[2])+L".cycle"+std::to_wstring(cycle)+L".ts";
             file=CreateFileW(output.c_str(),GENERIC_WRITE,FILE_SHARE_READ,nullptr,CREATE_NEW,FILE_ATTRIBUTE_NORMAL,nullptr);
             Require(file!=INVALID_HANDLE_VALUE,"Cannot create capture (already exists?)");
@@ -99,10 +110,10 @@ int wmain(int argc,wchar_t **argv)
             CloseHandle(file);file=INVALID_HANDLE_VALUE;
             std::printf("cycle=%lu tune_ms=%llu first_ts_ms=%llu packets=%llu sync=%llu tei=%llu cc_gaps=%llu pat=%llu invalid_pat=%llu pmt=%llu empty_intervals=%llu quality=%.2f\n",
                 cycle,tune_ms,first_ts_ms,packets,sync,tei,cc,pat,bad_pat,pmt,empty,driver->GetSignalLevel());std::fflush(stdout);
-            Require(packets>0&&!sync&&!tei&&!cc&&pat>0&&!bad_pat&&pmt>0&&!empty,"TS/PAT/continuity validation failed");
+            Require(packets>0&&!sync&&!tei&&!cc&&pat>0&&!bad_pat&&(pmt>0||!require_pmt)&&!empty,"TS/PAT/continuity validation failed");
             // 同じ接続で再選局し、その後 Close/Open も繰り返して helper の寿命を検証する。
             if(argc==5){
-                Require(driver->SetChannel(0,0)!=FALSE,"Retune failed");driver->PurgeTsStream();
+                Require(driver->SetChannel(space,base_channel)!=FALSE,"Retune failed");driver->PurgeTsStream();
                 driver->CloseTuner();
             }
         }

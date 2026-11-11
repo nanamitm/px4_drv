@@ -1,0 +1,49 @@
+{
+  "format": "DTP4",
+  "bundle": {
+    "file": "dt295-source-fr.bin",
+    "bytes": 1948,
+    "sha256": "c589b0b81f468863c2c61d45a0e1f871312314bd452073601aa5c428f519903c"
+  },
+  "direct": {
+    "schema": 1,
+    "target": "PIX-DT295",
+    "entry": "0x000e1060",
+    "format": "raw-fr-big-endian",
+    "stage": "diagnostic-bootstrap-unverified",
+    "deployable": false,
+    "features": [],
+    "tools": {
+      "as": "GNU assembler (GNU Binutils) 2.43.1",
+      "ld": "GNU ld (GNU Binutils) 2.43.1",
+      "objcopy": "GNU objcopy (GNU Binutils) 2.43.1",
+      "objdump": "GNU objdump (GNU Binutils) 2.43.1"
+    },
+    "sources": {
+      "resident.s": "e32e3c4a3ff72f7d9fbbc99ae50ad3ef0747c063fb57b43d1aa6e3a62a1d2349",
+      "resident.ld": "0bf32db036abecc6090b1138c79fd64dc0caf4134672e550ba27b4a612786928",
+      "bootstrap.s": "79198d06bad080ed2390d51099b1cb281b3257124135ed06a290a30f3777249f",
+      "bootstrap.ld": "d80f2b7cf6fbd50c3756a083fdd39491e2de11d2f580ccff73041f74d99072e8",
+      "build.py": "ff947da5055e315e09bd821726553fa7105b151f6b17c47257f03494cd76833b",
+      "direct_pump.c": "02631ed1b7ac349de82410e2b84324559de7dd0f150bb3f431fbd686c1a590d1",
+      "bulk_pump.c": "12904a667aef800351c9f30a8bcb0b1e91f744144932e44ae2fcbe1624ade4aa"
+    },
+    "binary": {
+      "file": "resident.bin",
+      "size": 1828,
+      "sha256": "4d557a16f056273c4de25a83a86282fa52c31ef234af2595bf22600cfa2037dd"
+    },
+    "bootstrap": {
+      "file": "bootstrap.bin",
+      "address": "0x000e1000",
+      "size": 96,
+      "sha256": "aa9561c1b4a13251a5b0bedc1d690e1e3595314944b2d6848b4aafe7647716dc"
+    },
+    "hook": {
+      "file": "boot-hook.bin",
+      "address": "0x000ea6fc",
+      "size": 8,
+      "sha256": "e191866b8a02080cb0ec5afa9e7172f249619c6e06dcdf6944f444779988e2e3"
+    }
+  }
+}

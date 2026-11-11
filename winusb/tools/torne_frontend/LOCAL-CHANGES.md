@@ -16,7 +16,9 @@ ring request nor extends the caller's absolute deadline for a job.
 Native/Go trace fixtures also cover cache recall, changed transmission parameters,
 capacitor-trim dispatch and the one-second initial-search retry.
 
-Upstream source is pinned by `upstream.json`; original demodulator timing and search code are retained.
+Upstream source is pinned by `upstream.json`. The native Bulk I2C path sets
+`settleBeforeFFT` to wait at least 100 ms between demodulator setup and FFT search start.
+The Go diagnostic keeps the original timing with this flag disabled.
 The local `internal/coaxd/demod/dib8096/tune_result.go` adds `SearchFailed()` to expose an existing
 terminal state (`statusTuneFailed` and `demodStop`) after `Tune` returns without an I/O error.
 It does not implement a signal-strength threshold or shorten acquisition timeouts.
