@@ -357,10 +357,10 @@ BS15の初回試験では地デジのTSが残り、CS ND06ではCC不整合63件
 
 ### DriverHost / BonDriver の試験構成
 
-DriverHostは04BB:0530のインターフェース0を使います。WinUSBを割り当てたXZ3を接続し、
-DriverHost_PX4.iniのGV-MVP/XZ3定義で Experimental=true を設定してください。
-BonDriver_PX4.dllをBonDriver_XZ3.dllとして配置し、BonDriver_XZ3.iniと地デジ・衛星のChSetを同じディレクトリーに置きます。
-Zadigの共通WinUSBインターフェースGUIDで列挙した結果はVID/PIDで絞り込みます。
+DriverHostは04BB:0530のインターフェース0を使います。
+通常のWinUSB導入手順は `winusb/docs/gv-mvp-xz3.md` にあります。
+Zadigで割り当てたWinUSBを使う場合はXZ3の `DeviceInterfaceGUID` を既存のWinUSB GUIDに設定します。
+共通GUIDでの列挙結果はVID/PIDで絞り込みます。
 
 DriverHostには初期化専用ブートストラップ、I²C選局・TS転送共通版、USBフックを内蔵しています。
 FR30 GCC 14.2.0とBinutils 2.43.1でbuild.pyを--bootstrapと--runtimeで実行すると、
