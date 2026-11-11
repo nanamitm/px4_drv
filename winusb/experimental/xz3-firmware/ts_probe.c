@@ -6,7 +6,8 @@
 #define REG(address) (*(volatile uint32_t *)(uintptr_t)(address))
 #define REG16(address) (*(volatile uint16_t *)(uintptr_t)(address))
 #define RING 0x80a90000u
-#define RING_SIZE 0x3fe00u
+/* mAgicVISIONの0x3fe00ではCSの約39 ms分しかない。ldi:20に収まる上限まで広げる。 */
+#define RING_SIZE 0xffe00u
 #define RUN 0x00d02010u
 #define PRODUCER 0x00d02028u
 #define LIMIT 0x00d0202cu
