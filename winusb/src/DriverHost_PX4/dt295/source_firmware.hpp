@@ -66,6 +66,7 @@ private:
     bool IsLocked();
     void StopRing();
     void Restore();
+    void RecordRing(uint32_t producer);
     int Failure(const char *stage, int code) const;
 
     const bool direct_;
@@ -76,6 +77,8 @@ private:
     uint32_t clock_ = 0, sequence_ = 0, cursor_ = 0, tsid_ = 0;
     uint32_t stream_phase_ = 0xffffffff, endpoint_enable_ = 0, endpoint_buffer_ = 0, endpoint_mode_ = 0;
     bool endpoint_saved_ = false;
+    uint64_t ring_services_ = 0, ring_high_ = 0;
+    uint32_t ring_peak_ = 0;
     bool clock_changed_ = false, ts_changed_ = false;
     bool ring_running_ = false, ready_ = false, satellite_ = false, tuned_ = false;
 };

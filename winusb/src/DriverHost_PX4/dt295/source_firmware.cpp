@@ -693,6 +693,12 @@ int SourceFirmware::Capture(bool enable)
     try {
         if (!enable) {
             StopRing();
+            if (ring_services_)
+                msg_info("PIX-DT295: TS ring services=%llu peak_pending=%u ring=%u high=%llu\n",
+                    static_cast<unsigned long long>(ring_services_), ring_peak_, RingSize,
+                    static_cast<unsigned long long>(ring_high_));
+            ring_services_ = ring_high_ = 0;
+            ring_peak_ = 0;
             StopEndpoint();
             return 0;
         }
@@ -729,6 +735,20 @@ int SourceFirmware::Capture(bool enable)
 }
 
 int SourceFirmware::Service()
+// DMAはSERVICEの外でもリングへ書き続ける。応答の生成位置と送出後の消費位置の差を未送信量とし、
+// 最大値と、リングの3/4を超えた回数を記録してドロップの時刻と照合できるようにする。
+// 溢れた場合は周回後の小さな値に見えるため、超過の回数と最大値を合わせて読む。
+void SourceFirmware::RecordRing(uint32_t producer)
+{
+    if (producer >= RingSize)
+        return;
+    const auto pending = producer >= cursor_ ? producer - cursor_ : RingSize - cursor_ + producer;
+    ++ring_services_;
+    ring_peak_ = (std::max)(ring_peak_, pending);
+    if (pending > RingSize / 4 * 3 && !ring_high_++)
+        msg_warn("PIX-DT295: TS ring high pending=%u ring=%u cursor=%u producer=%u\n", pending, RingSize, cursor_, producer);
+}
+
 {
     try {
         const unsigned budget = direct_ ? 512 : 256;
@@ -767,6 +787,7 @@ int SourceFirmware::Service()
         }
         cursor_ = next;
         return 0;
+        RecordRing(Be(&reply[32]));
     } catch (int error) {
         return Failure("PIF1 Bulk pump", error);
     } catch (const std::bad_alloc &) {
