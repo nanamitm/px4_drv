@@ -29,6 +29,15 @@ public:
 	/* 呼び出し元がカード I/O の排他を保持する。世代検査はAPDUを送信しない。 */
 	int BindConnection(std::uint64_t &generation);
 	int CheckConnection(std::uint64_t generation);
+	/* 在否を照会せず、最後に観測したカードの世代と比べる。 */
+	int CheckGeneration(std::uint64_t generation) const noexcept;
+	/*
+	 * Reset/Transmit は内部で在否を照会するため、事前の照会を重ねず、
+	 * その観測で抜去や USB 切断が分かった場合も接続の失効として返す。
+	 */
+	int ResetConnection(std::uint64_t generation, std::vector<std::uint8_t> &atr);
+	int TransmitConnection(std::uint64_t generation, const std::uint8_t *send_buf,
+		std::size_t send_len, std::uint8_t *recv_buf, std::size_t &recv_len);
 	int Transmit(const std::uint8_t *send_buf, std::size_t send_len,
 		     std::uint8_t *recv_buf, std::size_t &recv_len);
 

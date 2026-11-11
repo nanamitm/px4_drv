@@ -26,6 +26,7 @@ public:
 
 	int DetectCard(bool &detected) override
 	{
+		detect_count++;
 		if (detect_error) {
 			int error = detect_error;
 			detect_error = 0;
@@ -290,6 +291,7 @@ public:
 	bool read_allowed = false;
 	unsigned int ready_delay_checks = 0;
 	int detect_error = 0;
+	int detect_count = 0;
 	int write_error = 0;
 	unsigned int reset_count = 0;
 	unsigned int malformed_atr_resets = 0;
@@ -602,6 +604,31 @@ int main()
 		generation_card.CheckConnection(replacement_generation) == -ENODEV,
 		"USB loss during APDU did not invalidate the connection.") && succeeded;
 	generation_card.Close();
+	/* 接続経由の APDU は、TS と同じ USB ブリッジへのカード検出を1回だけ発行する。 */
+	succeeded = Check(generation_card.Open() == 0 &&
+		generation_card.BindConnection(replacement_generation) == 0 &&
+		generation_card.ResetConnection(replacement_generation, generation_atr) == 0,
+		"Cannot reopen generation test card for probe counting.") && succeeded;
+	const int detects_before_apdu = generation_device->detect_count;
+	response_length = sizeof(response);
+	succeeded = Check(generation_card.TransmitConnection(replacement_generation, apdu,
+		sizeof(apdu), response, response_length) == 0 &&
+		generation_device->detect_count == detects_before_apdu + 1,
+		"A connection APDU probed card presence more than once.") && succeeded;
+	/* Transmit 内の照会で観測した抜去は、未挿入ではなく接続の失効として返す。 */
+	generation_device->is_present = false;
+	response_length = sizeof(response);
+	succeeded = Check(generation_card.TransmitConnection(replacement_generation, apdu,
+		sizeof(apdu), response, response_length) == -ENODEV &&
+		generation_card.ResetConnection(replacement_generation, generation_atr) == -ENODEV,
+		"Removal observed during an APDU did not invalidate the connection.") && succeeded;
+	generation_device->is_present = true;
+	succeeded = Check(generation_card.BindConnection(replacement_generation) == 0 &&
+		generation_card.CheckGeneration(replacement_generation) == 0,
+		"Cannot rebind after removal observed during an APDU.") && succeeded;
+	generation_card.Close();
+	succeeded = Check(generation_card.CheckGeneration(replacement_generation) == -ENODEV,
+		"A closed reader accepted a connection generation.") && succeeded;
 	card.Close();
 	succeeded = Check(!device->is_open, "Closing the reader failed.") && succeeded;
 	std::printf("smart_card_state_test: %s\n", succeeded ? "passed" : "failed");

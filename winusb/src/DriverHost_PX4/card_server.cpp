@@ -330,12 +330,11 @@ void CardServer::CardConnection::Worker() noexcept
 					SetError(command, -EBUSY);
 					break;
 				}
-				if (status_card == card_) {
-					ret = card_->card.CheckConnection(generation_);
-					if (ret) { SetError(command, ret); break; }
-				}
 				ret = status_card->card.GetStatus(command.card_present,
 					command.card_initialized, atr);
+				/* 在否の照会は GetStatus の1回だけにし、その観測で自接続の失効を判定する */
+				if (!ret && status_card == card_)
+					ret = card_->card.CheckGeneration(generation_);
 				if (ret) {
 					SetError(command, ret);
 					break;
@@ -354,8 +353,7 @@ void CardServer::CardConnection::Worker() noexcept
 				}
 				std::vector<std::uint8_t> atr;
 				std::lock_guard<std::recursive_mutex> lock(card_->io_mutex);
-				int ret = card_->card.CheckConnection(generation_);
-				if (!ret) ret = card_->card.Reset(atr);
+				int ret = card_->card.ResetConnection(generation_, atr);
 				if (ret) {
 					SetError(command, ret);
 					break;
@@ -378,9 +376,8 @@ void CardServer::CardConnection::Worker() noexcept
 				/* 必要サイズを返せるよう、共有コマンド領域の全容量で受信する */
 				std::size_t recv_length = card_command::MAX_DATA_SIZE;
 				std::lock_guard<std::recursive_mutex> lock(card_->io_mutex);
-				int ret = card_->card.CheckConnection(generation_);
-				if (!ret) ret = card_->card.Transmit(command.data, command.data_length,
-					command.data, recv_length);
+				int ret = card_->card.TransmitConnection(generation_, command.data,
+					command.data_length, command.data, recv_length);
 				command.data_length = static_cast<std::uint32_t>(recv_length);
 				if (!ret && recv_length > command.data_capacity)
 					ret = -ENOBUFS;
@@ -418,8 +415,7 @@ void CardServer::CardConnection::Worker() noexcept
 					} else if (disposition == card_command::Disposition::RESET) {
 						try {
 							std::vector<std::uint8_t> atr;
-							ret = card_->card.CheckConnection(generation_);
-							if (!ret) ret = card_->card.Reset(atr);
+							ret = card_->card.ResetConnection(generation_, atr);
 							if (!ret) {
 								command.atr_length = static_cast<std::uint32_t>(atr.size());
 								if (!atr.empty())

@@ -7,6 +7,7 @@
 #include <stdbool.h>
 
 static LONG outstanding, submissions, aborts, unsubmitted_waits;
+static void *last_buffer;
 static ULONG mock_maximum = 4096;
 static USHORT mock_packet = 512;
 static bool fail_restore, fail_submission, short_write, stuck_transfer;
@@ -14,7 +15,8 @@ static LONG fail_submission_at;
 static DWORD startup_delay_ms;
 static BOOL WINAPI mock_read(WINUSB_INTERFACE_HANDLE h, UCHAR ep, PUCHAR b, ULONG n, PULONG r, LPOVERLAPPED ol)
 {
-    (void)h; (void)b; (void)n; (void)r;
+    (void)h; (void)r;
+    last_buffer = b;
     /* kernel32 は投入前に Internal を STATUS_PENDING にし、即時失敗では event も完了も通知しない。 */
     if (fail_submission || (fail_submission_at && submissions >= fail_submission_at)) { ol->Internal = STATUS_PENDING; SetLastError(ERROR_BAD_COMMAND); return FALSE; }
     ol->Internal = 1;
@@ -141,11 +143,13 @@ int main(void)
     fail_submission = false;
     SetLastError(ERROR_DEVICE_NOT_CONNECTED);
     CHECK(winerr_to_errno(&log) == ENODEV);
+    /* RAW_IO の復元失敗は 0x84 だけの設定のため、制御転送と次回の受信開始を止めない。 */
     fail_restore = true;
     CHECK_RESULT(itedtv_usb_start_streaming(&bus, stream, ctx), 0);
-    CHECK(itedtv_usb_stop_streaming(&bus) == -EIO);
-    CHECK(outstanding == 0 && ctx->policy_failed);
-    CHECK(itedtv_usb_start_streaming(&bus, stream, ctx) == -EIO);
+    CHECK(itedtv_usb_stop_streaming(&bus) == 0 && outstanding == 0);
+    CHECK(!ctx->faulted && itedtv_usb_ctrl_tx(&bus, response, sizeof(response)) == 0);
+    CHECK_RESULT(itedtv_usb_start_streaming(&bus, stream, ctx), 0);
+    CHECK(itedtv_usb_stop_streaming(&bus) == 0 && outstanding == 0);
     CHECK(itedtv_bus_term(&bus) == 0);
     /* 中止しても完了しない模擬IRPは、再利用・解放せず有限時間で隔離する。 */
     fail_restore = false; stuck_transfer = true;
@@ -166,6 +170,34 @@ int main(void)
     CHECK(itedtv_bus_term(&bus) == -EIO);
     /* 遅延したkernel書き込み先がterm後も有効である。領域は意図的に終了まで保持する。 */
     memset(late_completion_buffer, 0, 512);
+    /* 中止後も完了しない制御転送は、呼び出し元ではなく context の領域を隔離して有限時間で返す。 */
+    LONG stuck_before = outstanding;
+    bus.type = ITEDTV_BUS_USB; bus.dev = &log; bus.usb.dev = &usb;
+    bus.usb.ctrl_timeout = 10;
+    CHECK(itedtv_bus_init(&bus) == 0);
+    ctx = bus.usb.priv;
+    unsigned char oversized[ITEDTV_USB_CTRL_BUFFER_SIZE + 1] = {0};
+    CHECK(itedtv_usb_ctrl_tx(&bus, oversized, sizeof(oversized)) == -EMSGSIZE);
+    len = sizeof(response);
+    ULONGLONG before_ctrl = GetTickCount64();
+    CHECK(itedtv_usb_ctrl_rx(&bus, response, &len) == -ETIMEDOUT && len == -1);
+    CHECK(GetTickCount64() - before_ctrl < 2000);
+    CHECK(last_buffer == ctx->ctrl_xfer[1].buffer && ctx->stranded);
+    CHECK(outstanding == stuck_before + 1);
+    CHECK(itedtv_usb_ctrl_tx(&bus, response, sizeof(response)) == -EIO);
+    void *late_control_buffer = ctx->ctrl_xfer[1].buffer;
+    CHECK(itedtv_bus_term(&bus) == -EIO);
+    memset(late_control_buffer, 0, ITEDTV_USB_CTRL_BUFFER_SIZE);
+    /* PSB 除去の単発受信も、返却後に解放される呼び出し元バッファを kernel へ渡さない。 */
+    bus.type = ITEDTV_BUS_USB; bus.dev = &log; bus.usb.dev = &usb;
+    bus.usb.ctrl_timeout = 10;
+    CHECK(itedtv_bus_init(&bus) == 0);
+    ctx = bus.usb.priv;
+    len = sizeof(response);
+    CHECK(itedtv_usb_stream_rx(&bus, response, &len, 10) == -ETIMEDOUT && len == -1);
+    CHECK(last_buffer != response && ctx->stranded);
+    CHECK(outstanding == stuck_before + 2);
+    CHECK(itedtv_bus_term(&bus) == -EIO);
     printf("winusb_lifetime_test: %s\n", checks ? "FAILED" : "PASS");
     return checks ? 1 : 0;
 }

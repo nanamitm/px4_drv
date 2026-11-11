@@ -33,6 +33,9 @@ static inline void px4_device_wait(DWORD milliseconds)
 		}
 		CloseHandle(timer);
 	}
-	/* 高精度timerが使えない場合も要求した最小待機を守る。 */
-	Sleep(milliseconds);
+	/*
+	 * Sleep は要求時間がクロック分解能未満だと早く戻る場合があるため、
+	 * 高精度timerが使えない場合は従来の余裕を付けて最小待機を守る。
+	 */
+	Sleep(px4_legacy_wait_duration(milliseconds));
 }

@@ -134,6 +134,29 @@ int SmartCard::CheckConnection(std::uint64_t generation)
 	return present ? 0 : SMART_CARD_NO_MEDIUM;
 }
 
+int SmartCard::CheckGeneration(std::uint64_t generation) const noexcept
+{
+	if (!open_) return -ENODEV;
+	return generation == generation_ ? 0 : -ENODEV;
+}
+
+int SmartCard::ResetConnection(std::uint64_t generation, std::vector<std::uint8_t> &atr)
+{
+	int ret = CheckGeneration(generation);
+	if (ret) return ret;
+	ret = Reset(atr);
+	return CheckGeneration(generation) ? -ENODEV : ret;
+}
+
+int SmartCard::TransmitConnection(std::uint64_t generation, const std::uint8_t *send_buf,
+	std::size_t send_len, std::uint8_t *recv_buf, std::size_t &recv_len)
+{
+	int ret = CheckGeneration(generation);
+	if (ret) return ret;
+	ret = Transmit(send_buf, send_len, recv_buf, recv_len);
+	return CheckGeneration(generation) ? -ENODEV : ret;
+}
+
 int SmartCard::GetStatus(bool &present, bool &initialized,
 			 std::vector<std::uint8_t> &atr)
 {
