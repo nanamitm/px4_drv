@@ -358,6 +358,22 @@ foreach ($bcud_arch in @(@('x86', '32bit'), @('x64', '64bit'))) {
     Copy-Item '../LICENSE' $bcud_folder
 }
 
+# XZ3の選局と受信に使うファームウェアは共通DriverHostに内蔵される。
+foreach ($xz3_arch in @(@('x86', '32bit'), @('x64', '64bit'))) {
+    $xz3_platform = $xz3_arch[0]
+    $xz3_folder = "dist/BonDriver_XZ3_$($xz3_arch[1])"
+    New-Item -ItemType Directory -Path $xz3_folder | Out-Null
+    Copy-Item "build/$xz3_platform/Release-static/BonDriver_PX4.dll" "$xz3_folder/BonDriver_XZ3.dll"
+    Copy-Item "build/$xz3_platform/Release-static/DriverHost_PX4.exe" $xz3_folder
+    Copy-Item 'pkg/BonDriver_PX4/BonDriver_XZ3.ini' $xz3_folder
+    Copy-Item 'pkg/BonDriver_PX4/BonDriver_PX4-T.ChSet.txt' $xz3_folder
+    Copy-Item 'pkg/BonDriver_PX4/BonDriver_PX4-S.ChSet.txt' $xz3_folder
+    Copy-Item 'pkg/DriverHost_PX4/DriverHost_PX4.ini' $xz3_folder
+    Copy-Item 'pkg/DriverHost_PX4/it930x-firmware.bin' $xz3_folder
+    Copy-Item 'docs/gv-mvp-xz3.md' "$xz3_folder/README.md"
+    Copy-Item '../LICENSE' $xz3_folder
+}
+
 # 各 BonDriver と同じビット数の WinSCard.dll を配置
 # WinUSB 版の全対応機種で内蔵カードリーダーを利用できる
 Get-ChildItem dist/ -Directory -Filter 'BonDriver_*' | ForEach-Object {
@@ -416,6 +432,9 @@ if ($LASTEXITCODE -ne 0) { throw 'PX-S1UD package regression failed.' }
 if ($LASTEXITCODE -ne 0) { throw 'PIX-DT295 packaging failed.' }
 & python (Join-Path $PSScriptRoot 'tools/check_dt295_package.py')
 if ($LASTEXITCODE -ne 0) { throw 'PIX-DT295 package check failed.' }
+
+& python (Join-Path $PSScriptRoot 'tools/check_xz3_package.py')
+if ($LASTEXITCODE -ne 0) { throw 'GV-MVP/XZ3 package check failed.' }
 
 # アプリ署名も CAT と同じ上流の署名者へ固定する。通常の開発ビルドは従来どおり
 # 署名キー不要とし、配布用途では検証に成功した成果物だけを渡す。
