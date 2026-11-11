@@ -14,6 +14,7 @@ import argparse
 import ctypes as c
 from ctypes import wintypes as w
 from contextlib import contextmanager
+from pathlib import Path
 import struct
 import sys
 
@@ -30,6 +31,19 @@ RUN = 0x00d02010
 
 XZ3_GUID = '{44e46df4-5fbd-40c8-84d6-e56ddceb12be}'
 XZ3_DESCRIPTOR_ID = bytes.fromhex('bb043005')
+
+# memory_probe.cを読み込む先と、DriverHost_PX4のRelayと同じ要求の受け渡し場所。
+STAGE = 0x000c4600
+BODY = 0x000ea61c
+BODY_SIZE = 2236
+HOOK = 0x000e9a10
+STOCK_HOOK = bytes.fromhex('c44d00849b800000')
+MAGIC = 0x585a4931
+PROBE_OP = 14
+# FR30がTSリングを読む番地の範囲。memory_probe.cの範囲と一致させる。
+FR_SDRAM = 0x80000000
+FR_LIMIT = 0x84000000
+FR_CHUNK = 32
 
 
 def fingerprint(data):
@@ -151,6 +165,84 @@ def contiguous(rows):
     return end
 
 
+class FrProbe:
+    """memory_probe.cをboot0の本体の窓へ読み込み、FR30の番地でSDRAMを読む。
+
+    boot0の照合が一致し、DMAが止まっているときだけ使う。終了時は例外の有無にかかわらず、
+    フックを先に戻してから本体を元の内容へ戻し、両方を照合する。
+    """
+
+    def __init__(self, memory, image, hook):
+        if not image or len(image) > BODY_SIZE or len(image) % 4:
+            raise ValueError(f'probe image must be 4-byte aligned and at most {BODY_SIZE} bytes')
+        if len(hook) != 8:
+            raise ValueError('hook image must be two words')
+        self.memory = memory
+        self.image = bytes(image)
+        self.hook = bytes(hook)
+        self.saved = None
+        self.sequence = 0
+
+    def __enter__(self):
+        self.saved = read(self.memory, BODY, BODY_SIZE)
+        try:
+            for at in range(0, len(self.image), 4):
+                self.memory.write(BODY + at, self.image[at:at + 4])
+            if read(self.memory, BODY, len(self.image)) != self.image:
+                raise OSError('probe image verification failed')
+            # DriverHostと同じく、末尾の語を置いてから先頭の語でフックを有効にする。
+            self.memory.write(HOOK + 4, self.hook[4:])
+            self.memory.write(HOOK, self.hook[:4])
+        except BaseException:
+            self.restore()
+            raise
+        return self
+
+    def __exit__(self, *_):
+        self.restore()
+
+    def restore(self):
+        self.memory.write(HOOK, STOCK_HOOK[:4])
+        self.memory.write(HOOK + 4, STOCK_HOOK[4:])
+        if read(self.memory, HOOK, 8) != STOCK_HOOK:
+            raise OSError('hook restoration failed')
+        if self.saved is not None:
+            for at in range(0, BODY_SIZE, 4):
+                self.memory.write(BODY + at, self.saved[at:at + 4])
+            if read(self.memory, BODY, BODY_SIZE) != self.saved:
+                raise OSError('boot body restoration failed')
+
+    def read(self, address):
+        if address & 3 or not FR_SDRAM <= address <= FR_LIMIT - FR_CHUNK:
+            raise ValueError(f'address must be aligned within {FR_SDRAM:#x}..{FR_LIMIT:#x}')
+        self.sequence += 1
+        request = struct.pack('>6I', MAGIC, self.sequence, PROBE_OP, 0, address, 0)
+        # マジックを最後に書き、全フィールドが揃ってから読み出しで起動する。
+        for at in range(len(request) - 4, -1, -4):
+            self.memory.write(STAGE + at, request[at:at + 4])
+        reply = self.memory.read(STAGE, 64)
+        magic, sequence, op, status = struct.unpack('>4I', reply[:16])
+        if magic != MAGIC or sequence != self.sequence or op != 0x80000000 | PROBE_OP:
+            raise OSError(f'probe did not answer at {address:#x}: {reply[:16].hex()}')
+        if status:
+            raise OSError(f'probe status={status} at {address:#x}')
+        return reply[24:24 + FR_CHUNK]
+
+
+def classify(data):
+    if data == bytes(len(data)):
+        return 'zero'
+    if data == b'\xff' * len(data):
+        return 'ones'
+    return 'data'
+
+
+def fr_scan(probe, start, end, step):
+    for address in range(start, end, step):
+        data = probe.read(address)
+        yield address, classify(data), data.hex()
+
+
 class Setup(c.Structure):
     _fields_ = [('type', c.c_ubyte), ('request', c.c_ubyte),
                 ('value', w.USHORT), ('index', w.USHORT), ('length', w.USHORT)]
@@ -260,6 +352,17 @@ def run(memory, args):
             print(f'{address:#08x} {kind} {detail}', flush=True)
         return 0
     require_idle(memory)
+    if args.command == 'fr-scan':
+        image = args.probe.joinpath('relay.bin').read_bytes()
+        hook = args.probe.joinpath('hook.bin').read_bytes()
+        kinds = {}
+        with FrProbe(memory, image, hook) as probe:
+            for address, kind, detail in fr_scan(probe, args.start, args.end, args.step):
+                kinds[kind] = kinds.get(kind, 0) + 1
+                print(f'{address:#010x} {kind} {detail}', flush=True)
+        print(' '.join(f'{kind}={count}' for kind, count in sorted(kinds.items())))
+        print('restore=verified')
+        return 0
     if args.command == 'alias':
         rows = alias(memory, args.start, args.end)
         for address, ok, actual in rows:
@@ -278,12 +381,26 @@ def run(memory, args):
 def main():
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument('command', choices=('scan', 'alias', 'mark', 'check'))
+    parser.add_argument('command', choices=('scan', 'alias', 'mark', 'check', 'fr-scan'))
     parser.add_argument('--start', type=number, default=None,
-                        help='開始アドレス (scanの既定はリング先頭、ほかはリング末尾の次のブロック)')
-    parser.add_argument('--end', type=number, default=WINDOW_LIMIT, help='終了アドレス (含まない)')
+                        help='開始アドレス (scanの既定はリング先頭、fr-scanは0x80000000、'
+                             'ほかはリング末尾の次のブロック)')
+    parser.add_argument('--end', type=number, default=None,
+                        help=f'終了アドレス (含まない。既定は{WINDOW_LIMIT:#x}、fr-scanは0x81000000)')
+    parser.add_argument('--step', type=number, default=BLOCK, help='fr-scanの読み出し間隔')
+    parser.add_argument('--probe', type=Path,
+                        help='fr-scanで使うbuild.py --memory-probeの出力 (relay.binとhook.bin)')
     parser.add_argument('--interface', help='WinUSBのデバイスインターフェイスのパス')
     args = parser.parse_args()
+    if args.command == 'fr-scan':
+        if args.probe is None:
+            parser.error('fr-scan requires --probe')
+        args.start = FR_SDRAM if args.start is None else args.start
+        args.end = 0x81000000 if args.end is None else args.end
+        if args.step % 4 or args.step < FR_CHUNK:
+            parser.error('--step must be a multiple of 4 and at least 32')
+    if args.end is None:
+        args.end = WINDOW_LIMIT
     if args.start is None:
         args.start = RING_BASE if args.command == 'scan' else (RING_END + BLOCK - 1) // BLOCK * BLOCK
     paths = [args.interface] if args.interface else interface_paths()

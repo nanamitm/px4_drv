@@ -20,6 +20,8 @@ def main():
     mode.add_argument("--bootstrap", action="store_true", help="build the one-time board initializer")
     mode.add_argument("--runtime", "--ts-runtime", action="store_true",
                       help="build I2C tuning, continuous TS and C/N support")
+    mode.add_argument("--memory-probe", action="store_true",
+                      help="build the read-only SDRAM probe used by sdram_probe.py")
     parser.add_argument("--out", type=Path, required=True)
     args = parser.parse_args()
     compiler = [args.compiler, *args.compiler_arg]
@@ -27,7 +29,8 @@ def main():
         parser.error("FR30 GCC is required")
     args.out.mkdir(parents=True, exist_ok=True)
     asm, obj, elf, image = (args.out / f"relay.{ext}" for ext in ("s", "o", "elf", "bin"))
-    source = "ts_probe.c" if args.ts_probe or args.runtime else "relay.c"
+    source = ("memory_probe.c" if args.memory_probe else
+              "ts_probe.c" if args.ts_probe or args.runtime else "relay.c")
     defines = []
     if args.runtime:
         defines.append("-DXZ_TS_RUNTIME")

@@ -108,6 +108,70 @@ class GuardTest(unittest.TestCase):
         self.assertEqual(len(tags), (probe.WINDOW_LIMIT - probe.RING_BASE) // probe.BLOCK)
 
 
+class FakeRelay(FakeMemory):
+    """フックが有効なときだけ、ステージングの64バイト読み出しで操作14に応答する模擬機器。"""
+
+    def __init__(self, hook, fail_at=None):
+        super().__init__()
+        self.hook = hook
+        self.fail_at = fail_at
+        self.requests = []
+        for at in range(0, probe.BODY_SIZE, 4):
+            super().write(probe.BODY + at, struct.pack('>I', 0x11110000 + at))
+        for at in range(0, 8, 4):
+            super().write(probe.HOOK + at, probe.STOCK_HOOK[at:at + 4])
+
+    def read(self, address, size):
+        data = super().read(address, size)
+        if address != probe.STAGE or size != 64 or super().read(probe.HOOK, 8) != self.hook:
+            return data
+        magic, sequence, op, status, target, rx = struct.unpack('>6I', data[:24])
+        self.requests.append(target)
+        if target == self.fail_at:
+            raise OSError('stall')
+        body = bytes((target + i) & 0xff for i in range(probe.FR_CHUNK))
+        return struct.pack('>6I', magic, sequence, op | 0x80000000, 0, target, 32) + body + bytes(8)
+
+
+class FrProbeTest(unittest.TestCase):
+    IMAGE = bytes(range(256))
+    HOOK = bytes.fromhex('c44d0084aabbccdd')
+
+    def test_reads_through_the_probe_and_restores_boot_ram(self):
+        memory = FakeRelay(self.HOOK)
+        body = memory.read(probe.BODY, probe.BODY_SIZE)
+        with probe.FrProbe(memory, self.IMAGE, self.HOOK) as fr:
+            self.assertEqual(memory.read(probe.BODY, len(self.IMAGE)), self.IMAGE)
+            rows = list(probe.fr_scan(fr, 0x80a90000, 0x80a90000 + 0x30000, 0x10000))
+        self.assertEqual([a for a, _, _ in rows], [0x80a90000, 0x80aa0000, 0x80ab0000])
+        self.assertEqual(rows[0][2], bytes(range(32)).hex())
+        self.assertEqual(memory.read(probe.HOOK, 8), probe.STOCK_HOOK)
+        self.assertEqual(memory.read(probe.BODY, probe.BODY_SIZE), body)
+
+    def test_restores_after_a_failed_read(self):
+        memory = FakeRelay(self.HOOK, fail_at=0x80010000)
+        body = memory.read(probe.BODY, probe.BODY_SIZE)
+        with self.assertRaises(OSError):
+            with probe.FrProbe(memory, self.IMAGE, self.HOOK) as fr:
+                list(probe.fr_scan(fr, 0x80000000, 0x80020000, 0x10000))
+        self.assertEqual(memory.requests, [0x80000000, 0x80010000])
+        self.assertEqual(memory.read(probe.HOOK, 8), probe.STOCK_HOOK)
+        self.assertEqual(memory.read(probe.BODY, probe.BODY_SIZE), body)
+
+    def test_rejects_addresses_outside_the_probe_range(self):
+        memory = FakeRelay(self.HOOK)
+        with probe.FrProbe(memory, self.IMAGE, self.HOOK) as fr:
+            for address in (0x7ffffffc, 0x80000002, probe.FR_LIMIT - 28):
+                with self.assertRaises(ValueError):
+                    fr.read(address)
+        self.assertEqual(memory.requests, [])
+
+    def test_rejects_images_that_do_not_fit_the_body(self):
+        for image in (b'', bytes(3), bytes(probe.BODY_SIZE + 4)):
+            with self.assertRaises(ValueError):
+                probe.FrProbe(FakeRelay(self.HOOK), image, self.HOOK)
+
+
 class RingTest(unittest.TestCase):
     def test_counts_records_with_sync_after_prefix(self):
         record = bytes(4) + b'\x47' + bytes(probe.RECORD - 5)
