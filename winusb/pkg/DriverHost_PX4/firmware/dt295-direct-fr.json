@@ -2,8 +2,8 @@
   "format": "DTP3",
   "bundle": {
     "file": "dt295-direct-fr.bin",
-    "bytes": 2328,
-    "sha256": "3f0995db5ee774e5a10d2c960b3380712412136e715aebb534b2ac79ced103bf"
+    "bytes": 2324,
+    "sha256": "3fc7d1e9e6dcf92b10410b5ee59e06d563aef790b6f8ca757b2672033fb13c4c"
   },
   "direct": {
     "schema": 1,
@@ -25,12 +25,12 @@
       "bootstrap.s": "79198d06bad080ed2390d51099b1cb281b3257124135ed06a290a30f3777249f",
       "bootstrap.ld": "d80f2b7cf6fbd50c3756a083fdd39491e2de11d2f580ccff73041f74d99072e8",
       "build.py": "ff947da5055e315e09bd821726553fa7105b151f6b17c47257f03494cd76833b",
-      "direct_pump.c": "612d9a8e90aeab12f95b652473acdc68b5e5be64f0ef1808bb1aa59f500f1b74"
+      "direct_pump.c": "02631ed1b7ac349de82410e2b84324559de7dd0f150bb3f431fbd686c1a590d1"
     },
     "binary": {
       "file": "resident.bin",
-      "size": 2208,
-      "sha256": "140c860feb69791e2bd222a2597325014d09931d9f816e08669724932b5cf09a"
+      "size": 2204,
+      "sha256": "932d14e93bb9b2089d4be353269123dc54a20c51eb842683b91d2077efcd3e60"
     },
     "bootstrap": {
       "file": "bootstrap.bin",

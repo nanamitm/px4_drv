@@ -25,7 +25,7 @@
       "bootstrap.s": "79198d06bad080ed2390d51099b1cb281b3257124135ed06a290a30f3777249f",
       "bootstrap.ld": "d80f2b7cf6fbd50c3756a083fdd39491e2de11d2f580ccff73041f74d99072e8",
       "build.py": "ff947da5055e315e09bd821726553fa7105b151f6b17c47257f03494cd76833b",
-      "direct_pump.c": "612d9a8e90aeab12f95b652473acdc68b5e5be64f0ef1808bb1aa59f500f1b74",
+      "direct_pump.c": "02631ed1b7ac349de82410e2b84324559de7dd0f150bb3f431fbd686c1a590d1",
       "bulk_pump.c": "12904a667aef800351c9f30a8bcb0b1e91f744144932e44ae2fcbe1624ade4aa"
     },
     "binary": {

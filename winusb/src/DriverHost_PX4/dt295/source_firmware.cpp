@@ -753,7 +753,9 @@ void SourceFirmware::RecordRing(uint32_t producer)
 int SourceFirmware::Service()
 {
     try {
-        const unsigned budget = direct_ ? 512 : 256;
+        // 主CPU版は1回の往復で最大2048ブロック (1 MiB) を送る。往復の間は機器側の送出が止まり、
+        // 512ブロックでは取り出しが約4.7 MB/秒でCSのレコードの生成量 (約4.87 MB/秒) に届かなかった。
+        const unsigned budget = direct_ ? 2048 : 256;
         auto payload = Encode(cursor_);
         const auto amount = Encode(budget);
         payload.insert(payload.end(), amount.begin(), amount.end());
