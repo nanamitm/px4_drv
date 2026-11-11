@@ -29,6 +29,11 @@
 namespace px4::torne {
 using Clock = std::chrono::steady_clock;
 namespace {
+// BulkI2c=false の選局コマンドは DiB8000・DiB0090 のレジスターを1件ずつ USB 制御転送で操作するため、
+// 所要時間は USB ホストの制御転送の往復時間に比例する。制御転送が平均約3.0msの環境では、
+// ホスト起動後に初めて選ぶ周波数で選局コマンドだけに4.7～4.8秒、TS開始までに約5.1秒かかった。
+// 確定した検索失敗は期限を待たずに返るため、無信号チャンネルの判定時間はこの値に依存しない。
+constexpr auto TuneBudget = std::chrono::seconds(10);
 struct Event {
 	HANDLE value = CreateEventW(nullptr, TRUE, FALSE, nullptr);
 	~Event() { if (value) CloseHandle(value); }
@@ -412,7 +417,7 @@ protected:
 		if (!stream_buf_->AdvanceEpoch()) return -EIO;
 		stream_buf_->ResetInputPacketCount();
 		failed_ = false;
-        const auto deadline=Clock::now()+std::chrono::seconds(5);
+        const auto deadline=Clock::now()+TuneBudget;
         const int tuned=TuneFrequency(params_.freq,deadline,nullptr,parent_.initial_lock_retry_);
         if(tuned){failed_=true;return tuned;}
 		tuned_ = true;
@@ -584,7 +589,7 @@ private:
                     ++attempt;
                     msg_warn("torne: recovery attempt id=%s freq_khz=%u attempt=%llu cause=%u error=%lu\n",parent_.id_.c_str(),frequency,static_cast<unsigned long long>(attempt),static_cast<unsigned>(fault),worker_error_);
                     std::vector<std::uint8_t> response;
-                    const auto deadline=Clock::now()+std::chrono::seconds(5);
+                    const auto deadline=Clock::now()+TuneBudget;
                     if(!session_->Command(0x12,{0},response,deadline,stop_.value))return RecoveryResult::fatal;
                     const int result=TuneFrequency(frequency,deadline,stop_.value,parent_.initial_lock_retry_);
                     if(!WaitStop(0))return RecoveryResult::stopped;
