@@ -6,7 +6,10 @@
 #define REG(address) (*(volatile uint32_t *)(uintptr_t)(address))
 #define REG16(address) (*(volatile uint16_t *)(uintptr_t)(address))
 #define RING 0x80a90000u
-#define RING_SIZE 0x3fe00u
+/* mAgicVISIONの0x3fe00ではCSの約39 ms分しかない。torneと同じ6 MiBにする。
+   0x80000000〜0x83ffffffは折り返さず、0x80b8fe00〜0x8108ffffは受信中に書き込まれないことを
+   memory_probe.cで確認した。DriverHostのxz3/device.cppのRingBytesと一致させる。 */
+#define RING_SIZE 0x600000u
 #define RUN 0x00d02010u
 #define PRODUCER 0x00d02028u
 #define LIMIT 0x00d0202cu

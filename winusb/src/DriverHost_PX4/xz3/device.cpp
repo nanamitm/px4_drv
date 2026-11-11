@@ -524,11 +524,16 @@ private:
             return -EIO;
         Packet reply{};
         const unsigned cn_address = satellite ? 0x19 : 0x18;
+        RingStats stats(satellite);
         for (unsigned head = 0; parent_.available_ && !stop_; head ^= 1) {
             auto& read = reads[head];
+            const auto begin = Clock::now();
             if (relay_.Exchange(12, reply, nullptr, 0, cn_address) || Word(reply.data() + 52) != PumpSize ||
                 !read.Collect(parent_.removed_))
                 return -EIO;
+            const auto end = Clock::now();
+            // 応答ワード4〜6は、この要求中の最大未処理量、消費位置、DMAの書き込み位置。
+            stats.Record(begin, end, Word(reply.data() + 40), Word(reply.data() + 44), Word(reply.data() + 48));
             if (stop_)
                 break;
             if (const int result = Deliver(read.data))
@@ -540,6 +545,78 @@ private:
         }
         return 0;
     }
+
+    /*
+     * XZ3のTSリングは6,291,456バイトで、DMAは操作12の外側でも書き込みを続ける。
+     * 衛星の約6.7 MB/秒では約0.94秒で満杯になるため、要求間の空き時間と
+     * ファームウェアが返す最大未処理量を記録し、ドロップの時刻と照合できるようにする。
+     * 溢れた場合は未処理量が周回後の値として小さく見える可能性があるため、時間も併記する。
+     */
+    class RingStats {
+    public:
+        explicit RingStats(bool satellite) : satellite_(satellite), period_start_(Clock::now()) {}
+        RingStats(const RingStats&) = delete;
+        ~RingStats()
+        {
+            if (total_chunks_)
+                msg_info("GV-MVP/XZ3: ring end satellite=%d chunks=%llu peak_bytes=%u high_chunks=%llu max_producer=%u max_host_gap_us=%lld max_op_us=%lld\n",
+                         satellite_ ? 1 : 0, total_chunks_, total_peak_, total_high_, total_producer_,
+                         total_gap_us_, total_op_us_);
+        }
+
+        void Record(Clock::time_point begin, Clock::time_point end, std::uint32_t peak,
+                    std::uint32_t cursor, std::uint32_t producer)
+        {
+            const auto op_us = Micro(end - begin);
+            // 前回の操作12の完了から今回の開始までは、ファームウェアがリングを送出しない。
+            const auto gap_us = has_last_ ? Micro(begin - last_end_) : 0;
+            has_last_ = true;
+            last_end_ = end;
+            ++chunks_;
+            ++total_chunks_;
+            peak_ = (std::max)(peak_, peak);
+            total_peak_ = (std::max)(total_peak_, peak);
+            // 書き込み位置がリング末尾の近くまで進めば、DMAは設定したサイズで周回している。
+            producer_ = (std::max)(producer_, producer);
+            total_producer_ = (std::max)(total_producer_, producer);
+            gap_us_ = (std::max)(gap_us_, gap_us);
+            total_gap_us_ = (std::max)(total_gap_us_, gap_us);
+            op_us_ = (std::max)(op_us_, op_us);
+            total_op_us_ = (std::max)(total_op_us_, op_us);
+            if (peak >= HighWater) {
+                ++high_;
+                ++total_high_;
+                msg_warn("GV-MVP/XZ3: ring high chunk=%llu peak_bytes=%u ring_bytes=%u cursor=%u producer=%u host_gap_us=%lld op_us=%lld\n",
+                         total_chunks_, peak, RingBytes, cursor, producer, gap_us, op_us);
+            }
+            if (end - period_start_ >= std::chrono::seconds(10)) {
+                msg_info("GV-MVP/XZ3: ring stats chunks=%llu peak_bytes=%u ring_bytes=%u high_chunks=%llu max_producer=%u max_host_gap_us=%lld max_op_us=%lld\n",
+                         chunks_, peak_, RingBytes, high_, producer_, gap_us_, op_us_);
+                period_start_ = end;
+                chunks_ = high_ = 0;
+                peak_ = producer_ = 0;
+                gap_us_ = op_us_ = 0;
+            }
+        }
+
+    private:
+        // ts_probe.cのRING_SIZEと同じ値。
+        static constexpr std::uint32_t RingBytes = 0x600000;
+        // 3/4を超えた要求を個別に記録する。
+        static constexpr std::uint32_t HighWater = RingBytes / 4 * 3;
+
+        static long long Micro(Clock::duration value)
+        {
+            return std::chrono::duration_cast<std::chrono::microseconds>(value).count();
+        }
+
+        bool satellite_;
+        bool has_last_ = false;
+        Clock::time_point period_start_, last_end_{};
+        unsigned long long chunks_ = 0, high_ = 0, total_chunks_ = 0, total_high_ = 0;
+        std::uint32_t peak_ = 0, total_peak_ = 0, producer_ = 0, total_producer_ = 0;
+        long long gap_us_ = 0, op_us_ = 0, total_gap_us_ = 0, total_op_us_ = 0;
+    };
 
     int Deliver(const std::vector<std::uint8_t>& bytes)
     {
