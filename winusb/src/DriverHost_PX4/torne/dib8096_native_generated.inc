@@ -4449,7 +4449,7 @@ if (((v_wait == 0) || (((v_state)->v_failure)->v_err != nullptr)))
 {
 break;
 }
-v_wait = static_cast<std::int64_t>(((Add<std::int64_t>(v_wait,9))) / (10));
+v_wait = static_cast<std::int64_t>((Mul<std::int64_t>(10,(Add<std::int64_t>(v_wait,99)))) / (100));
 m_dib8000_msleep(v_state,v_wait);
 if (((v_state)->v_tuneState == v_agcStop))
 {
