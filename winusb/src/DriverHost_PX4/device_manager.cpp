@@ -158,7 +158,7 @@ void DeviceManager::Add(const std::wstring &path, const std::pair<DeviceType, px
 	switch (def.first) {
 	case px4::DeviceType::GVMVPXZ3:
 	{
-		// Zadigの共通WinUSB GUIDには他機種も現れるため、デバイスを開く前に絞る。
+		// Zadig用の旧設定も使えるため、共通GUIDのときも対象USB IDだけを開く。
 		if (path.rfind(L"\\\\?\\usb#vid_04bb&pid_0530#", 0) != 0 ||
 		    !px4::util::wtob(def.second.configs.Get(L"Experimental", L"false")))
 			break;
