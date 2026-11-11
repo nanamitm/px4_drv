@@ -17,8 +17,10 @@ using Bytes = std::vector<uint8_t>;
 constexpr uint32_t Boot = 0xe9000, BootSize = 0x3910, Hook = 0xea6fc;
 constexpr uint32_t Stage = 0xc4620, Resident = 0xe1060, Adapter = 0xe1000;
 constexpr uint32_t Protect = 0xfd814c, EndpointControl = 0xfdbc14, EndpointBuffer = 0xfdbd08;
-constexpr uint32_t Ring = 0x8138ec00, RingSize = 0x30000, Run = 0x01902010, Clock = 0x01900404;
-constexpr uint32_t FirstRingWindow = 0x20000 - (Ring & 0x1ffff);
+// 192 KiBのリングは地上波で約51 ms、CSで約29 ms分しかなく、SERVICEの停止で上書きが起きた。
+// 192バイトのレコードと512バイトの送出単位の公倍数で、1 MiB以下の最大値にする。
+// ファームウェアのRING_SIZE (direct_pump.c / bulk_pump.c) と一致させる。
+constexpr uint32_t Ring = 0x8138ec00, RingSize = 0xffc00, Run = 0x01902010, Clock = 0x01900404;
 constexpr uint8_t Gr = 0x10, Sat = 0x11;
 constexpr char BootDigest[] = "0bdf3af8c2d4ab49edd69740bd751e698e337e2df542ac4cedcbe4ba99c3e9b0";
 
@@ -476,9 +478,8 @@ int SourceFirmware::Start(dt295_io io)
         if (Get(Run))
             throw -EBUSY;
         clock_ = Get(Clock);
-        ring_ = MappedRead(Ring, FirstRingWindow);
-        const auto tail = MappedRead(Ring + FirstRingWindow, RingSize - FirstRingWindow);
-        ring_.insert(ring_.end(), tail.begin(), tail.end());
+        // リングのSDRAMは保存しない。BC転送は64バイト単位に限られ、1 MiBの保存と復元に各約49秒かかる。
+        // 電源投入直後の内容は規則的な模様で、Startの照合も次のDMAも参照しない。
         clock_changed_ = true;
         Checked(Clock, clock_ | 0x40000);
         for (const auto &reg : Registers)
@@ -692,6 +693,12 @@ int SourceFirmware::Capture(bool enable)
 {
     try {
         if (!enable) {
+            if (ring_services_)
+                msg_info("PIX-DT295: TS ring services=%llu peak_pending=%u ring=%u high=%llu\n",
+                    static_cast<unsigned long long>(ring_services_), ring_peak_, RingSize,
+                    static_cast<unsigned long long>(ring_high_));
+            ring_services_ = ring_high_ = 0;
+            ring_peak_ = 0;
             StopRing();
             StopEndpoint();
             return 0;
@@ -726,6 +733,20 @@ int SourceFirmware::Capture(bool enable)
     } catch (const std::bad_alloc &) {
         return -ENOMEM;
     }
+}
+
+// DMAはSERVICEの外でもリングへ書き続ける。応答の生成位置と送出後の消費位置の差を未送信量とし、
+// 最大値と、リングの3/4を超えた回数を記録してドロップの時刻と照合できるようにする。
+// 溢れた場合は周回後の小さな値に見えるため、超過の回数と最大値を合わせて読む。
+void SourceFirmware::RecordRing(uint32_t producer)
+{
+    if (producer >= RingSize)
+        return;
+    const auto pending = producer >= cursor_ ? producer - cursor_ : RingSize - cursor_ + producer;
+    ++ring_services_;
+    ring_peak_ = (std::max)(ring_peak_, pending);
+    if (pending > RingSize / 4 * 3 && !ring_high_++)
+        msg_warn("PIX-DT295: TS ring high pending=%u ring=%u cursor=%u producer=%u\n", pending, RingSize, cursor_, producer);
 }
 
 int SourceFirmware::Service()
@@ -766,6 +787,7 @@ int SourceFirmware::Service()
             return -EPROTO;
         }
         cursor_ = next;
+        RecordRing(Be(&reply[32]));
         return 0;
     } catch (int error) {
         return Failure("PIF1 Bulk pump", error);
@@ -796,17 +818,6 @@ void SourceFirmware::Restore()
     if (ts_changed_) {
         for (auto i = ts_saved_.rbegin(); i != ts_saved_.rend(); ++i)
             MappedWrite(i->address, i->bytes);
-        const Bytes head(ring_.begin(), ring_.begin() + FirstRingWindow);
-        const Bytes tail(ring_.begin() + FirstRingWindow, ring_.end());
-        const auto restore = [this](uint32_t address, const Bytes &bytes) {
-            if (MappedRead(address, bytes.size()) != bytes) {
-                MappedWrite(address, bytes);
-                if (MappedRead(address, bytes.size()) != bytes)
-                    throw -EIO;
-            }
-        };
-        restore(Ring, head);
-        restore(Ring + FirstRingWindow, tail);
     }
     if (clock_changed_)
         Checked(Clock, clock_);
@@ -845,7 +856,8 @@ int SourceFirmware::Close()
         board_saved_.clear();
         clock_changed_ = ts_changed_ = false;
         ready_ = satellite_ = tuned_ = false;
-        msg_info("PIX-DT295 %s: boot RAM and TS ring restoration verified\n", direct_ ? "direct-fr" : "source-fr");
+        msg_info("PIX-DT295 %s: boot RAM and TS engine restoration verified (TS ring SDRAM is not restored)\n",
+            direct_ ? "direct-fr" : "source-fr");
         return 0;
     } catch (int error) {
         return Failure("restore; USB power cycle required", error);

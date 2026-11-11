@@ -2,7 +2,8 @@
 /* Bounded PIF1 diagnostic. The host owns TS setup, Bulk IN and cleanup. */
 #include <stdint.h>
 #define WORD(address) (*(volatile uint32_t *)(uintptr_t)(address))
-#define RING_SIZE 0x30000u
+/* direct_pump.cとDriverHostのsource_firmware.cppのRingSizeと一致させる。 */
+#define RING_SIZE 0xffc00u
 #define RING_BASE 0x8138ec00u
 #define PRODUCER 0x01902028u
 #define LIMIT 0x0190202cu
