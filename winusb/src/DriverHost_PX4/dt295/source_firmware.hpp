@@ -71,7 +71,7 @@ private:
 
     const bool direct_;
     dt295_io io_{};
-    Bytes resident_, adapter_, hook_, boot_, ring_;
+    Bytes resident_, adapter_, hook_, boot_;
     std::vector<Preimage> direct_saved_, ts_saved_, i2c_saved_, board_saved_;
     mb86H_stream_input input_{};
     uint32_t clock_ = 0, sequence_ = 0, cursor_ = 0, tsid_ = 0;
