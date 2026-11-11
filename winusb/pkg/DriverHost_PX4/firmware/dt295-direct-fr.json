@@ -2,8 +2,8 @@
   "format": "DTP3",
   "bundle": {
     "file": "dt295-direct-fr.bin",
-    "bytes": 2056,
-    "sha256": "ba6496cf022cc3ebb1626446484b072f83fbba019d11700c1d08c1c7b75d204a"
+    "bytes": 2308,
+    "sha256": "c5efb97ae11296ef44029f53b51f0bcb117f968c98d30604ce434f4a0f6b0ead"
   },
   "direct": {
     "schema": 1,
@@ -20,17 +20,17 @@
       "objdump": "GNU objdump (GNU Binutils) 2.43.1"
     },
     "sources": {
-      "resident.s": "8fa6e10cd0100e04233ddf06abb43a989599b36906a5e6c2f8c966965d3561df",
-      "resident.ld": "93c64e131987c126a0f4be65d26cf0eba4f9effc9e44b98a26fe7eb0a29ee42c",
+      "resident.s": "e32e3c4a3ff72f7d9fbbc99ae50ad3ef0747c063fb57b43d1aa6e3a62a1d2349",
+      "resident.ld": "0bf32db036abecc6090b1138c79fd64dc0caf4134672e550ba27b4a612786928",
       "bootstrap.s": "79198d06bad080ed2390d51099b1cb281b3257124135ed06a290a30f3777249f",
       "bootstrap.ld": "d80f2b7cf6fbd50c3756a083fdd39491e2de11d2f580ccff73041f74d99072e8",
       "build.py": "ff947da5055e315e09bd821726553fa7105b151f6b17c47257f03494cd76833b",
-      "direct_pump.c": "4d7cd0000a0b268cee6349ef799d76db8c8bb090594abaeeda6343377bbecbee"
+      "direct_pump.c": "1c252f35c2b7510f30a358637a15d4a319f3d8e4f5a5e8c0e7b32b1a299c9ec6"
     },
     "binary": {
       "file": "resident.bin",
-      "size": 1936,
-      "sha256": "f161ac7f9b8a0fdce5c6011ee614690bfd01c5cd0c8aa840878a418118ca37f5"
+      "size": 2188,
+      "sha256": "650544746ea8a33471acc7b03cd74670c8ff0946573f2c04061a821f3415a1e7"
     },
     "bootstrap": {
       "file": "bootstrap.bin",

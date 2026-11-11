@@ -24,6 +24,11 @@ public:
     int Close();
     int Feed(const uint8_t *data, size_t size, mb86H_stream_packet_sink packet, void *ctx);
     void InputStats(uint64_t &discarded, uint64_t &desyncs) const;
+    // PIF1を導入済みで、操作5 (カードFIFOの一括転送) を使えるときにtrue。
+    bool Ready() const { return ready_; }
+    // 内蔵カードUARTのFIFOを最大CardChunkバイト移す。readでは溜まった数までを読み、countへ返す。
+    static constexpr size_t CardChunk = 32;
+    int CardFifo(bool write, uint8_t *data, size_t &count);
 
 private:
     using Bytes = std::vector<uint8_t>;
@@ -38,7 +43,7 @@ private:
     void Checked(uint32_t address, uint32_t value, unsigned width = 4);
     void Save(uint32_t address, size_t count);
     void Delay(unsigned ms);
-    Bytes Exchange(unsigned op, const Bytes &payload = {});
+    Bytes Exchange(unsigned op, const Bytes &payload = {}, uint32_t argument = 0);
     Bytes DirectI2c(const Bytes &ops, unsigned count, unsigned read);
     void InitializeFrontend();
     void InstallPif();

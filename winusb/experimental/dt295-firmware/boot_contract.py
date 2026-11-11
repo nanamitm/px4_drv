@@ -22,7 +22,8 @@ def inspect_build(build):
     build = Path(build)
     manifest = json.loads((build/'manifest.json').read_text(encoding='utf-8'))
     direct = 'direct_pump.c' in manifest.get('sources', {})
-    entry, capacity = ('0x000e1060', 0x7a0) if direct else ('0x000e1100', 0x700)
+    # 主CPU版は0x000e1060から、resident.ldの上限0x000e2000まで。
+    entry, capacity = ('0x000e1060', 0xfa0) if direct else ('0x000e1100', 0x700)
     if manifest.get('stage') != 'diagnostic-bootstrap-unverified' or manifest.get('deployable') is not False \
             or manifest.get('features') != [] or manifest.get('entry') != entry:
         raise ValueError('expected the unverified diagnostic build manifest')

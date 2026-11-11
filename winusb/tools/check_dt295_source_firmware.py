@@ -25,7 +25,7 @@ for backend, magic, raw_ts in (('direct-fr', 'DTP3', False), ('source-fr', 'DTP4
     manifest = record['direct']
     sizes = struct.unpack_from('>3I', bundle, 4)
     offset = 16
-    for key, limit, size in zip(('binary', 'bootstrap', 'hook'), (0x7a0, 0x60, 8), sizes):
+    for key, limit, size in zip(('binary', 'bootstrap', 'hook'), (0xfa0, 0x60, 8), sizes):
         section = bundle[offset:offset + size]
         expected = manifest[key]
         if not 0 < size <= limit or size != expected['size'] or len(section) != size or \
