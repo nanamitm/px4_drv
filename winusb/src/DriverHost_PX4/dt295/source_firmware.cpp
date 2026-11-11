@@ -215,10 +215,10 @@ void SourceFirmware::Delay(unsigned ms)
     io_.delay_ms(io_.opaque, ms);
 }
 
-SourceFirmware::Bytes SourceFirmware::Exchange(unsigned op, const Bytes &payload)
+SourceFirmware::Bytes SourceFirmware::Exchange(unsigned op, const Bytes &payload, uint32_t argument)
 {
     Bytes request;
-    for (auto word : {0x50494631u, ++sequence_, op, 1u, op == 3 ? static_cast<uint32_t>(payload.size()) : 0u, 0u}) {
+    for (auto word : {0x50494631u, ++sequence_, op, 1u, op == 3 ? static_cast<uint32_t>(payload.size()) : argument, 0u}) {
         const auto bytes = Encode(word);
         request.insert(request.end(), bytes.begin(), bytes.end());
     }
@@ -227,13 +227,41 @@ SourceFirmware::Bytes SourceFirmware::Exchange(unsigned op, const Bytes &payload
     Control(Stage, request.data(), request.size(), false, 0x7e);
     auto reply = Read(Stage, 64);
     const auto length = Be(&reply[20]);
-    const bool expected_length = op == 3 ? length >= 8 && length <= 40 :
+    const bool expected_length = op == 3 || op == 5 ? length >= 8 && length <= 40 :
         length == (op == 1 ? 16u : op == 4 ? (direct_ ? 24u : 20u) : 0u);
     if (Be(reply.data()) != 0x50494631 || Be(&reply[4]) != sequence_ ||
         Be(&reply[8]) != (op | 0x80000000) || Be(&reply[12]) || Be(&reply[16]) != 1 ||
         !expected_length || std::any_of(reply.begin() + 24 + length, reply.end(), [](auto b) { return b; }))
         throw -EPROTO;
     return reply;
+}
+
+// BC制御転送は1回約3 msかかり、1バイトずつのFIFO操作では受信中のSERVICEを圧迫する。
+// PIF1の操作5で最大32バイトを1往復で移す。要求のword 4は方向 (1=読出し、2=書込み) とバイト数。
+int SourceFirmware::CardFifo(bool write, uint8_t *data, size_t &count)
+{
+    const size_t requested = count;
+    count = 0;
+    if (!ready_ || !data || !requested || requested > CardChunk)
+        return -EINVAL;
+    try {
+        const Bytes payload = write ? Bytes(data, data + requested) : Bytes{};
+        const auto reply = Exchange(5, payload, (write ? 2u : 1u) << 8 | static_cast<uint32_t>(requested));
+        const auto result = Be(&reply[24]), moved = Be(&reply[28]), length = Be(&reply[20]);
+        if (result || moved > requested || (write && moved != requested) || length != 8 + (write ? 0 : moved)) {
+            msg_err("PIX-DT295 %s: card FIFO result=%u moved=%u/%zu\n", direct_ ? "direct-fr" : "source-fr",
+                result, moved, requested);
+            return -EIO;
+        }
+        if (!write)
+            std::copy_n(reply.begin() + 32, moved, data);
+        count = moved;
+        return 0;
+    } catch (int error) {
+        return error;
+    } catch (const std::bad_alloc &) {
+        return -ENOMEM;
+    }
 }
 
 SourceFirmware::Bytes SourceFirmware::I2c(uint8_t address, std::initializer_list<uint8_t> tx, unsigned rx)

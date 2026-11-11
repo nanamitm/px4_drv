@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: GPL-2.0-only
 #include "device.hpp"
+#include "card_uart.hpp"
 #include "winusb_transport.hpp"
 #include "source_firmware.hpp"
+#include "../../WinSCard_PX4/bcas_atr.hpp"
 #include "../tc90522_cnr.hpp"
 #include "msg.h"
 #include "util.hpp"
@@ -108,6 +110,31 @@ public:
         value=px4::tc90522::CnrMilliDb(satellite,raw);
         return 0;
     }
+    // 内蔵カードUARTの操作。受信の有無に関係なく、TSと同じ制御ロックと転送路を使う。
+    // 1回の保持で行う転送を短く区切り、手順内の待機ではロックを手放してSERVICEを止めない。
+    int Card(const std::function<int(CardUart &)> &operation) {
+        if(!parent_.available_)return -ENODEV;
+        ++command_waiters_;
+        std::unique_lock<std::mutex> command(command_mutex_);
+        --command_waiters_;
+        transport_.Begin(2000);
+        // PIF1の導入後は、FIFOをファームウェアの一括転送で移す。導入前はTSを受信していない。
+        DirectBus::BulkFifo bulk;
+        if(source_->Ready())
+            bulk=[this](bool write,std::uint8_t *data,std::size_t &count){return source_->CardFifo(write,data,count);};
+        DirectBus bus(transport_.Callbacks(),[this,&command](unsigned ms){
+            command.unlock();
+            const DWORD wait=WaitForSingleObject(parent_.removed_,ms);
+            ++command_waiters_;command.lock();--command_waiters_;
+            transport_.Begin(2000);
+            return wait==WAIT_TIMEOUT?0:-ENODEV;
+        },std::move(bulk));
+        CardUart uart(bus);
+        const int rc=operation(uart);
+        if(rc && bus.Error())
+            msg_err("PIX-DT295: card transfer failed errno=%d win32=%lu\n",bus.Error(),transport_.LastError());
+        return rc;
+    }
 protected:
     int SetStreamId() override {return 0;} // TSIDはSetFrequencyのTUNEへ同梱する。
     int SetFrequency() override {
@@ -154,6 +181,8 @@ protected:
     }
 private:
     void Cleanup(){
+        // カードの操作と転送が混ざらないよう、復元も制御ロックの下で行う。
+        std::lock_guard<std::mutex> command(command_mutex_);
         transport_.BeginRestore(120000);
         restore_failed_=source_->Close()!=0;
         transport_.ReportTiming("source-close");
@@ -380,13 +409,113 @@ int Device::Init(){
     wcscpy_s(info.receiver_name,r.name.c_str());info.receiver_guid=r.guid;
     info.systems=px4::SystemType::ISDB_T|px4::SystemType::ISDB_S;info.index=r.index;
     registered_=receiver_manager_.Register(info,receiver_.get(),GetDeviceIdentity());
+    card_reader_=registered_;
     return registered_?0:-EIO;
 }
 void Device::SetAvailability(bool available){available_=available;if(!available && removed_)SetEvent(removed_);}
 void Device::Term(){
     SetAvailability(false);
     if(registered_){receiver_manager_.Unregister(receiver_.get());registered_=false;}
+    // 実行中のカード操作がreceiver_を使い終わるまで待ってから破棄する。
+    std::lock_guard<std::mutex> card(card_mutex_);
+    card_open_=false;card_received_.clear();card_remaining_=0;card_atr_=true;
     if(receiver_){receiver_->WaitClosed();receiver_.reset();}
+}
+
+int Device::OpenCard(){
+    std::lock_guard<std::mutex> lock(card_mutex_);
+    if(!receiver_ || !available_)return -ENODEV;
+    if(card_open_)return -EBUSY;
+    card_open_=true;card_atr_=true;card_received_.clear();card_remaining_=0;
+    return 0;
+}
+
+void Device::CloseCard(){
+    std::lock_guard<std::mutex> lock(card_mutex_);
+    if(!card_open_)return;
+    card_open_=false;card_received_.clear();card_remaining_=0;card_atr_=true;
+    if(available_ && receiver_ && receiver_->Card([](CardUart &uart){return uart.PowerDown();}))
+        msg_warn("PIX-DT295: card power down failed\n");
+}
+
+int Device::DetectCard(bool &detected){
+    std::lock_guard<std::mutex> lock(card_mutex_);
+    detected=false;
+    if(!card_open_ || !available_ || !receiver_)return -ENODEV;
+    const int rc=receiver_->Card([&detected](CardUart &uart){return uart.Present(detected);});
+    // 抜去を検出したら、受信途中のATRやブロックを次のカードへ持ち越さない。
+    if(rc || !detected){card_received_.clear();card_remaining_=0;card_atr_=true;}
+    return rc;
+}
+
+int Device::ResetCard(){
+    std::lock_guard<std::mutex> lock(card_mutex_);
+    if(!card_open_ || !available_ || !receiver_)return -ENODEV;
+    card_received_.clear();card_remaining_=0;card_atr_=true;
+    return receiver_->Card([](CardUart &uart){return uart.Reset();});
+}
+
+int Device::SetCardBaudrate(std::uint32_t baudrate){
+    // 実機でATRを確認したB-CASが要求する速度だけを受け付ける。torneの内蔵リーダーと同じ範囲。
+    if(baudrate!=19200)return -ENOTSUP;
+    std::lock_guard<std::mutex> lock(card_mutex_);
+    if(!card_open_ || !available_ || !receiver_)return -ENODEV;
+    return receiver_->Card([](CardUart &uart){return uart.SetBaudrate(19200);});
+}
+
+int Device::IsCardDataReady(bool &ready) try {
+    std::lock_guard<std::mutex> lock(card_mutex_);
+    ready=false;
+    if(!card_open_ || !available_ || !receiver_)return -ENODEV;
+    if(card_remaining_){ready=true;return 0;}
+    // 1回に読むバイト数はCardUartが転送方式に合わせて区切り、TSのSERVICEを長く待たせない。
+    std::uint8_t bytes[CardUart::BulkChunk]{};std::size_t count=0;
+    const int rc=receiver_->Card([&](CardUart &uart){return uart.ReadBytes(bytes,sizeof(bytes),count);});
+    if(rc)return rc;
+    if(card_received_.size()+count>518)return -EMSGSIZE;
+    card_received_.insert(card_received_.end(),bytes,bytes+count);
+    if(card_atr_){
+        if(px4::winscard::IsBcasAtr(card_received_.data(),card_received_.size()))card_remaining_=card_received_.size();
+        else if(card_received_.size()>=33)return -ENOTSUP;
+    }else if(card_received_.size()>=3){
+        const auto length=std::size_t(4)+card_received_[2];
+        if(card_received_.size()>=length)card_remaining_=length;
+    }
+    ready=card_remaining_!=0;
+    return 0;
+} catch(...) {return -ENOMEM;}
+
+int Device::ReadCardData(std::uint8_t *buf,std::uint8_t &len){
+    std::lock_guard<std::mutex> lock(card_mutex_);
+    if(!card_open_ || !available_)return -ENODEV;
+    if(!buf || !len)return -EINVAL;
+    const auto count=(std::min)(std::size_t(len),card_remaining_);
+    std::copy_n(card_received_.begin(),count,buf);
+    card_received_.erase(card_received_.begin(),card_received_.begin()+static_cast<std::ptrdiff_t>(count));
+    card_remaining_-=count;
+    if(count && card_atr_ && !card_remaining_)card_atr_=false;
+    len=static_cast<std::uint8_t>(count);
+    return 0;
+}
+
+int Device::WriteCardData(const std::uint8_t *buf,std::uint8_t len){
+    std::lock_guard<std::mutex> lock(card_mutex_);
+    if(!card_open_ || !available_ || !receiver_)return -ENODEV;
+    if(!buf || !len)return -EINVAL;
+    // FIFOへの積み込みを区切り、各回の制御ロックの保持を短くする。送信開始は最後に1回だけ行う。
+    // 一括転送では32バイトが1往復、導入前の直接アクセスは1バイトごとに1回の転送になる。
+    constexpr std::size_t Chunk=CardUart::BulkChunk;
+    int rc=0;
+    for(std::size_t at=0;!rc && at<len;at+=Chunk){
+        const auto size=(std::min)(Chunk,std::size_t(len)-at);
+        rc=receiver_->Card([&](CardUart &uart){
+            int result=at?0:uart.BeginTransmit();
+            if(!result)result=uart.Queue(buf+at,size);
+            return result;
+        });
+    }
+    if(!rc)rc=receiver_->Card([len](CardUart &uart){return uart.Transmit(len);});
+    return rc;
 }
 px4::ReceiverBase *Device::GetReceiver(int id) const {if(id)throw std::out_of_range("PIX-DT295 receiver index");return receiver_.get();}
 }

@@ -287,6 +287,7 @@
     <ClCompile Include="xz3\frontend.cpp"><ObjectFileName>$(IntDir)xz3_frontend.obj</ObjectFileName></ClCompile>
     <ClCompile Include="dt295\device.cpp"><ObjectFileName>$(IntDir)dt295_device.obj</ObjectFileName></ClCompile>
     <ClCompile Include="dt295\winusb_transport.cpp" />
+    <ClCompile Include="dt295\card_uart.cpp"><ObjectFileName>$(IntDir)dt295_card_uart.obj</ObjectFileName></ClCompile>
     <ClCompile Include="dt295\source_firmware.cpp"><ObjectFileName>$(IntDir)dt295_source_firmware.obj</ObjectFileName></ClCompile>
     <ClCompile Include="dt295\frontend_init.cpp"><ObjectFileName>$(IntDir)dt295_frontend_init.obj</ObjectFileName></ClCompile>
     <ClCompile Include="torne\experimental_device.cpp" />

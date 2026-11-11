@@ -172,7 +172,10 @@ void DeviceManager::Add(const std::wstring &path, const std::pair<DeviceType, px
 	{
 		auto dev = std::make_shared<px4::dt295::Device>(path, def.second, ++index_, receiver_manager_);
 		const int ret = dev->Init();
-		if (!ret) devices_.emplace(path, std::move(dev));
+		if (!ret) {
+			if (dev->HasCardReader()) card_reader_generation_.fetch_add(1);
+			devices_.emplace(path, std::move(dev));
+		}
 		else msg_err("PIX-DT295: device initialization failed ret=%d\n", ret);
 		break;
 	}
