@@ -547,8 +547,8 @@ private:
     }
 
     /*
-     * XZ3のTSリングは1,048,064バイトで、DMAは操作12の外側でも書き込みを続ける。
-     * 衛星の約6.7 MB/秒では約156 msで満杯になるため、要求間の空き時間と
+     * XZ3のTSリングは6,291,456バイトで、DMAは操作12の外側でも書き込みを続ける。
+     * 衛星の約6.7 MB/秒では約0.94秒で満杯になるため、要求間の空き時間と
      * ファームウェアが返す最大未処理量を記録し、ドロップの時刻と照合できるようにする。
      * 溢れた場合は未処理量が周回後の値として小さく見える可能性があるため、時間も併記する。
      */
@@ -600,8 +600,8 @@ private:
         }
 
     private:
-        // ts_probe.cのRING_SIZEと同じ値。xz3-runtime.binはpatch_ring_size.pyで書き換えている。
-        static constexpr std::uint32_t RingBytes = 0xffe00;
+        // ts_probe.cのRING_SIZEと同じ値。
+        static constexpr std::uint32_t RingBytes = 0x600000;
         // 3/4を超えた要求を個別に記録する。
         static constexpr std::uint32_t HighWater = RingBytes / 4 * 3;
 
