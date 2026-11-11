@@ -3,7 +3,7 @@
 #include <stdint.h>
 #define WORD(address) (*(volatile uint32_t *)(uintptr_t)(address))
 /* direct_pump.cとDriverHostのsource_firmware.cppのRingSizeと一致させる。 */
-#define RING_SIZE 0xffc00u
+#define RING_SIZE 0x600000u
 #define RING_BASE 0x8138ec00u
 #define PRODUCER 0x01902028u
 #define LIMIT 0x0190202cu

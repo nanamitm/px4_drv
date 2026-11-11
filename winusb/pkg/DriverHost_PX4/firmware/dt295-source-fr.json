@@ -2,8 +2,8 @@
   "format": "DTP4",
   "bundle": {
     "file": "dt295-source-fr.bin",
-    "bytes": 1940,
-    "sha256": "3bc1793db95579220aaa8ba2c006d9a3cb0c08d0fd77f42b2077d14cff7ad2dc"
+    "bytes": 1948,
+    "sha256": "c589b0b81f468863c2c61d45a0e1f871312314bd452073601aa5c428f519903c"
   },
   "direct": {
     "schema": 1,
@@ -25,13 +25,13 @@
       "bootstrap.s": "79198d06bad080ed2390d51099b1cb281b3257124135ed06a290a30f3777249f",
       "bootstrap.ld": "d80f2b7cf6fbd50c3756a083fdd39491e2de11d2f580ccff73041f74d99072e8",
       "build.py": "ff947da5055e315e09bd821726553fa7105b151f6b17c47257f03494cd76833b",
-      "direct_pump.c": "fb67d5980a1d4150e9b1314f02d516d07a92a8cb05483f168268c5a704f3230f",
-      "bulk_pump.c": "fbc59b385465dec546ce3f3f43d23d147051586c4ce649d46716a717d50e9030"
+      "direct_pump.c": "612d9a8e90aeab12f95b652473acdc68b5e5be64f0ef1808bb1aa59f500f1b74",
+      "bulk_pump.c": "12904a667aef800351c9f30a8bcb0b1e91f744144932e44ae2fcbe1624ade4aa"
     },
     "binary": {
       "file": "resident.bin",
-      "size": 1820,
-      "sha256": "05efc97bdcbc3f59fb8e591c61763becebf71f0c5d80624a5d44e8de34757cc9"
+      "size": 1828,
+      "sha256": "4d557a16f056273c4de25a83a86282fa52c31ef234af2595bf22600cfa2037dd"
     },
     "bootstrap": {
       "file": "bootstrap.bin",
