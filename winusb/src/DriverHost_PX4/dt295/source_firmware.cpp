@@ -18,9 +18,10 @@ constexpr uint32_t Boot = 0xe9000, BootSize = 0x3910, Hook = 0xea6fc;
 constexpr uint32_t Stage = 0xc4620, Resident = 0xe1060, Adapter = 0xe1000;
 constexpr uint32_t Protect = 0xfd814c, EndpointControl = 0xfdbc14, EndpointBuffer = 0xfdbd08;
 // 192 KiBのリングは地上波で約51 ms、CSで約29 ms分しかなく、SERVICEの停止で上書きが起きた。
-// 192バイトのレコードと512バイトの送出単位の公倍数で、1 MiB以下の最大値にする。
+// torne (MB86H47) と同じ6 MiBにする。192バイトのレコードと512バイトの送出単位の倍数で、
+// 0x8138ec00〜0x8198ebffは受信中もTS以外に書き込まれないことを確認している。
 // ファームウェアのRING_SIZE (direct_pump.c / bulk_pump.c) と一致させる。
-constexpr uint32_t Ring = 0x8138ec00, RingSize = 0xffc00, Run = 0x01902010, Clock = 0x01900404;
+constexpr uint32_t Ring = 0x8138ec00, RingSize = 0x600000, Run = 0x01902010, Clock = 0x01900404;
 constexpr uint8_t Gr = 0x10, Sat = 0x11;
 constexpr char BootDigest[] = "0bdf3af8c2d4ab49edd69740bd751e698e337e2df542ac4cedcbe4ba99c3e9b0";
 
@@ -478,7 +479,7 @@ int SourceFirmware::Start(dt295_io io)
         if (Get(Run))
             throw -EBUSY;
         clock_ = Get(Clock);
-        // リングのSDRAMは保存しない。BC転送は64バイト単位に限られ、1 MiBの保存と復元に各約49秒かかる。
+        // リングのSDRAMは保存しない。BC転送は64バイト単位に限られ、6 MiBの保存と復元に各約5分かかる。
         // 電源投入直後の内容は規則的な模様で、Startの照合も次のDMAも参照しない。
         clock_changed_ = true;
         Checked(Clock, clock_ | 0x40000);
@@ -752,7 +753,9 @@ void SourceFirmware::RecordRing(uint32_t producer)
 int SourceFirmware::Service()
 {
     try {
-        const unsigned budget = direct_ ? 512 : 256;
+        // 主CPU版は1回の往復で最大2048ブロック (1 MiB) を送る。往復の間は機器側の送出が止まり、
+        // 512ブロックでは取り出しが約4.7 MB/秒でCSのレコードの生成量 (約4.87 MB/秒) に届かなかった。
+        const unsigned budget = direct_ ? 2048 : 256;
         auto payload = Encode(cursor_);
         const auto amount = Encode(budget);
         payload.insert(payload.end(), amount.begin(), amount.end());

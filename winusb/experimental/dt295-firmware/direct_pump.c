@@ -23,9 +23,9 @@ void dtp_raw_pump(uint32_t *packet);
 #endif
 
 #ifndef DTP_RAW_TS
-/* 192バイトのレコードと512バイトの送出単位の公倍数で1 MiB以下の最大値。
+/* torneと同じ6 MiB。192バイトのレコードと512バイトの送出単位の倍数。
    DriverHostのsource_firmware.cppのRingSizeと一致させる。 */
-#define RING_SIZE 0xffc00u
+#define RING_SIZE 0x600000u
 #define RING_BASE 0x8138ec00u
 #define PRODUCER 0x01902028u
 #define LIMIT 0x0190202cu
@@ -85,7 +85,9 @@ __attribute__((noinline)) static void pump(uint32_t *packet)
     unsigned cursor = packet[6], budget = packet[7], state = packet[8];
     unsigned phase = state & 255, offset = state >> 8;
     unsigned sent = 0, error = 0, producer = 0;
-    if (cursor >= RING_SIZE || !budget || budget > 512 ||
+    /* 1回の要求で最大2048ブロック (1 MiB) を送る。要求と応答の往復の間は送出が止まるため、
+       512ブロックではCSのレコードの生成量に届かなかった。待機の上限もブロック数に合わせて広げる。 */
+    if (cursor >= RING_SIZE || !budget || budget > 2048 ||
         (state != UNALIGNED && (phase >= 188 || (phase & 3) || offset >= 192)) ||
         (state == UNALIGNED && cursor != 0) ||
         DTP_MMIO(0x01902010u) != 0x02000000u ||
@@ -93,7 +95,7 @@ __attribute__((noinline)) static void pump(uint32_t *packet)
         error = 1;
         goto reply;
     }
-    for (unsigned polls = 0; polls < 64000 && sent < budget; ++polls) {
+    for (unsigned polls = 0; polls < 256000 && sent < budget; ++polls) {
         producer = DTP_MMIO(PRODUCER);
         if (producer >= RING_SIZE) {
             error = 2;
@@ -115,8 +117,15 @@ __attribute__((noinline)) static void pump(uint32_t *packet)
             state = offset << 8;
             pending -= offset;
         }
-        /* 512バイトのTSがまたぐ最大3個の4バイト付加部と先読みの語を確保する。 */
-        if (pending < 528 || !(DTP_MMIO(FIFO_STATUS) & 4))
+        /* 512バイトのTSがまたぐ最大3個の4バイト付加部と先読みの語を確保する。
+           1ブロック以上送った後にリングが尽きたら戻る。上限まで待つとSERVICEが未送信量に
+           関係なく長くなり、同じ制御ロックを使うカード通信とCNの読み出しが毎回待たされるため。 */
+        if (pending < 528) {
+            if (sent)
+                break;
+            continue;
+        }
+        if (!(DTP_MMIO(FIFO_STATUS) & 4))
             continue;
         if (!block(cursor, phase)) {
             error = 3;

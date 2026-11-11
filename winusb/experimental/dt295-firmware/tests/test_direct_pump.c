@@ -116,6 +116,34 @@ static void compact_all_offsets(void)
     }
 }
 
+/* 1ブロック以上送った後にリングが尽きたら、上限を待たずに戻る。 */
+static void returns_when_drained(void)
+{
+    populate(0);
+    uint32_t packet[16] = {0};
+    packet[2] = 4;
+    packet[7] = 100;
+    packet[8] = 0;
+    producer = 3 * 512 + 3 * 192;
+    fifo_status = 4;
+    select_reg = 15;
+    written = 0;
+    dtp_bulk_pump(packet);
+    assert(packet[2] == 0x80000004 && !packet[10]);
+    assert(packet[7] > 0 && packet[7] < 100 && written == packet[7] * 512);
+    assert(available(packet[6], producer) < 528);
+
+    /* 送るものがないうちは待機の上限まで待ち、誤りにはしない。 */
+    packet[2] = 4;
+    packet[6] = 0;
+    packet[7] = 100;
+    packet[8] = 0;
+    producer = 0;
+    written = 0;
+    dtp_bulk_pump(packet);
+    assert(packet[2] == 0x80000004 && !packet[10] && !packet[7] && !written);
+}
+
 static void sync_failure_is_atomic(void)
 {
     populate(0);
@@ -247,6 +275,7 @@ static void card_fifo(void)
 int main(void)
 {
     compact_all_offsets();
+    returns_when_drained();
     sync_failure_is_atomic();
     i2c_batch();
     card_fifo();
