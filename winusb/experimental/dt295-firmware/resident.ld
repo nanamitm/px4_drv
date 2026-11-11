@@ -11,5 +11,7 @@ SECTIONS
     .data : { *(.data*) }
     .bss (NOLOAD) : { *(.bss*) *(COMMON) }
     ASSERT(SIZEOF(.bss) == 0, "resident core must not require BSS initialization")
-    ASSERT(. <= 0x000e1800, "protocol core exceeds reserved development window")
+    /* 0x000e1000〜0x000e8fffはブートRAMのコードから参照がなく、電源投入直後は不定値だった。
+       カードFIFOの一括転送を加えるため、使用範囲を0x000e2000まで広げている。 */
+    ASSERT(. <= 0x000e2000, "protocol core exceeds reserved development window")
 }

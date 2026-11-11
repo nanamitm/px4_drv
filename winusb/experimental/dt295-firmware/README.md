@@ -72,7 +72,7 @@ make -j4 MAKEINFO=true all-gas all-ld all-binutils
 | 20 | 将来のI²C selector、通常0 | 応答payload長 |
 | 24..63 | payload、余白は0 | payload、余白は0 |
 
-operationは1=CAPS、2=PING、3=I2C。statusは0=OK、1=BAD_MAGIC、2=BAD_VERSION、3=UNSUPPORTED、4=NOT_READYです。CAPSは4個の32bit値（機能ビット=0、開発中の最大TX=40、最大RX=40、対象USB ID=`0x06b8103b`）を返します。このIDはコアの対象を示す固定値で、実機のID検査に成功したという意味ではありません。PINGとエラーのpayload長は0です。
+operationは1=CAPS、2=PING、3=I2C。主CPU版（`--direct-usb`）では4=TS転送、5=内蔵カードUARTのFIFO一括転送も受け付けます。操作5の要求と応答は [内蔵カードリーダー](../../docs/pix-dt295-card.md) にあります。statusは0=OK、1=BAD_MAGIC、2=BAD_VERSION、3=UNSUPPORTED、4=NOT_READYです。CAPSは4個の32bit値（機能ビット=0、開発中の最大TX=40、最大RX=40、対象USB ID=`0x06b8103b`）を返します。このIDはコアの対象を示す固定値で、実機のID検査に成功したという意味ではありません。PINGとエラーのpayload長は0です。
 
 ホストコーデックが準備する将来のI²C要求は、bus=0の7bitアドレス、TX/RX各40 bytes以内、少なくとも一方が非空の1トランザクションです。selectorは `address << 16 | tx_length << 8 | rx_length`、TXデータはpayloadです。TX+RXではrepeated STARTを保つ複合転送を想定しています。ただしコアにはI²Cの引数検査・期限管理・転送実装がまだないため、現段階では常にNOT_READYになります。timeout_usの有効範囲・タイマー・丸め規則はバックエンド確定時の仕様です。
 

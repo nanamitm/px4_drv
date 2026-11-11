@@ -2,8 +2,8 @@
   "format": "DTP4",
   "bundle": {
     "file": "dt295-source-fr.bin",
-    "bytes": 1684,
-    "sha256": "a32f6ffb5a6b2161fc6a922a87883f058e275fc84453fecf7d913c2e608516cc"
+    "bytes": 1940,
+    "sha256": "b2b6f4f48a0af9386ffa74adb70d867df8576a16a4e6277b9cc2e808fe0377da"
   },
   "direct": {
     "schema": 1,
@@ -20,18 +20,18 @@
       "objdump": "GNU objdump (GNU Binutils) 2.43.1"
     },
     "sources": {
-      "resident.s": "8fa6e10cd0100e04233ddf06abb43a989599b36906a5e6c2f8c966965d3561df",
-      "resident.ld": "93c64e131987c126a0f4be65d26cf0eba4f9effc9e44b98a26fe7eb0a29ee42c",
+      "resident.s": "e32e3c4a3ff72f7d9fbbc99ae50ad3ef0747c063fb57b43d1aa6e3a62a1d2349",
+      "resident.ld": "0bf32db036abecc6090b1138c79fd64dc0caf4134672e550ba27b4a612786928",
       "bootstrap.s": "79198d06bad080ed2390d51099b1cb281b3257124135ed06a290a30f3777249f",
       "bootstrap.ld": "d80f2b7cf6fbd50c3756a083fdd39491e2de11d2f580ccff73041f74d99072e8",
       "build.py": "ff947da5055e315e09bd821726553fa7105b151f6b17c47257f03494cd76833b",
-      "direct_pump.c": "4d7cd0000a0b268cee6349ef799d76db8c8bb090594abaeeda6343377bbecbee",
+      "direct_pump.c": "1c252f35c2b7510f30a358637a15d4a319f3d8e4f5a5e8c0e7b32b1a299c9ec6",
       "bulk_pump.c": "b605000691545aa50ceab31324363a96c0aea203b472ef045c9c808df67958e1"
     },
     "binary": {
       "file": "resident.bin",
-      "size": 1564,
-      "sha256": "42c5a4280cade8477c13b76d6245d41b5e7cfe00baf6c29350c83f368e6f2d53"
+      "size": 1820,
+      "sha256": "a97577d909381beefa680aff81f712d671ac9bd30f3cf61ad3dbe58e03a881f3"
     },
     "bootstrap": {
       "file": "bootstrap.bin",

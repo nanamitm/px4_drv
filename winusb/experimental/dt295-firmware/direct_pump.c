@@ -13,6 +13,10 @@
 #define DTP_I2C_READ(address) DTP_MMIO(address)
 #define DTP_I2C_WRITE(address, value) (DTP_MMIO(address) = (value))
 #endif
+#ifndef DTP_CARD_READ
+#define DTP_CARD_READ(address) DTP_MMIO(address)
+#define DTP_CARD_WRITE(address, value) (DTP_MMIO(address) = (value))
+#endif
 
 #ifdef DTP_RAW_TS
 void dtp_raw_pump(uint32_t *packet);
@@ -30,6 +34,10 @@ void dtp_raw_pump(uint32_t *packet);
 #define I2C_STATUS 0x00fd8fe0u
 #define I2C_CONTROL 0x00fd8fe4u
 #define I2C_DATA 0x00fd8ff0u
+#define CARD_FIFO 0x00fea014u
+#define CARD_TX 0x00fea028u
+#define CARD_RX 0x00fea02cu
+#define CARD_CHUNK 32u
 #ifndef DTP_RAW_TS
 #define UNALIGNED 0xffffffffu
 
@@ -249,10 +257,48 @@ reply:
         payload[8 + i] = read[i];
 }
 
+/*
+ * 操作5: 内蔵カードUARTのFIFOを1回の要求で最大32バイト移す。
+ * ホストのBC制御転送は1回約3 msかかり、1バイトごとの転送ではTSの取り出しを圧迫するため。
+ * 要求のword 4はbit 8〜15が方向 (1=受信FIFOの読出し、2=送信FIFOへの書込み)、bit 0〜7がバイト数。
+ * 読出しは受信FIFOに溜まった数までに限り、空読みでFIFOを進めない。
+ * 送信の開始と制御レジスターの設定はホストが行う。応答はword 6が結果、word 7が移したバイト数。
+ */
+__attribute__((noinline)) static void card(uint32_t *packet)
+{
+    uint8_t *payload = (uint8_t *)&packet[6], data[CARD_CHUNK];
+    unsigned mode = packet[4] >> 8, size = packet[4] & 255, moved = 0, error = 0;
+    if (packet[4] >> 16 || !size || size > CARD_CHUNK || (mode != 1 && mode != 2)) {
+        error = 1;
+        mode = 0;
+    } else if (mode == 2) {
+        for (unsigned i = 0; i < size; ++i)
+            data[i] = payload[i];
+        for (; moved < size; ++moved)
+            DTP_CARD_WRITE(CARD_TX, data[moved]);
+    } else {
+        unsigned available = DTP_CARD_READ(CARD_FIFO) >> 16;
+        if (size > available)
+            size = available;
+        for (; moved < size; ++moved)
+            data[moved] = (uint8_t)DTP_CARD_READ(CARD_RX);
+    }
+    for (unsigned i = 0; i < 40; ++i)
+        payload[i] = 0;
+    packet[5] = 8 + (mode == 1 ? moved : 0);
+    packet[6] = error;
+    packet[7] = moved;
+    if (mode == 1)
+        for (unsigned i = 0; i < moved; ++i)
+            payload[8 + i] = data[i];
+}
+
 void dtp_bulk_pump(uint32_t *packet)
 {
     if (packet[2] == 3)
         i2c(packet);
+    else if (packet[2] == 5)
+        card(packet);
     else {
 #ifdef DTP_RAW_TS
         dtp_raw_pump(packet);

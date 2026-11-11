@@ -29,6 +29,9 @@ dtp_entry:
         cmp #3,r0
         .ifdef DTP_DIRECT
         beq .Lbulk
+        /* 操作5: 内蔵カードUARTのFIFO一括転送。 */
+        cmp #5,r0
+        beq .Lbulk
         .else
         beq .Lnot_ready
         .endif

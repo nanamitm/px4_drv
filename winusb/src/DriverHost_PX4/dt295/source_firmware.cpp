@@ -92,7 +92,8 @@ int SourceFirmware::LoadEmbedded()
         return Failure("bundle backend magic", -EINVAL);
 
     const std::array sections{&resident_, &adapter_, &hook_};
-    const size_t limits[] = {0x7a0, 0x60, 8};
+    // 本体は0x000e1060からresident.ldの上限0x000e2000まで。
+    const size_t limits[] = {0xfa0, 0x60, 8};
     size_t offset = 4 + 4 * sections.size();
     if (size < offset)
         return Failure("bundle size", -EINVAL);
