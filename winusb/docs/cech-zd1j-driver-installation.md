@@ -26,8 +26,9 @@ VID/PIDとインターフェースGUIDはcoax用と同じです。
 `pnputil /add-driver CECH-ZD1J.inf /install`を実行します。
 PnPUtilが成功しても別の既存ドライバーが選択される場合があります。
 デバイスマネージャーのクラス・表示名・INF名を確認し、結果に応じて再接続します。
-現時点では準備とカタログ検査だけを実施し、証明書登録・インストールは実行していません。
-MEDIA分類への変更後の受信・カード通信は未確認です。
+2026-11-12には、Windows 11 x64で`pnputil /add-driver CECH-ZD1J.inf /install`による導入後、
+MEDIA分類・Driver Version 1.0.0.1で認識され、地デジのスキャンと約2時間21分の受信を確認しました（[長時間受信の記録](torne-long-run.md)）。
+MEDIA分類への変更後のカード通信は未確認です。
 
 ## 検証済みの範囲
 
