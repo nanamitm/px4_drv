@@ -102,8 +102,12 @@ public:
         if (!open_) return;
         capture_=false; tuned_=false; DisableOutput();
         // IQ の送出を止めてから受信を止める。送出を止めずに閉じると、次の open で IQ のメッセージが
-        // 制御応答と同じ bulk IN を埋め続ける。機器は J.83B 用の firmware のまま残り、loaded_ がそれを覚えている
+        // 制御応答と同じ bulk IN を埋め続ける
         StopIq();
+        // J.83B 用の firmware のまま閉じると、受信を止めて開き直した後の GET_VERSION に応答しなかった。
+        // 他のホストやアプリも ISDB-T の firmware を前提に開くため、受信を動かしている間に通常の firmware へ戻す
+        if (loaded_==Loaded::J83b && !error_ && !Removed() && ReloadIsdbt())
+            msg_warn("PX-S1UD: closed with the J.83B firmware still running\n");
         stream_buf_->Stop(); StopWorker(); open_=false; closed_.notify_all();
     }
     int SetLnbVoltage(std::int32_t voltage) override { return voltage ? -ENOSYS : 0; }
@@ -207,17 +211,23 @@ protected:
     int SetStreamId() override { return 0; }
 private:
     bool Removed() const { return WaitForSingleObject(removed_,0)==WAIT_OBJECT_0; }
+    // J.83B 用の firmware から通常の firmware へ読み込み直す
+    int ReloadIsdbt()
+    {
+        std::vector<std::uint8_t> firmware;
+        const auto path=ResolveFirmwarePath(host_directory_,firmware_);
+        int ret=ReadFirmware(path,firmware);
+        if (!ret) ret=frontend_.Initialize(firmware,true);
+        if (ret) {msg_err("PX-S1UD: ISDB-T firmware reload failed ret=%d firmware=%ls\n",ret,path.c_str());return ret;}
+        loaded_=Loaded::Isdbt;
+        msg_info("PX-S1UD: ISDB-T firmware reloaded firmware=%u.%u\n",frontend_.Version()>>8,frontend_.Version()&255);
+        return 0;
+    }
     int TuneIsdbt()
     {
-        // J.83B 用の firmware から戻すときは、通常の firmware を読み込み直す
         if (loaded_==Loaded::J83b) {
-            std::vector<std::uint8_t> firmware;
-            const auto path=ResolveFirmwarePath(host_directory_,firmware_);
-            int ret=ReadFirmware(path,firmware);
-            if (!ret) ret=frontend_.Initialize(firmware,true);
-            if (ret) {msg_err("PX-S1UD: ISDB-T firmware reload failed ret=%d firmware=%ls\n",ret,path.c_str());return ret;}
-            loaded_=Loaded::Isdbt;
-            msg_info("PX-S1UD: ISDB-T firmware reloaded firmware=%u.%u\n",frontend_.Version()>>8,frontend_.Version()&255);
+            const int ret=ReloadIsdbt();
+            if (ret) return ret;
         }
         return frontend_.Tune(params_.freq);
     }
