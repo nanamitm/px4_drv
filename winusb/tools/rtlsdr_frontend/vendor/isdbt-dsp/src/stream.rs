@@ -15,6 +15,7 @@ use crate::params::{GuardInterval, FFT_LEN};
 use crate::pilots::SegmentPilots;
 use crate::rs;
 use crate::sync::{estimate_sync, estimate_symbol_sync};
+use crate::tmcc::{SYMBOLS_PER_FRAME, SYNC_EVEN, SYNC_ODD, SYNC_SIZE, TMCC_LOCAL_CARRIERS};
 use crate::ts::{best_sync_phase, pack_bits_msb, ByteDeinterleaver, EnergyPrbs, BI_I, BI_M, TSP};
 use crate::viterbi::{depuncture, Viterbi, ViterbiStreaming, PUNCTURE_2_3};
 use num_complex::Complex32;
@@ -83,10 +84,78 @@ fn resync_symbol(demod: &OfdmDemod, buf: &[Complex32], cur: usize, k: usize, lk:
     let expected = (lk.phase0 + k) % 4;
     let symbol_slip = sp_coherence(&seg, expected, &pilots) < PILOT_MISMATCH && best >= PILOT_MATCH;
     if next.abs_diff(cur) <= span && !symbol_slip { return None; }
-    // 4シンボル以上の欠落は位相だけでは区別できず、従来どおり helper の再ロックで回復する。
+    // SP の位相で分かるのは4を法とした数だけで、4の倍数の差や I/Q の増加は FrameCheck が TMCC で補正する。
     let skip = if symbol_slip { (phase + 4 - expected) % 4 } else { 0 };
     eprintln!("Symbol resync: offset={} metric={:.2} skipped_symbols={skip}", next as isize - cur as isize, est.metric);
     Some((next, skip))
+}
+
+// SP の位相は4シンボル周期のため、resync_symbol は4の倍数だけ異なる欠落数や I/Q の増加を区別できない。
+// TMCC の同期語 (B1..B16) が届いたシンボルはフレーム内番号16なので、その位置から
+// シンボル番号 k とフレームの対応 (index = (k + offset) % 204) を確かめ、ずれた分を補正する。
+// TMCC の情報部・パリティは毎フレーム同じビット列のため、偶然の一致は毎フレーム同じ位置に現れる。
+// 本物の同期語は偶奇フレームで反転するので、新しい位置で反転した同期語を2フレーム続けて見た場合だけ採用する。
+fn sync_word(bits: &[u8; SYNC_SIZE]) -> u16 {
+    bits.iter().fold(0u16, |v, &b| (v << 1) | u16::from(b & 1))
+}
+
+#[derive(Default)]
+struct FrameCheck {
+    prev: Option<[Complex32; 4]>,
+    bits: u16,
+    count: usize,
+    offset: Option<usize>,
+    // 位置ごとに直前に見た同期語の偶奇。偶然の一致が本物の候補を上書きしないよう位置ごとに保持する。
+    candidates: Vec<(usize, bool)>,
+}
+
+impl FrameCheck {
+    /// 位置の連続性が切れたとき（消失シンボルの挿入など）に、差動ビットの基準だけを捨てる。
+    fn reset(&mut self) {
+        self.prev = None;
+        self.count = 0;
+    }
+
+    /// 等化後の TMCC キャリアからシンボル k の差動ビットを求める。
+    fn push(&mut self, tmcc: [Complex32; 4], k: usize) -> Option<isize> {
+        let prev = self.prev.replace(tmcc);
+        let p = prev?;
+        let acc: f32 = tmcc.iter().zip(p.iter()).map(|(c, q)| (c * q.conj()).re).sum();
+        if !acc.is_finite() || acc == 0.0 {
+            self.count = 0;
+            return None;
+        }
+        self.push_bit(u8::from(acc < 0.0), k)
+    }
+
+    /// 欠落したシンボル数（正）または増えたシンボル数（負）を返す。
+    fn push_bit(&mut self, bit: u8, k: usize) -> Option<isize> {
+        self.bits = (self.bits << 1) | u16::from(bit);
+        self.count += 1;
+        if self.count < SYNC_SIZE { return None; }
+        let odd = if self.bits == sync_word(&SYNC_EVEN) { false }
+            else if self.bits == sync_word(&SYNC_ODD) { true }
+            else { return None };
+        let seen = (SYNC_SIZE + SYMBOLS_PER_FRAME - k % SYMBOLS_PER_FRAME) % SYMBOLS_PER_FRAME;
+        let confirmed = match self.candidates.iter_mut().find(|(o, _)| *o == seen) {
+            Some(entry) => { let alternated = entry.1 != odd; entry.1 = odd; alternated }
+            None => {
+                if self.candidates.len() >= 8 { self.candidates.remove(0); }
+                self.candidates.push((seen, odd));
+                false
+            }
+        };
+        match self.offset {
+            Some(o) if o == seen => None,
+            _ if !confirmed => None,
+            None => { self.offset = Some(seen); None }
+            Some(o) => {
+                self.candidates.retain(|(c, _)| *c != seen);
+                let lost = (seen + SYMBOLS_PER_FRAME - o) % SYMBOLS_PER_FRAME;
+                Some(if lost <= SYMBOLS_PER_FRAME / 2 { lost as isize } else { lost as isize - SYMBOLS_PER_FRAME as isize })
+            }
+        }
+    }
 }
 
 // 逆拡散系列は64ブロック周期で全候補に共通。候補ごとの再生成を避ける。
@@ -271,11 +340,13 @@ impl Pipe {
         self.tdi.latency() + self.bdi.latency()
     }
 
-    fn process(&mut self, spec: &[Complex32], phase0: usize, k: usize, out: &mut Vec<u8>) {
+    /// 1シンボルを処理し、等化後の TMCC キャリア4本を返す（フレーム内番号の確認用）。
+    fn process(&mut self, spec: &[Complex32], phase0: usize, k: usize, out: &mut Vec<u8>) -> [Complex32; 4] {
         let sym_mod4 = (phase0 + k) % 4;
         let seg = extract_segment(spec, SEGMENT_BIN_OFFSET);
         let h = estimate_channel(&seg, sym_mod4, &self.pilots);
         let eq = equalize(&seg, &h);
+        let tmcc = TMCC_LOCAL_CARRIERS.map(|c| eq[c]);
         let data: Vec<Complex32> = data_carrier_indices(sym_mod4, &self.pilots)
             .into_iter()
             .map(|l| eq[l])
@@ -287,7 +358,7 @@ impl Pipe {
             for v in td {
                 let _ = self.bdi.push(qpsk_soft(v)); // 状態だけ進める
             }
-            return;
+            return tmcc;
         }
         for v in td {
             let de = self.bdi.push(qpsk_soft(v)); // [lsb, msb]
@@ -352,6 +423,7 @@ impl Pipe {
             self.block_buf.clear();
         }
         self.mother.drain(0..pairs * 2);
+        tmcc
     }
 }
 
@@ -367,6 +439,9 @@ pub struct StreamingDecoder {
     locked: Option<Locked>,
     pipe: Option<Pipe>,
     need_init: usize,
+    frame: FrameCheck,
+    // TMCC で I/Q の増加を検出したとき、処理せずに読み飛ばす残りシンボル数。
+    drop_syms: usize,
     live: bool, // true: ロック直後にバックログを捨ててライブエッジから（A/V同期・低遅延）
 }
 
@@ -389,6 +464,8 @@ impl StreamingDecoder {
             locked: None,
             pipe: None,
             need_init: (LOCK_SYMS + 8) * 1280 + 60_000, // 同期+ロックに十分な初期サンプル数
+            frame: FrameCheck::default(),
+            drop_syms: 0,
             live: false,
         }
     }
@@ -527,9 +604,19 @@ impl StreamingDecoder {
         if let Some(mut lk) = self.locked {
             let mut n = 0;
             while self.cur + lk.sym <= self.buf.len() && n < max {
+                if self.drop_syms > 0 {
+                    self.cur += lk.sym;
+                    self.drop_syms -= 1;
+                    if self.cur >= COMPACT_AT {
+                        self.buf.drain(0..self.cur);
+                        self.cur = 0;
+                    }
+                    continue;
+                }
                 if self.k > 0 && self.k % 204 == 0 {
                     if let Some((next, skip)) = resync_symbol(&self.demod, &self.buf, self.cur, self.k, &lk) {
                         self.cur = next;
+                        self.frame.reset();
                         let erased = vec![Complex32::new(0.0, 0.0); FFT_LEN];
                         for _ in 0..skip {
                             self.pipe.as_mut().unwrap().process(&erased, lk.phase0, self.k, &mut out);
@@ -541,13 +628,27 @@ impl StreamingDecoder {
                     }
                 }
                 let spec = self.demod.demod_one(&self.buf, self.cur, lk.gi, lk.cfo);
-                self.pipe
+                let tmcc = self.pipe
                     .as_mut()
                     .unwrap()
                     .process(&spec, lk.phase0, self.k, &mut out);
+                let fix = self.frame.push(tmcc, self.k);
                 self.cur += lk.sym;
                 self.k += 1;
                 n += 1;
+                if let Some(d) = fix {
+                    eprintln!("TMCC frame correction: {} symbols {}", d.unsigned_abs(), if d > 0 { "lost" } else { "gained" });
+                    self.frame.reset();
+                    if d > 0 {
+                        let erased = vec![Complex32::new(0.0, 0.0); FFT_LEN];
+                        for _ in 0..d {
+                            self.pipe.as_mut().unwrap().process(&erased, lk.phase0, self.k, &mut out);
+                            self.k += 1;
+                        }
+                    } else {
+                        self.drop_syms = d.unsigned_abs();
+                    }
+                }
                 if self.cur >= COMPACT_AT {
                     self.buf.drain(0..self.cur);
                     self.cur = 0;
@@ -617,6 +718,59 @@ mod startup_regression {
             buf.extend_from_slice(&body[n-128..]);buf.extend_from_slice(&body);
         }
         (buf,starts)
+    }
+    // フレーム内番号 i の TMCC ビット。情報部は毎フレーム同じで、fake に同期語を埋め込める。
+    fn tmcc_bit(frame: usize, i: usize, fake: Option<usize>) -> u8 {
+        if (1..=SYNC_SIZE).contains(&i) {
+            return if frame % 2 == 0 { SYNC_EVEN[i - 1] } else { SYNC_ODD[i - 1] };
+        }
+        if let Some(at) = fake {
+            if (at..at + SYNC_SIZE).contains(&i) { return SYNC_EVEN[i - at]; }
+        }
+        ((i * 37 + 11) % 7 % 2) as u8
+    }
+    // 送信側のシンボル列 (frame, index) を、受信側の k に対応付けて流す。
+    fn feed(check: &mut FrameCheck, symbols: impl Iterator<Item = (usize, usize)>, k0: usize, fake: Option<usize>) -> (usize, Vec<isize>) {
+        let mut k = k0;
+        let mut fixes = Vec::new();
+        for (frame, i) in symbols {
+            if let Some(d) = check.push_bit(tmcc_bit(frame, i, fake), k) {
+                fixes.push(d);
+                check.count = 0;
+                if d > 0 { k += d as usize; }
+            }
+            k += 1;
+        }
+        (k, fixes)
+    }
+    fn stream(from: usize, count: usize) -> impl Iterator<Item = (usize, usize)> {
+        (from..from + count).map(|n| (n / SYMBOLS_PER_FRAME, n % SYMBOLS_PER_FRAME))
+    }
+    #[test]
+    fn tmcc_frame_check_learns_offset_without_correction() {
+        let mut check = FrameCheck::default();
+        let (_, fixes) = feed(&mut check, stream(50, 204 * 6), 0, None);
+        assert!(fixes.is_empty());
+        assert_eq!(check.offset, Some(50));
+    }
+    #[test]
+    fn tmcc_frame_check_counts_lost_and_gained_symbols() {
+        for jump in [4isize, 8, 40, -1, -4, -30] {
+            let mut check = FrameCheck::default();
+            let (k, fixes) = feed(&mut check, stream(0, 204 * 3), 0, None);
+            assert!(fixes.is_empty());
+            // 送信側の位置を jump だけ飛ばす（負なら同じシンボルを繰り返す）。受信側の k はそのまま進む。
+            let resume = (204 * 3) as isize + jump;
+            let (_, fixes) = feed(&mut check, stream(resume as usize, 204 * 3), k, None);
+            assert_eq!(fixes, vec![jump], "jump={jump}");
+        }
+    }
+    #[test]
+    fn tmcc_frame_check_ignores_a_sync_pattern_repeated_in_every_frame() {
+        let mut check = FrameCheck::default();
+        let (_, fixes) = feed(&mut check, stream(0, 204 * 8), 0, Some(100));
+        assert!(fixes.is_empty());
+        assert_eq!(check.offset, Some(0));
     }
     #[test]
     fn resyncs_after_samples_are_lost_beyond_tracking_range() {
