@@ -3,6 +3,7 @@
 #include "card_uart.hpp"
 #include "winusb_transport.hpp"
 #include "source_firmware.hpp"
+#include "stall_history.hpp"
 #include "../../WinSCard_PX4/bcas_atr.hpp"
 #include "../tc90522_cnr.hpp"
 #include "msg.h"
@@ -21,6 +22,15 @@ constexpr wchar_t LegacyDirectFirmwarePath[]=L"firmware\\dt295-direct-fr.bin";
 constexpr wchar_t LegacyDirectFirmwareSha256[]=L"ba6496cf022cc3ebb1626446484b072f83fbba019d11700c1d08c1c7b75d204a";
 constexpr wchar_t LegacySourceFirmwarePath[]=L"firmware\\dt295-source-fr.bin";
 constexpr wchar_t LegacySourceFirmwareSha256[]=L"92d2373945c03bd7978ed710ba283946d355e9383f163896b2d5517c3612ccbe";
+// 滞留の記録 (StallTraceDir)。カード通信のない受信試験で観測した未送信量の最大値は、地上波で約0.4 MB、
+// BSで約0.3 MB、110度CSで約0.6 MBだった。1 MiBを超えた滞留だけを起点とし、通常の変動では書き出さない。
+constexpr uint32_t StallHigh=1u<<20,StallLow=64u*1024u;
+// 起点の後も1秒分を残し、滞留が解消していく過程のSERVICEの間隔と送出量を読めるようにする。
+constexpr int64_t StallPostUs=1000000;
+// 1回の受信で書き出すファイルの上限。数日の録画でも書き出し量が増え続けないようにする。
+constexpr unsigned StallMaxDumps=8;
+// SERVICEとBulk受信の記録は合わせて毎秒約2,000件で、起点の前の約15秒分を保持できる。
+constexpr size_t StallCapacity=32768;
 struct Event {
     HANDLE value=CreateEventW(nullptr,TRUE,FALSE,nullptr);
     ~Event(){if(value)CloseHandle(value);}
@@ -71,6 +81,11 @@ public:
         lock.unlock();closed_.notify_all();
     }
     void WaitClosed(){std::unique_lock<std::mutex> lock(mutex_);closed_.wait(lock,[this]{return !open_;});}
+    // Init中、受信を始める前に1回だけ呼ぶ。履歴の配列はここで確保し、受信中は割り当てない。
+    void EnableStallTrace(const std::wstring &directory){
+        stall_dir_=directory;
+        stall_history_=std::make_unique<StallHistory>(StallCapacity);
+    }
     int SetCapture(bool enable) override {
         std::lock_guard<std::mutex> lock(mutex_);
         if(!open_ || !parent_.available_)return -ENODEV;
@@ -103,8 +118,10 @@ public:
             ++command_waiters_;
             std::unique_lock<std::mutex> command(command_mutex_);
             --command_waiters_;
+            const auto hold=Clock::now();
             transport_.Begin(2000);
             const int rc=source_->ReadCn(satellite,raw);
+            RecordHold(StallHistory::Kind::Cn,hold);
             if(rc){cn_failed_=true;return rc;}
         }
         value=px4::tc90522::CnrMilliDb(satellite,raw);
@@ -117,20 +134,24 @@ public:
         ++command_waiters_;
         std::unique_lock<std::mutex> command(command_mutex_);
         --command_waiters_;
+        auto hold=Clock::now();
         transport_.Begin(2000);
         // PIF1の導入後は、FIFOをファームウェアの一括転送で移す。導入前はTSを受信していない。
         DirectBus::BulkFifo bulk;
         if(source_->Ready())
             bulk=[this](bool write,std::uint8_t *data,std::size_t &count){return source_->CardFifo(write,data,count);};
-        DirectBus bus(transport_.Callbacks(),[this,&command](unsigned ms){
+        DirectBus bus(transport_.Callbacks(),[this,&command,&hold](unsigned ms){
+            RecordHold(StallHistory::Kind::Card,hold);
             command.unlock();
             const DWORD wait=WaitForSingleObject(parent_.removed_,ms);
             ++command_waiters_;command.lock();--command_waiters_;
+            hold=Clock::now();
             transport_.Begin(2000);
             return wait==WAIT_TIMEOUT?0:-ENODEV;
         },std::move(bulk));
         CardUart uart(bus);
         const int rc=operation(uart);
+        RecordHold(StallHistory::Kind::Card,hold);
         if(rc && bus.Error())
             msg_err("PIX-DT295: card transfer failed errno=%d win32=%lu\n",bus.Error(),transport_.LastError());
         return rc;
@@ -196,6 +217,13 @@ private:
         trace_dir_=trace_size && trace_size<MAX_PATH?trace_path:L"";
         service_trace_.clear();bulk_trace_.clear();trace_bytes_=0;trace_cc_=0;
         trace_origin_=Clock::now();++trace_epoch_;
+        if(stall_history_){
+            // 書き出すファイルの時刻を録画ソフトのログと照合できるよう、経過時間の起点の壁時計を残す。
+            FILETIME now{};GetSystemTimePreciseAsFileTime(&now);
+            stall_origin_=(uint64_t(now.dwHighDateTime)<<32)|now.dwLowDateTime;
+            stall_history_->Clear();stall_trigger_.Reset();
+            std::lock_guard<std::mutex> lock(stall_mutex_);stall_stop_=false;stall_queue_.clear();
+        }
         ResetEvent(stop_.value);stream_buf_->Start();
         // STOP後のホスト側パイプ残留を捨て、新世代の読出しをTUNE前に投入する。
         if(!WinUsb_FlushPipe(parent_.usb_dev_.winusb,0x81))return -EIO;
@@ -212,6 +240,11 @@ private:
             transport_.Begin(20000);rc=source_->Capture(true);
         }
         if(rc){StopReader();return rc;}
+        // ファイルへの書き出しは専用スレッドで行い、SERVICEとカード通信を書き込み待ちで止めない。
+        if(stall_history_){
+            try{stall_writer_=std::thread([this]{StallWriter();});}catch(...){StopReader();return -ENOMEM;}
+            stall_active_=true;
+        }
         // input初期化が終わる前のUSBデータは破棄し、フレーマーとの競合を避ける。
         deliver_=true;
         try {service_worker_=std::thread([this]{
@@ -236,8 +269,10 @@ private:
                     service_trace_.push_back(row);
                 }
                 max_call_us=(std::max)(max_call_us,static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(Clock::now()-begin).count()));
+                if(!rc && stall_history_)RecordService(begin,completed);
                 if(rc)worker_error_=rc;
             }
+            if(stall_active_ && stall_trigger_.Flush())QueueStallDump(true);
             msg_info("PIX-DT295: service calls=%llu mean_gap_us=%llu max_gap_us=%llu max_call_us=%llu\n",
                 static_cast<unsigned long long>(calls),static_cast<unsigned long long>(calls?total_gap_us/calls:0),
                 static_cast<unsigned long long>(max_gap_us),static_cast<unsigned long long>(max_call_us));
@@ -248,6 +283,12 @@ private:
         deliver_=false;SetEvent(stop_.value);
         if(service_worker_.joinable())service_worker_.join();
         if(worker_.joinable())worker_.join();
+        stall_active_=false;
+        if(stall_writer_.joinable()){
+            // 受信の停止までに要求された書き出しは、すべて終えてからスレッドを回収する。
+            {std::lock_guard<std::mutex> lock(stall_mutex_);stall_stop_=true;}
+            stall_changed_.notify_all();stall_writer_.join();
+        }
         SaveTrace();
         std::lock_guard<std::mutex> command(command_mutex_);
         transport_.Begin(20000);const int rc=source_->Capture(false);
@@ -279,11 +320,15 @@ private:
                 if(wait==WAIT_OBJECT_0 || wait==WAIT_OBJECT_0+1)break;
                 if(wait==WAIT_OBJECT_0+2){
                     const auto observed=Clock::now();
-                    max_read_gap_us=(std::max)(max_read_gap_us,static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(observed-previous_read).count()));
+                    const auto read_gap_us=static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(observed-previous_read).count());
+                    max_read_gap_us=(std::max)(max_read_gap_us,read_gap_us);
                     previous_read=observed;
                     ULONG bytes=0;
                     BOOL ok=WinUsb_GetOverlappedResult(parent_.usb_dev_.winusb,&read.operation,&bytes,TRUE);read.pending=false;
                     if(!ok || bytes>read.bytes.size()){worker_error_=-EIO;break;}
+                    if(stall_active_)
+                        stall_history_->Record({TraceTime(observed),static_cast<uint32_t>((std::min<uint64_t>)(read_gap_us,UINT32_MAX)),
+                            static_cast<uint32_t>(bytes),0,StallHistory::Kind::Bulk});
                     input_bytes+=bytes;trace_bytes_=input_bytes;
                     if(deliver_){
                         output.clear();int rc=source_->Feed(read.bytes.data(),bytes,Packet,&output);
@@ -325,6 +370,86 @@ private:
         if(worker_error_){msg_err("PIX-DT295: stream failed errno=%d\n",worker_error_.load());stream_buf_->StopRequest();}
         changed_.notify_all();
     }
+    // 滞留の記録 (StallTraceDir)。受信中だけ記録し、SERVICEの後で起点と書き出しを判定する。
+    struct StallDump {std::vector<StallHistory::Event> events;int64_t trigger_us=0;uint32_t peak=0;unsigned epoch=0,index=0;bool at_stop=false;};
+    static uint32_t Micros(Clock::duration d){
+        const auto us=std::chrono::duration_cast<std::chrono::microseconds>(d).count();
+        return us<=0?0u:static_cast<uint32_t>((std::min<long long>)(us,UINT32_MAX));
+    }
+    void RecordHold(StallHistory::Kind kind,Clock::time_point begin){
+        if(!stall_active_)return;
+        stall_history_->Record({TraceTime(begin),Micros(Clock::now()-begin),0,0,kind});
+    }
+    // 制御ロックを保持したSERVICEのスレッドから呼ぶ。起点の判定はこのスレッドだけが行う。
+    void RecordService(Clock::time_point begin,Clock::time_point completed) noexcept {
+        if(!stall_active_)return;
+        const auto pending=source_->LastPending();
+        stall_history_->Record({TraceTime(begin),Micros(completed-begin),source_->LastSentBlocks(),pending,StallHistory::Kind::Service});
+        if(stall_trigger_.OnService(TraceTime(completed),pending))QueueStallDump(false);
+    }
+    // at_stop: 起点から1秒経つ前に受信が止まった。Bulk受信の停止後に終わったSERVICEを含む場合があるため、
+    // 受信中の滞留と区別できるよう書き出す。
+    void QueueStallDump(bool at_stop) noexcept {
+        try {
+            StallDump dump{stall_history_->Snapshot(),stall_trigger_.TriggerTime(),stall_trigger_.Peak(),trace_epoch_,stall_trigger_.Dumps(),at_stop};
+            std::lock_guard<std::mutex> lock(stall_mutex_);
+            // 書き出しが追いつかない場合も、受信経路では待たずに後続の要求を捨てる。
+            if(stall_queue_.size()<2)stall_queue_.push_back(std::move(dump));
+        }catch(...){return;}
+        stall_changed_.notify_one();
+    }
+    void StallWriter(){
+        std::unique_lock<std::mutex> lock(stall_mutex_);
+        for(;;){
+            stall_changed_.wait(lock,[this]{return stall_stop_ || !stall_queue_.empty();});
+            if(stall_queue_.empty())return;
+            StallDump dump=std::move(stall_queue_.front());stall_queue_.erase(stall_queue_.begin());
+            lock.unlock();WriteStallDump(dump);lock.lock();
+        }
+    }
+    // 受信開始からの経過時間をローカル時刻へ変換する。
+    SYSTEMTIME StallClock(int64_t elapsed_us)const{
+        const uint64_t value=stall_origin_+static_cast<uint64_t>((std::max<int64_t>)(elapsed_us,0))*10u;
+        FILETIME utc{static_cast<DWORD>(value),static_cast<DWORD>(value>>32)},local{};SYSTEMTIME st{};
+        FileTimeToLocalFileTime(&utc,&local);FileTimeToSystemTime(&local,&st);
+        return st;
+    }
+    void WriteStallDump(const StallDump &dump) noexcept {
+        try {
+            std::wstring dir=stall_dir_;
+            // 相対パスは、DebugLogPathと同じくDriverHost_PX4.exeのフォルダーを基準にする。
+            const bool absolute=dir.size()>=2 && (dir[1]==L':' || (dir[0]==L'\\' && dir[1]==L'\\'));
+            if(!absolute)dir=px4::util::path::GetDir()+dir;
+            CreateDirectoryW(dir.c_str(),nullptr);
+            const auto at=StallClock(dump.trigger_us);
+            wchar_t name[80]{};
+            swprintf_s(name,L"\\dt295-stall-%04u%02u%02u-%02u%02u%02u-%03u.csv",at.wYear,at.wMonth,at.wDay,
+                at.wHour,at.wMinute,at.wSecond,at.wMilliseconds);
+            const auto path=dir+name;
+            FILE *f=nullptr;
+            if(_wfopen_s(&f,path.c_str(),L"wb") || !f){msg_err("PIX-DT295: stall trace write failed path=%ls\n",path.c_str());return;}
+            const auto origin=StallClock(0);
+            std::fprintf(f,"# origin_local=%04u-%02u-%02u %02u:%02u:%02u.%03u trigger_us=%lld peak_pending=%u epoch=%u index=%u reason=%s\n",
+                origin.wYear,origin.wMonth,origin.wDay,origin.wHour,origin.wMinute,origin.wSecond,origin.wMilliseconds,
+                static_cast<long long>(dump.trigger_us),dump.peak,dump.epoch,dump.index,dump.at_stop?"stop":"threshold");
+            std::fputs("# S: duration=SERVICE call, a=sent blocks (512 bytes), b=pending bytes after the SERVICE\n"
+                "# C/N: duration=control lock held by a card operation / CN read\n"
+                "# B: duration=gap since the previous bulk completion, a=bytes\n"
+                "time_us,kind,duration_us,a,b\n",f);
+            for(const auto &e:dump.events)
+                std::fprintf(f,"%lld,%c,%u,%u,%u\n",static_cast<long long>(e.time_us),static_cast<char>(e.kind),e.duration_us,e.a,e.b);
+            std::fclose(f);
+            msg_warn("PIX-DT295: TS ring stall trace reason=%s peak_pending=%u at=%02u:%02u:%02u.%03u events=%zu file=%ls\n",
+                dump.at_stop?"stop":"threshold",dump.peak,at.wHour,at.wMinute,at.wSecond,at.wMilliseconds,dump.events.size(),path.c_str());
+        }catch(...){}
+    }
+    std::unique_ptr<StallHistory> stall_history_;std::wstring stall_dir_;
+    StallTrigger stall_trigger_{StallHigh,StallLow,StallPostUs,StallMaxDumps};
+    uint64_t stall_origin_=0;
+    std::atomic_bool stall_active_{false};
+    std::thread stall_writer_;
+    std::mutex stall_mutex_;std::condition_variable stall_changed_;
+    std::vector<StallDump> stall_queue_;bool stall_stop_=false;
     struct ServiceTrace {int64_t begin=0,end=0;uint64_t bytes=0,cc=0;int rc=0;};
     struct BulkTrace {int64_t completed,processed;uint64_t bytes,cc;};
     int64_t TraceTime(Clock::time_point t)const{return std::chrono::duration_cast<std::chrono::microseconds>(t-trace_origin_).count();}
@@ -404,6 +529,12 @@ int Device::Init(){
     const auto rc=source->LoadEmbedded();
     if(rc)return rc;
     receiver_=std::make_unique<Receiver>(*this,std::move(source));
+    // 空なら記録しない。TSリングの滞留の前後を、受信と別のスレッドでこのフォルダーへ書き出す。
+    const auto stall_dir=device_def_.configs.Get(L"StallTraceDir",L"");
+    if(!stall_dir.empty()){
+        receiver_->EnableStallTrace(stall_dir);
+        msg_info("PIX-DT295: stall trace enabled dir=%ls high=%u\n",stall_dir.c_str(),StallHigh);
+    }
     px4::command::ReceiverInfo info{};const auto &r=device_def_.receivers.front();
     wcscpy_s(info.device_name,device_def_.name.c_str());info.device_guid=device_def_.guid;
     wcscpy_s(info.receiver_name,r.name.c_str());info.receiver_guid=r.guid;

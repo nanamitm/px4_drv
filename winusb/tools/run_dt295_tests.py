@@ -40,8 +40,8 @@ for platform in (('x86', 'x64') if args.platform == 'both' else (args.platform,)
     native = 'Win32' if platform == 'x86' else 'x64'
     out = root / 'build' / platform / 'Release-static'
     out.mkdir(parents=True, exist_ok=True)
-    for test in ('bootstrap', 'loader', 'session', 'usb_window', 'stream_input', 'transport', 'runtime', 'frontend_init', 'card'):
-        own_project = test in ('transport', 'runtime', 'frontend_init', 'card')
+    for test in ('bootstrap', 'loader', 'session', 'usb_window', 'stream_input', 'transport', 'runtime', 'frontend_init', 'card', 'stall'):
+        own_project = test in ('transport', 'runtime', 'frontend_init', 'card', 'stall')
         project = root / 'tests' / ('dt295_' + test + '_test.vcxproj' if own_project else 'dt295_upstream_test.vcxproj')
         command = [msbuild, str(project), '/nologo', '/v:minimal', '/p:Configuration=Release-static', '/p:Platform=' + native, '/p:TestName=' + test]
         result = subprocess.run(command, capture_output=True)

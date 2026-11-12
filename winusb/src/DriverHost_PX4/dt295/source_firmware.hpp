@@ -21,6 +21,9 @@ public:
     int ReadCn(bool &satellite, uint32_t &raw);
     int Capture(bool enable);
     int Service();
+    // 直前のSERVICEが送ったブロック数と、送出後の未送信量 (バイト)。成功したSERVICEの後だけ更新する。
+    uint32_t LastSentBlocks() const { return last_sent_; }
+    uint32_t LastPending() const { return last_pending_; }
     int Close();
     int Feed(const uint8_t *data, size_t size, mb86H_stream_packet_sink packet, void *ctx);
     void InputStats(uint64_t &discarded, uint64_t &desyncs) const;
@@ -78,7 +81,7 @@ private:
     uint32_t stream_phase_ = 0xffffffff, endpoint_enable_ = 0, endpoint_buffer_ = 0, endpoint_mode_ = 0;
     bool endpoint_saved_ = false;
     uint64_t ring_services_ = 0, ring_high_ = 0;
-    uint32_t ring_peak_ = 0;
+    uint32_t ring_peak_ = 0, last_sent_ = 0, last_pending_ = 0;
     bool clock_changed_ = false, ts_changed_ = false;
     bool ring_running_ = false, ready_ = false, satellite_ = false, tuned_ = false;
 };
