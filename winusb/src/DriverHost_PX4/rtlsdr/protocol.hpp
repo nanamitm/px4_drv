@@ -8,8 +8,8 @@ namespace px4::rtlsdr {
 constexpr std::uint32_t Magic=0x31545352;
 constexpr std::size_t MaxTs=188*2048;
 struct Frame { std::uint32_t kind,size,quality,accepted,rejected; };
-// 状態 (kind 3) の payload の上限。品質は RS の成功割合で C/N の表示に使えないため、msi2500_frontend は
-// 先頭 4 バイトに復調器の MER (dB×100、0〜10000) を置く。空の payload (RTL-SDR の helper と古い helper) も受け付け、
+// 状態 (kind 3) の payload の上限。品質は RS の成功割合で C/N の表示に使えないため、msi2500_frontend と
+// RTL-SDR の helper は先頭 4 バイトに復調器の MER (dB×100、0〜10000) を置く。空の payload (MER を測れていない間と古い helper) も受け付け、
 // 後から項目を足しても古い DriverHost が拒まないよう、4 の倍数で 64 バイトまでを許す
 constexpr std::uint32_t MaxStatus=64;
 constexpr std::uint32_t MaxMerX100=10000;

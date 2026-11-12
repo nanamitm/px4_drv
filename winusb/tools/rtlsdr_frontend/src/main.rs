@@ -399,12 +399,17 @@ fn run() -> Result<(), String> {
             }
             if last_status.elapsed() >= Duration::from_millis(250) {
                 let (accepted, total) = decoder.stats();
-                let quality = if had_ts && last_ts.elapsed() < Duration::from_secs(3) {
+                let receiving = had_ts && last_ts.elapsed() < Duration::from_secs(3);
+                let quality = if receiving {
                     (accepted as u64 * 10_000 / total.max(1) as u64) as u32
                 } else {
                     0
                 };
-                frame(&mut out, 3, &[], quality, accepted, total)?;
+                // 状態の payload の先頭4バイトは MER (dB×100、0〜10000)。TS が出ていない間は送らず、
+                // DriverHost は直前の値を使わずにロックなしとして扱う。
+                let mer = decoder.take_mer_db().filter(|_| receiving);
+                let payload = mer.map(|db| ((db * 100.0).round().clamp(0.0, 10_000.0) as u32).to_le_bytes());
+                frame(&mut out, 3, payload.as_ref().map_or(&[][..], |p| &p[..]), quality, accepted, total)?;
                 last_status = Instant::now();
             }
         }

@@ -158,6 +158,38 @@ impl FrameCheck {
     }
 }
 
+// 等化後の QPSK データキャリアと最寄りの理想点 (±1/√2, ±1/√2) との誤差から MER を測る。
+// RS の成功割合は正常受信中ほぼ100%で変わらず、受信状態の目安にならないため、
+// PX-S1UD の J.83B と同じく復調器の MER を信号品質として DriverHost へ渡す。
+// 等化は ±4/3 の SP を基準にするため、データは送信側と同じ振幅（平均電力1）にそろう。
+// 消失シンボル（全零）は誤差が最大値に張り付くため、平均電力が十分小さいシンボルは数えない。
+#[derive(Default)]
+struct MerMeter {
+    signal: f64,
+    error: f64,
+}
+
+impl MerMeter {
+    fn add(&mut self, data: &[Complex32]) {
+        const A: f32 = std::f32::consts::FRAC_1_SQRT_2;
+        let power: f32 = data.iter().map(|v| v.norm_sqr()).sum::<f32>() / data.len().max(1) as f32;
+        if !power.is_finite() || power < 1e-3 { return; }
+        for v in data {
+            if !(v.re.is_finite() && v.im.is_finite()) { continue; }
+            let ideal = Complex32::new(A.copysign(v.re), A.copysign(v.im));
+            self.signal += 1.0;
+            self.error += f64::from((v - ideal).norm_sqr());
+        }
+    }
+
+    fn take_db(&mut self) -> Option<f32> {
+        let (signal, error) = (self.signal, self.error);
+        *self = Self::default();
+        // 誤差0は表示の上限 (100 dB) とし、測定点がない場合だけ None にする。
+        (signal > 0.0).then(|| if error > 0.0 { ((10.0 * (signal / error).log10()) as f32).min(100.0) } else { 100.0 })
+    }
+}
+
 // 逆拡散系列は64ブロック周期で全候補に共通。候補ごとの再生成を避ける。
 fn dispersion_masks() -> Vec<[u8; TSP]> {
     let mut prbs = EnergyPrbs::with_init(PRBS_INIT);
@@ -311,6 +343,7 @@ struct Pipe {
     block_idx: usize,
     ndec: usize,
     nblk: usize,
+    mer: MerMeter,
 }
 impl Pipe {
     fn new(commutator: usize, reset_off: usize, block_phase: usize) -> Self {
@@ -334,6 +367,7 @@ impl Pipe {
             block_idx: 0,
             ndec: 0,
             nblk: 0,
+            mer: MerMeter::default(),
         }
     }
     fn warmup(&self) -> usize {
@@ -351,6 +385,7 @@ impl Pipe {
             .into_iter()
             .map(|l| eq[l])
             .collect();
+        self.mer.add(&data);
         let fd = freq_deinterleave(&data);
         let td = self.tdi.push_symbol(&fd);
         let warmup = self.warmup();
@@ -482,6 +517,11 @@ impl StreamingDecoder {
     }
 
     /// これまでにRS復号したパケット数と評価ブロック数。
+    /// 前回の呼び出しから等化後のデータキャリアで測った MER (dB)。ロック前と測定点がない場合は None。
+    pub fn take_mer_db(&mut self) -> Option<f32> {
+        self.pipe.as_mut().and_then(|p| p.mer.take_db())
+    }
+
     pub fn stats(&self) -> (usize, usize) {
         self.pipe.as_ref().map(|p| (p.ndec, p.nblk)).unwrap_or((0, 0))
     }
@@ -745,6 +785,24 @@ mod startup_regression {
     }
     fn stream(from: usize, count: usize) -> impl Iterator<Item = (usize, usize)> {
         (from..from + count).map(|n| (n / SYMBOLS_PER_FRAME, n % SYMBOLS_PER_FRAME))
+    }
+    #[test]
+    fn mer_meter_measures_offset_from_qpsk_points() {
+        let a = std::f32::consts::FRAC_1_SQRT_2;
+        let mut meter = MerMeter::default();
+        // 全点を実部方向へ 0.1 ずらすと、誤差電力 0.01・信号電力 1 で 20 dB。
+        let data: Vec<Complex32> = (0..384).map(|i| {
+            let (re, im) = if i % 2 == 0 { (a, -a) } else { (-a, a) };
+            Complex32::new(re + 0.1, im)
+        }).collect();
+        meter.add(&data);
+        // 消失シンボル（全零）は数えない。
+        meter.add(&vec![Complex32::new(0.0, 0.0); 384]);
+        let db = meter.take_db().unwrap();
+        assert!((db - 20.0).abs() < 0.01, "db={db}");
+        assert_eq!(meter.take_db(), None);
+        meter.add(&vec![Complex32::new(a, a); 384]);
+        assert_eq!(meter.take_db(), Some(100.0));
     }
     #[test]
     fn tmcc_frame_check_learns_offset_without_correction() {
