@@ -41,6 +41,9 @@ helper と依存元のソース、ライセンス宣言、固定リビジョン�
 stdout は little endian の24バイトヘッダーと payload からなる。
 順に magic=`0x31545352`、種別、payload 長、品質（0〜10000）、RS成功数、RS失敗数。
 種別1は USB 初期化完了、2は188バイト単位の TS、3は状態、4はエラー文字列。
+状態の payload は空か4の倍数で64バイトまで。msi2500_frontend は先頭4バイトへ復調器の MER (dB×100、0〜10000) を置き、
+PX-S1UD の J.83B ではこれを CNR として返す。RTL-SDR の helper と古い helper は空の payload を送り、DriverHost は MER なしとして扱う。
+DriverHost が payload のある状態を拒んだ版と組み合わせると新しい helper は形式不正で止まるため、helper と DriverHost は同じ版で配布する。
 TS payload 上限は188×2048バイト。両端で範囲と形式を確認する。
 stderr は診断ログであり、TS と混ぜずに別ファイルへ保存する。
 

@@ -19,6 +19,10 @@ struct Mock final : Io {
     std::vector<std::uint16_t> responses;
     int mode=255, protocols=0, version=0x800, fail_type=0;
     bool short_version=false, old_mode_after_init=false;
+    // reload_to_rom: SW_RELOAD_START で ROM へ戻る (J.83B 用の firmware の実機の挙動)。
+    // boot_mode: 読み込んだ firmware が起動後に返すモード (J.83B 用の firmware は 7)
+    bool reload_to_rom=false; int boot_mode=6; int reloading=0, reload_calls=0;
+    void Reloading(bool on) override {reloading=on;++reload_calls;}
     int Delay(unsigned ms) override {Require(ms==400,"firmware settle");return 0;}
     int Exchange(const std::vector<std::uint8_t>& m,std::uint16_t response,
                  std::vector<std::uint8_t>& p,unsigned timeout) override
@@ -26,14 +30,16 @@ struct Mock final : Io {
         messages.push_back(m);responses.push_back(response);p.clear();
         Require(m.size()>=8 && sms_get_le16(m.data()+4)==m.size(),"header length");
         auto type=sms_get_le16(m.data());
-        Require(timeout==(type==MSG_SMS_GET_STATISTICS_EX_REQ || type==MSG_SMS_GET_STATISTICS_REQ ? 500U:10000U),"bounded timeout");
+        Require(timeout==(type==MSG_SMS_GET_STATISTICS_EX_REQ || type==MSG_SMS_GET_STATISTICS_REQ ? 500U :
+            type==MSG_IQ_STREAM_REQ ? 2000U : 10000U),"bounded timeout");
         if (type==fail_type) return -ETIMEDOUT;
         if (type==MSG_SMS_GET_VERSION_EX_REQ) {
             p.resize(short_version?11:12);p[4]=static_cast<std::uint8_t>(mode);p[5]=static_cast<std::uint8_t>(protocols);
             p[10]=static_cast<std::uint8_t>(version>>8);if (p.size()>11) p[11]=static_cast<std::uint8_t>(version);
         }
-        if (type==MSG_SMS_SWDOWNLOAD_TRIGGER_REQ || type==MSG_SW_RELOAD_EXEC_REQ ||
-            (type==MSG_SMS_INIT_DEVICE_REQ && !old_mode_after_init)) mode=6;
+        if (type==MSG_SW_RELOAD_START_REQ && reload_to_rom) mode=255;
+        if (type==MSG_SMS_SWDOWNLOAD_TRIGGER_REQ || type==MSG_SW_RELOAD_EXEC_REQ) mode=boot_mode;
+        if (type==MSG_SMS_INIT_DEVICE_REQ && !old_mode_after_init && boot_mode==6) mode=6;
         if (type==MSG_SMS_ISDBT_TUNE_REQ) p.resize(4);
         return 0;
     }
@@ -174,5 +180,39 @@ void FirmwarePaths()
     Require(root.parent_path()==build && root.filename().wstring().find(L"siano-firmware-path-test-")==0,"cleanup is confined to test directory");
     fs::remove_all(root);
 }
+void J83b()
+{
+    // J.83B 用と通常の firmware の切り替えは、ISDB-T で稼働中の機器にも読み込み直す
+    Mock warm;warm.mode=6;Frontend f(warm);auto fw=Firmware();
+    Require(f.Initialize(fw,true)==0,"forced reload of a running ISDB-T device");
+    Require(sms_get_le16(warm.messages[1].data())==MSG_SW_RELOAD_START_REQ,"forced reload uses SW reload");
+    Require(sms_get_le16(warm.messages.back().data())==MSG_SMS_GET_VERSION_EX_REQ,"no INIT after reload into ISDB-T mode");
+    Require(warm.responses[1]==0,"reload start is not awaited");
+    Require(sms_get_le32(warm.messages[3].data()+8)==sms_get_le32(fw.data()+32),"reload writes to payload[20] address");
+    Require(warm.reload_calls==2 && !warm.reloading,"reload window opened and closed");
+    // J.83B 用の firmware は SW_RELOAD_START で ROM へ戻るため、コールド起動の手順で書く
+    Mock rom;rom.mode=7;rom.protocols=0x60;rom.reload_to_rom=true;Frontend r(rom);
+    Require(r.Initialize(fw,true)==0,"reload through ROM");
+    Require(sms_get_le32(rom.messages[3].data()+8)==0x400000,"ROM reload writes to the start address");
+    Require(std::any_of(rom.messages.begin(),rom.messages.end(),[](auto& m){return sms_get_le16(m.data())==MSG_SMS_SWDOWNLOAD_TRIGGER_REQ;}),
+        "ROM reload uses the download trigger");
+    // J.83B 用の firmware は INIT_DEVICE の後も独自のモードを返す
+    Mock j83b_fw;j83b_fw.mode=6;j83b_fw.boot_mode=7;Frontend q(j83b_fw);
+    Require(q.Initialize(fw,true,false)==0,"J.83B firmware keeps its own mode");
+    Require(sms_get_le16(j83b_fw.messages[j83b_fw.messages.size()-2].data())==MSG_SMS_INIT_DEVICE_REQ,"INIT_DEVICE sent to J.83B firmware");
+    Mock strict;strict.mode=6;strict.boot_mode=7;Frontend s(strict);
+    Require(s.Initialize(fw,true)==-EIO,"ISDB-T reload must end in ISDB-T mode");
+    warm.messages.clear();warm.responses.clear();
+    // J.83B は ISDB-T の選局要求を送らず、IQ の送出の要求が中心周波数 (Hz) で選局を兼ねる
+    Require(f.SetIqStream(138750000)==0 && warm.messages.size()==1,"IQ stream start is the only tune request");
+    auto& iq=warm.messages.back();
+    Require(sms_get_le16(iq.data())==MSG_IQ_STREAM_REQ && iq[2]==201 && iq.size()==12 && sms_get_le32(iq.data()+8)==138750000 &&
+        warm.responses.back()==MSG_IQ_STREAM_RES,"IQ stream request carries the exact frequency in Hz");
+    auto before=warm.messages.size();
+    Require(f.SetIqStream(89999999)==-EINVAL && f.SetIqStream(775000001)==-EINVAL && warm.messages.size()==before,"J.83B range");
+    Require(f.SetIqStream(0)==0 && sms_get_le32(warm.messages.back().data()+8)==0,"IQ stream stop");
+    Mock plain;plain.mode=6;plain.fail_type=MSG_IQ_STREAM_REQ;Frontend p(plain);
+    Require(p.SetIqStream(138750000)==-ETIMEDOUT,"firmware without IQ support times out");
 }
-int main() {Download();TuneAndStats();Frames();Generations();FirmwarePaths();std::puts("PASS: Siano boot/reload, warm mode, tune, PID, errors, stats, split frames, capture generations and firmware paths");}
+}
+int main() {Download();TuneAndStats();Frames();Generations();FirmwarePaths();J83b();std::puts("PASS: Siano boot/reload, warm mode, tune, PID, errors, stats, split frames, capture generations, firmware paths and J.83B requests");}

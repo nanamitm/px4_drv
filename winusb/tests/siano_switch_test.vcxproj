@@ -62,6 +62,7 @@
 
     <ClCompile Include="..\src\DriverHost_PX4\siano\frontend.cpp" />
     <ClCompile Include="..\src\DriverHost_PX4\siano\device.cpp" />
+    <ClCompile Include="..\src\DriverHost_PX4\siano\iq_helper.cpp" />
     <ClCompile Include="..\src\DriverHost_PX4\siano\protocol.c" />
     <ClCompile Include="..\src\DriverHost_PX4\device_base.cpp" />
     <ClCompile Include="..\src\DriverHost_PX4\receiver_base.cpp" />

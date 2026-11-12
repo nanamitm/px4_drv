@@ -14,6 +14,7 @@ public:
     ReceiverBase* GetReceiver(int) const override;
 private:
     HANDLE removed_=nullptr;
+    std::uintptr_t index_;
     std::unique_ptr<Receiver> receiver_;
 };
 }
