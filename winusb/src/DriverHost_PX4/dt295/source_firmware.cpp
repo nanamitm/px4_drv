@@ -745,6 +745,7 @@ void SourceFirmware::RecordRing(uint32_t producer)
         return;
     const auto pending = producer >= cursor_ ? producer - cursor_ : RingSize - cursor_ + producer;
     ++ring_services_;
+    last_pending_ = pending;
     ring_peak_ = (std::max)(ring_peak_, pending);
     if (pending > RingSize / 4 * 3 && !ring_high_++)
         msg_warn("PIX-DT295: TS ring high pending=%u ring=%u cursor=%u producer=%u\n", pending, RingSize, cursor_, producer);
@@ -790,6 +791,7 @@ int SourceFirmware::Service()
             return -EPROTO;
         }
         cursor_ = next;
+        last_sent_ = count;
         RecordRing(Be(&reply[32]));
         return 0;
     } catch (int error) {
