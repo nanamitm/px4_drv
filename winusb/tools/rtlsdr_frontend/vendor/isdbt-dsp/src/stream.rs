@@ -8,7 +8,7 @@ use crate::deinterleave::{data_carrier_indices, freq_deinterleave, TimeDeinterle
 use crate::demap::{qpsk_soft, BitDeinterleaverQpsk};
 use crate::demod::OfdmDemod;
 use crate::equalize::{
-    detect_symbol_phase, equalize, estimate_channel, extract_segment, SEGMENT_BIN_OFFSET,
+    detect_symbol_phase, equalize, estimate_channel, extract_segment, sp_coherence, SEGMENT_BIN_OFFSET,
 };
 use crate::iq::u8_iq_to_complex;
 use crate::params::{GuardInterval, FFT_LEN};
@@ -55,6 +55,38 @@ fn track_symbol(buf: &[Complex32], cur: usize, lk: &mut Locked) -> usize {
         }
     }
     cur
+}
+
+// RTL-SDR の I/Q は受信中にまれに数百サンプル単位で欠落する（実機で 94・234・868 サンプルを観測）。
+// 欠落で FFT 窓が狭域追跡の範囲 (CP/4) を越えると、信号が良好でも RS が全滅し、
+// helper の「5秒 TS なし」による再ロックまで回復しない。
+// 半シンボル幅で CP 相関の明確なピークを探して窓を移し、シンボル単位の欠落は
+// パイロット位相から欠けた数を求めて消失シンボルで埋め、デインターリーバー・Viterbi・PRBS の位置を保つ。
+const RESYNC_METRIC: f32 = 0.9;
+// 位相が合う場合の SP コヒーレンスは実測 0.977 以上、シンボル単位でずれた場合は
+// 期待位相側が 0.292 以下・最大側が 0.981 以上だった。境界から離れた値で判定し、
+// 雑音による消失シンボルの挿入を避ける。
+const PILOT_MATCH: f32 = 0.9;
+const PILOT_MISMATCH: f32 = 0.5;
+
+/// 欠落を検出した場合に (新しいシンボル開始位置, 欠けたシンボル数) を返す。
+fn resync_symbol(demod: &OfdmDemod, buf: &[Complex32], cur: usize, k: usize, lk: &Locked) -> Option<(usize, usize)> {
+    let wide = lk.sym / 2;
+    let span = lk.gi.cp_len(FFT_LEN) / 4;
+    if cur < wide || cur + lk.sym + wide > buf.len() { return None; }
+    let est = estimate_symbol_sync(&buf[cur - wide..cur + lk.sym + wide], FFT_LEN, lk.gi)?;
+    if est.metric < RESYNC_METRIC { return None; }
+    let next = cur - wide + est.symbol_start;
+    let pilots = SegmentPilots::center_1seg();
+    let seg = extract_segment(&demod.demod_one(buf, next, lk.gi, lk.cfo), SEGMENT_BIN_OFFSET);
+    let (phase, best) = detect_symbol_phase(&seg, &pilots);
+    let expected = (lk.phase0 + k) % 4;
+    let symbol_slip = sp_coherence(&seg, expected, &pilots) < PILOT_MISMATCH && best >= PILOT_MATCH;
+    if next.abs_diff(cur) <= span && !symbol_slip { return None; }
+    // 4シンボル以上の欠落は位相だけでは区別できず、従来どおり helper の再ロックで回復する。
+    let skip = if symbol_slip { (phase + 4 - expected) % 4 } else { 0 };
+    eprintln!("Symbol resync: offset={} metric={:.2} skipped_symbols={skip}", next as isize - cur as isize, est.metric);
+    Some((next, skip))
 }
 
 // 逆拡散系列は64ブロック周期で全候補に共通。候補ごとの再生成を避ける。
@@ -496,7 +528,17 @@ impl StreamingDecoder {
             let mut n = 0;
             while self.cur + lk.sym <= self.buf.len() && n < max {
                 if self.k > 0 && self.k % 204 == 0 {
-                    self.cur = track_symbol(&self.buf, self.cur, &mut lk);
+                    if let Some((next, skip)) = resync_symbol(&self.demod, &self.buf, self.cur, self.k, &lk) {
+                        self.cur = next;
+                        let erased = vec![Complex32::new(0.0, 0.0); FFT_LEN];
+                        for _ in 0..skip {
+                            self.pipe.as_mut().unwrap().process(&erased, lk.phase0, self.k, &mut out);
+                            self.k += 1;
+                        }
+                        if self.cur + lk.sym > self.buf.len() { break; }
+                    } else {
+                        self.cur = track_symbol(&self.buf, self.cur, &mut lk);
+                    }
                 }
                 let spec = self.demod.demod_one(&self.buf, self.cur, lk.gi, lk.cfo);
                 self.pipe
@@ -557,5 +599,41 @@ mod startup_regression {
         assert_eq!(track_symbol(&buf,start-5,&mut lk),start);
         assert_eq!(track_symbol(&buf,start+5,&mut lk),start);
         assert!(lk.cfo.abs()<0.001);
+    }
+    // CP 付きの乱数シンボルを並べ、各シンボルの開始位置を返す。
+    fn cp_symbols(count: usize, lead: usize) -> (Vec<Complex32>, Vec<usize>) {
+        let n=FFT_LEN;
+        let mut state=7u32;
+        let mut buf=vec![Complex32::new(0.0,0.0);lead];
+        let mut starts=Vec::new();
+        for _ in 0..count {
+            let body: Vec<Complex32>=(0..n).map(|_| {
+                state=state.wrapping_mul(1664525).wrapping_add(1013904223);
+                let re=(state>>8) as f32/16777216.0-0.5;
+                state=state.wrapping_mul(1664525).wrapping_add(1013904223);
+                Complex32::new(re,(state>>8) as f32/16777216.0-0.5)
+            }).collect();
+            starts.push(buf.len());
+            buf.extend_from_slice(&body[n-128..]);buf.extend_from_slice(&body);
+        }
+        (buf,starts)
+    }
+    #[test]
+    fn resyncs_after_samples_are_lost_beyond_tracking_range() {
+        let (buf,starts)=cp_symbols(4,0);
+        let lk=Locked {gi:GuardInterval::G1_8,cfo:0.0,sym:1152,phase0:0};
+        let demod=OfdmDemod::new(FFT_LEN);
+        // 234サンプルの欠落相当: 本来の開始位置より後ろに窓が残る。乱数データにはパイロットがないためシンボル数は補わない。
+        assert_eq!(resync_symbol(&demod,&buf,starts[1]+234,204,&lk),Some((starts[1],0)));
+        assert_eq!(resync_symbol(&demod,&buf,starts[1]-300,204,&lk),Some((starts[1],0)));
+    }
+    #[test]
+    fn keeps_position_within_tracking_range() {
+        let (buf,starts)=cp_symbols(4,0);
+        let lk=Locked {gi:GuardInterval::G1_8,cfo:0.0,sym:1152,phase0:0};
+        let demod=OfdmDemod::new(FFT_LEN);
+        for shift in [0isize,-20,20,32,-32] {
+            assert_eq!(resync_symbol(&demod,&buf,(starts[1] as isize+shift) as usize,204,&lk),None, "shift={shift}");
+        }
     }
 }
