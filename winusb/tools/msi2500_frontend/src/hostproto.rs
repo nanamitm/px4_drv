@@ -3,6 +3,11 @@
 //!
 //! 1 フレームは little endian の 24 バイトのヘッダー (magic、種別、payload 長、品質 0〜10000、RS 成功数、RS 失敗数) と
 //! payload からなる。種別 1 は USB の初期化完了、2 は 188 バイト単位の TS、3 は状態、4 はエラー文字列。
+//!
+//! 状態の payload は空か、先頭 4 バイトに復調器の MER (dB×100、0〜10000 の符号なし整数) を置く。
+//! 品質は RS の成功割合で C/N の表示に使えないため、MER を別に渡す。ヘッダーの形を変えると
+//! RTL-SDR の helper と古い DriverHost の解釈が変わるため、payload へ追加した。MER を測れていない間
+//! (判定帰還へ入る前など) は payload を空にする。
 
 use std::io::Write;
 
@@ -35,6 +40,14 @@ pub fn write_frame(out: &mut impl Write, kind: Kind, payload: &[u8], quality: u3
     }
     out.write_all(&h)?;
     out.write_all(payload)
+}
+
+/// 状態フレームの payload (MER がなければ空)
+pub fn status_payload(mer_db: Option<f32>) -> Vec<u8> {
+    match mer_db {
+        Some(m) if m.is_finite() => ((m * 100.0).round().clamp(0.0, 10_000.0) as u32).to_le_bytes().to_vec(),
+        _ => Vec::new(),
+    }
 }
 
 /// DriverHost は TEI の立ったパケット、adaptation_field_control が 0 のパケット、
@@ -78,6 +91,15 @@ mod tests {
         let w = |i: usize| u32::from_le_bytes(out[i * 4..i * 4 + 4].try_into().unwrap());
         assert_eq!((w(0), w(1), w(2), w(3), w(4), w(5)), (MAGIC, 2, 188, 10_000, 7, 3));
         assert_eq!(out.len(), 24 + 188);
+    }
+
+    #[test]
+    fn status_payload_carries_mer_x100() {
+        assert_eq!(status_payload(None), Vec::<u8>::new());
+        assert_eq!(status_payload(Some(f32::NAN)), Vec::<u8>::new());
+        assert_eq!(status_payload(Some(31.234)), 3123u32.to_le_bytes().to_vec());
+        assert_eq!(status_payload(Some(-3.0)), 0u32.to_le_bytes().to_vec());
+        assert_eq!(status_payload(Some(200.0)), 10_000u32.to_le_bytes().to_vec());
     }
 
     #[test]

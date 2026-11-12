@@ -11,6 +11,7 @@ use crate::j83b::{J83bDecoder, J83bStats};
 use crate::live::{Feeder, CHUNK_BLOCKS};
 use crate::qam::{QamDemod, QamStats};
 use crate::raw384::decode_block;
+use crate::s1ud::{S1udFrontend, BLOCK_BYTES as S1UD_BLOCK_BYTES, BLOCK_SAMPLES as S1UD_BLOCK_SAMPLES};
 use num_complex::Complex32;
 use std::collections::HashMap;
 use std::io::Write;
@@ -23,6 +24,8 @@ use std::time::Instant;
 const BLOCK: usize = 1024;
 /// MSi2500 の 8,126,984 S/s
 const FS: f64 = 512e6 / 63.0;
+/// PX-S1UD (SMS2270) の IQ の 12 MS/s
+const S1UD_FS: f64 = 12e6;
 
 pub struct J83bLiveConfig {
     /// 生ブロックのキューの長さ (チャンク数、1 チャンク約 12 ms)。live.rs の LiveConfig と同じ理由で 256 を使う
@@ -60,6 +63,8 @@ pub struct J83bLiveStats {
     /// 処理系の開始から最初の TS を出すまでの秒数
     pub first_ts_s: Option<f64>,
     pub write_failed: bool,
+    /// samples のサンプルレート。0 は MSi2500 の 8,126,984 S/s
+    pub sample_rate: f64,
 }
 
 impl J83bLiveStats {
@@ -71,7 +76,7 @@ impl J83bLiveStats {
     }
     /// 信号の秒数 (全区間)
     pub fn signal_s(&self) -> f64 {
-        self.samples as f64 / FS
+        self.samples as f64 / if self.sample_rate > 0.0 { self.sample_rate } else { FS }
     }
 }
 
@@ -133,6 +138,37 @@ impl J83bLive {
     /// キューが満杯で捨てたチャンクの数
     pub fn overflow_chunks(&self) -> u64 {
         self.overflow.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// PX-S1UD の IQ (s1ud.rs のブロック 14724 バイトを並べたチャンク) を受ける処理系。
+    /// 投入口はチャンクの送信側で、閉じると残りを処理して終わる (join で待つ)
+    pub fn start_s1ud(mut cfg: J83bLiveConfig) -> (J83bLive, SyncSender<Vec<u8>>) {
+        let (raw_tx, raw_rx) = sync_channel::<Vec<u8>>(cfg.raw_queue);
+        let (sym_tx, sym_rx) = sync_channel::<SymMsg>(cfg.symbol_queue);
+        let stats = Arc::new(Mutex::new(J83bLiveStats { segments: 1, sample_rate: S1UD_FS, ..Default::default() }));
+        let t0 = Instant::now();
+        let out = cfg.ts_out.take();
+        let st = stats.clone();
+        let fec = std::thread::Builder::new()
+            .name("j83b-fec".into())
+            .spawn(move || fec_loop(sym_rx, out, st, t0))
+            .expect("spawn fec thread");
+        let st = stats.clone();
+        let pll = cfg.pll_scale;
+        let qam = std::thread::Builder::new()
+            .name("s1ud-qam".into())
+            .spawn(move || s1ud_loop(raw_rx, sym_tx, st, pll))
+            .expect("spawn qam thread");
+        (J83bLive { overflow: Arc::new(AtomicU64::new(0)), stats, threads: vec![qam, fec] }, raw_tx)
+    }
+
+    /// 投入口を閉じた後に、キューに残った分を処理し終えるまで待って最終の統計を返す
+    pub fn join(mut self) -> J83bLiveStats {
+        for h in self.threads.drain(..) {
+            let _ = h.join();
+        }
+        let s = self.stats.lock().unwrap().clone();
+        s
     }
 
     /// 端数のチャンクを送って投入口を閉じ、キューに残った分を処理し終えるまで待って最終の統計を返す。
@@ -206,6 +242,32 @@ fn qam_loop(rx: Receiver<Vec<u8>>, tx: SyncSender<SymMsg>, stats: Arc<Mutex<J83b
         s.samples = total_samples;
         s.clipped = clipped;
         s.qam = demod.stats.clone();
+    }
+}
+
+/// PX-S1UD のブロックを S1udFrontend で復調する。チップやキューが落としたブロックはブロック番号から
+/// S1udFrontend が検出し、8 ブロックまではつなぎ、それより長ければ作り直す (作り直したら誤り訂正へも伝える)
+fn s1ud_loop(rx: Receiver<Vec<u8>>, tx: SyncSender<SymMsg>, stats: Arc<Mutex<J83bLiveStats>>, pll: f32) {
+    let mut front = S1udFrontend::new(S1UD_FS, pll);
+    let mut syms = Vec::new();
+    'outer: for chunk in rx {
+        for blk in chunk.chunks_exact(S1UD_BLOCK_BYTES) {
+            syms.clear();
+            if front.push_block(blk, &mut syms) && tx.send(SymMsg::Reset).is_err() {
+                break 'outer;
+            }
+            if !syms.is_empty() && tx.send(SymMsg::Syms(std::mem::take(&mut syms))).is_err() {
+                break 'outer;
+            }
+        }
+        let mut s = stats.lock().unwrap();
+        s.blocks = front.stats.blocks;
+        s.lost_samples = front.stats.lost_blocks * S1UD_BLOCK_SAMPLES as u64;
+        s.gaps = front.stats.lost_blocks;
+        s.segments = front.stats.resets + 1;
+        // 復調器は作り直すたびに数え直すため、受けたブロック数から全区間のサンプル数を求める
+        s.samples = front.stats.blocks * S1UD_BLOCK_SAMPLES as u64;
+        s.qam = front.demod_stats().clone();
     }
 }
 

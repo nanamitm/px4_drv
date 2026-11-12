@@ -14,9 +14,16 @@
 
 int wmain(int argc,wchar_t** argv)
 {
-    if (argc!=4) {std::puts("Usage: siano_live_test channel seconds output.ts");return 2;}
-    const unsigned channel=wcstoul(argv[1],nullptr,10),seconds=wcstoul(argv[2],nullptr,10);
-    if (channel<13 || channel>62 || !seconds || seconds>3600) return 2;
+    // J.83B は "j83b:中心周波数 (kHz)" と、[PX-S1UD] 節に J83BFirmwarePath と HelperPath を書いた INI で指定する。
+    // 長時間受信の確認に使うため、J.83B の時間の上限は 48 時間とする
+    const bool j83b=argc==5 && wcsncmp(argv[1],L"j83b:",5)==0;
+    if (argc!=4 && !j83b) {
+        std::puts("Usage: siano_live_test channel seconds output.ts\n"
+                  "       siano_live_test j83b:FREQUENCY_KHZ seconds output.ts config.ini");
+        return 2;
+    }
+    const unsigned channel=wcstoul(argv[1]+(j83b ? 5 : 0),nullptr,10),seconds=wcstoul(argv[2],nullptr,10);
+    if (j83b ? (channel<90000 || channel>775000 || !seconds || seconds>48*3600) : (channel<13 || channel>62 || !seconds || seconds>3600)) return 2;
     msg_set_mode(static_cast<msg_mode>(MSG_MODE_CONSOLE|MSG_MODE_TIMESTAMP));
     const GUID guid={0xba60b2ee,0x5f40,0x40ca,{0xbc,0x5d,0xb4,0xdd,0x0f,0xc5,0x65,0x11}};
     HDEVINFO list=SetupDiGetClassDevsW(&guid,nullptr,nullptr,DIGCF_DEVICEINTERFACE|DIGCF_PRESENT);
@@ -31,7 +38,8 @@ int wmain(int argc,wchar_t** argv)
     if (!SetupDiGetDeviceInterfaceDetailW(list,&entry,detail,size,nullptr,nullptr)) {SetupDiDestroyDeviceInfoList(list);return 2;}
     const std::wstring path=detail->DevicePath;SetupDiDestroyDeviceInfoList(list);
     px4::DeviceDefinition definition{};definition.name=L"PLEX PX-S1UD";definition.device_interface_guid=guid;
-    definition.receivers.push_back({L"PX-S1UD ISDB-T",{},px4::SystemType::ISDB_T,0});
+    definition.receivers.push_back({L"PX-S1UD ISDB-T",{},j83b ? px4::SystemType::ISDB_T|px4::SystemType::J83B : px4::SystemType::ISDB_T,0});
+    if (j83b && !definition.configs.Load(argv[4],L"PX-S1UD")) {std::puts("Config load failed ([PX-S1UD] section)");return 2;}
     px4::ReceiverManager manager;
     try {
         px4::siano::Device device(path,definition,0,manager);
@@ -74,9 +82,10 @@ int wmain(int argc,wchar_t** argv)
             int Finish() {int ret=r->SetCapture(false);r->GetStreamBuffer()->StopRequest();if (reader.joinable()) reader.join();stopped=true;return ret;}
             ~Stop(){if (!stopped) Finish();}
         } stop{receiver,reader};
-        px4::command::ParameterSet parameters{};parameters.system=px4::SystemType::ISDB_T;
-        parameters.freq=(channel*6+395)*1000+143;
-        std::printf("channel=%u frequency_khz=%u duration_seconds=%u arch_bits=%zu\n",channel,parameters.freq,seconds,sizeof(void*)*8);
+        px4::command::ParameterSet parameters{};parameters.system=j83b ? px4::SystemType::J83B : px4::SystemType::ISDB_T;
+        parameters.freq=j83b ? channel : (channel*6+395)*1000+143;
+        std::printf("system=%s channel=%u frequency_khz=%u duration_seconds=%u arch_bits=%zu\n",j83b ? "J.83B" : "ISDB-T",
+            j83b ? 0 : channel,parameters.freq,seconds,sizeof(void*)*8);
         if (!receiver->SetParameters(parameters) || !receiver->Tune(5000)) {std::puts("Tune failed");return 1;}
         std::puts("Tuned and demod locked");
         const auto begin=std::chrono::steady_clock::now();bool failed=false;
@@ -94,6 +103,10 @@ int wmain(int argc,wchar_t** argv)
             static_cast<unsigned long long>(packets),static_cast<unsigned long long>(sync),static_cast<unsigned long long>(tei),
             static_cast<unsigned long long>(cc_errors),static_cast<unsigned long long>(malformed),
             static_cast<unsigned long long>(diagnostics.rejected_bytes),static_cast<unsigned long long>(diagnostics.purge_write_discarded_bytes),stop_ret,write_error.load());
+        // J.83B では、チップが USB へ送り切れずに IQ のブロックを落とすことがある (BonDriver_S1UD.dll でも約 2 %)。
+        // 8 ブロックを超える欠落は復調を作り直すため TS が途切れ、continuity counter の不連続として現れる。
+        // その数は数値として報告し、成否は同期・形式・配信・停止の誤りとロックの維持で判定する
+        if (j83b) return failed || !packets || sync || tei || malformed || diagnostics.rejected_bytes || stop_ret || write_error ? 1 : 0;
         return failed || !packets || sync || tei || cc_errors || malformed || diagnostics.rejected_bytes || stop_ret || write_error ? 1 : 0;
     } catch (const std::exception& e) {std::printf("Failure: %s\n",e.what());return 1;}
 }

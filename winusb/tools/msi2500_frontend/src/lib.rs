@@ -14,4 +14,5 @@ pub mod qam;
 pub mod raw384;
 pub mod regs;
 pub mod remux;
+pub mod s1ud;
 pub mod usb;
