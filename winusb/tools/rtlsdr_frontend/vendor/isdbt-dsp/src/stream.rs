@@ -23,7 +23,11 @@ const RESET_PERIOD: usize = 64; // 1 OFDMフレーム = 64 RSブロック
 const PRBS_INIT: u16 = 0xa9;
 const TB_DEPTH: usize = 96;
 const BYTE_LATENCY: usize = BI_M * BI_I * (BI_I - 1);
-const LOCK_SYMS: usize = 4000;
+// lock_params が評価するのは warmup(500シンボル) 後の先頭128 RSブロックだけで、
+// commutator・バイトデインターリーブ遅延・位相を含めて約950シンボルで揃う。
+// 同期位置が探索窓末尾 (350,000サンプル) でも約1,175シンボル残る値とし、
+// 不足時の再蓄積と、選局ごとの約3.5秒分の余分な I/Q 蓄積・Viterbi を避ける。
+const LOCK_SYMS: usize = 1200;
 const COMPACT_AT: usize = 8 * 1024 * 1024;
 // 1回の feed/pump で処理する最大シンボル数（≈50msぶん）。呼び出し側が描画を挟めるように分割。
 const MAX_SYMS_PER_CALL: usize = 64;
