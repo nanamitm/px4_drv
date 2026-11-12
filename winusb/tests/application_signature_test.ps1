@@ -84,5 +84,23 @@ $manifest=Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
 $manifest.Files.'rtlsdr\rtlsdr_frontend.exe'=(Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash
 $manifest | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $manifestPath -Encoding ascii
 Rejected {Test-Px4ApplicationSignatures $rtlTampered} 'Modified RTL-SDR helper accepted after rewriting its manifest hash.'
+# PIX-DT295 の検査ツールも、欠落とマニフェストの書き換えを BonDriver と同じ基準で拒否する。
+$dt295Source=Join-Path (Resolve-Path -LiteralPath $DistributionPath).Path 'BonDriver_DT295_64bit'
+Assert ((RunTrust $dt295Source Verify) -eq 0) 'PIX-DT295 distribution Verify entry point failed.'
+$dt295Missing=Join-Path $area 'dt295-missing-stress-tool'
+Copy-Item -LiteralPath $dt295Source -Destination $dt295Missing -Recurse
+Remove-Item -LiteralPath (Join-Path $dt295Missing 'channel_switch_stress.exe')
+Rejected {Test-Px4ApplicationSignatures $dt295Missing} 'PIX-DT295 stress tool omission accepted.'
+$dt295Tampered=Join-Path $area 'dt295-tampered-stress-tool'
+Copy-Item -LiteralPath $dt295Source -Destination $dt295Tampered -Recurse
+$file=Join-Path $dt295Tampered 'channel_switch_stress.exe'
+$bytes=[IO.File]::ReadAllBytes($file);$pe=[BitConverter]::ToInt32($bytes,0x3c)
+$section=$pe+24+[BitConverter]::ToUInt16($bytes,$pe+20);$raw=[BitConverter]::ToInt32($bytes,$section+20)
+$bytes[$raw]=$bytes[$raw] -bxor 1;[IO.File]::WriteAllBytes($file,$bytes)
+$manifestPath=Join-Path $dt295Tampered 'application-signatures.json'
+$manifest=Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
+$manifest.Files.'channel_switch_stress.exe'=(Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash
+$manifest | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $manifestPath -Encoding ascii
+Rejected {Test-Px4ApplicationSignatures $dt295Tampered} 'Modified PIX-DT295 stress tool accepted after rewriting its manifest hash.'
 Assert ((Snapshot) -ceq $before) 'Tests changed certificate stores.'
 Write-Host "PASS: all signed folders, tampering, rewritten/omitted manifests, unsigned PE, pinned signer and unchanged stores. Evidence: $area"

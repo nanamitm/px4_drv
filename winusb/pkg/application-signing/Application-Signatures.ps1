@@ -28,6 +28,13 @@ function Get-Px4ApplicationFiles([string]$Directory) {
     $bon=@(Get-ChildItem -LiteralPath $Directory -File | Where-Object {$_.Name -match '^BonDriver_[A-Za-z0-9_-]+\.dll$'})
     if(-not $bon.Count){throw 'No BonDriver DLL in the distribution folder.'}
     $required=@('DriverHost_PX4.exe','WinSCard.dll')+@($bon.Name)
+    if (Test-Path -LiteralPath (Join-Path $Directory 'BonDriver_DT295.dll')) {
+        # PIX-DT295 の配布物は、同梱 BonDriver で選局反復と TS を検査する channel_switch_stress.exe を含む。
+        # 利用者が配布フォルダーから実行するため、ほかの EXE と同じ発行者の署名で検証する。
+        $helper='channel_switch_stress.exe'
+        if (-not (Test-Path -LiteralPath (Join-Path $Directory $helper) -PathType Leaf)) { throw "Missing required binary: $helper" }
+        $required += $helper
+    }
     $all=@(Get-ChildItem -LiteralPath $Directory -File | Where-Object {$_.Extension -in '.exe','.dll'} | ForEach-Object {$_.Name})
     if(@(Compare-Object $required $all).Count){throw 'Unexpected executable in the distribution folder.'}
     if (Test-Path -LiteralPath (Join-Path $Directory 'BonDriver_RTLSDR.dll')) {
