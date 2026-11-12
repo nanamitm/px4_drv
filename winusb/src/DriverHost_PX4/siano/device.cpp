@@ -18,6 +18,9 @@ namespace {
 using Clock=std::chrono::steady_clock;
 // 上流 Windows と同じ 32 x 16 KiB。制御応答と TS は同じ bulk IN を通る。
 constexpr std::size_t TransferSize=16384, TransferCount=32;
+// 受信の開始時に読み飛ばす、前のホストの残りの転送の上限。実機の残りは 1 回の転送だった。
+// 上限を超えても解釈できない場合は、残りではなく形式の異常として受信を止める
+constexpr unsigned MaxStaleTransfers=4;
 int UsbError(DWORD e)
 {
     if (e==ERROR_DEVICE_NOT_CONNECTED || e==ERROR_OPERATION_ABORTED || e==ERROR_INVALID_HANDLE) return -ECANCELED;
@@ -492,6 +495,8 @@ private:
             if (!submit(r)) return;
         }
         std::uint64_t malformed=0,iq_malformed=0,iq_blocks_seen=0;
+        // 受信の開始後に最初のメッセージを解釈したか、それまでに読み飛ばした転送の数
+        bool synchronized=false; unsigned stale=0;
         Clock::time_point last_iq{};
         std::size_t next=0;
         while (!stop_ && !Removed() && !error_) {
@@ -539,14 +544,21 @@ private:
                 t.completed_at=(static_cast<std::uint64_t>(ft.dwHighDateTime)<<32)|ft.dwLowDateTime;
                 t.slot=static_cast<unsigned>(next);t.bytes=n;trace=&tracer.Begin(t);
             }
-            if (n) {
-                sms_frame frame{};
-                const auto parse=sms_frame_message(r.data.data(),n,alignment_,&frame);
+            sms_frame frame{};
+            const auto parse=n ? sms_frame_message(r.data.data(),n,alignment_,&frame) : 0;
+            if (parse && !synchronized && stale<MaxStaleTransfers) {
+                // 前のホストが受信を止めたとき、メッセージの途中で取り消した読み取りの残りは機器側に残り、
+                // ホストのパイプのリセットでは消えない。実機では、先頭が TS の途中の 1 回の転送だけで、
+                // その後は境界から読めた。最初のメッセージを解釈するまでは、この残りを読み飛ばす
+                ++stale;
+                msg_warn("PX-S1UD: skipped a stale USB transfer bytes=%lu ret=%d\n",n,parse);
+            } else if (n) {
                 if (parse) {
                     ++malformed;error_=-EBADMSG;
                     msg_err("PX-S1UD: invalid USB frame bytes=%lu alignment=%zu ret=%d\n",n,alignment_,parse);
                     break;
                 }
+                synchronized=true;
                 if (trace) {trace->frame_type=frame.type;trace->frame_length=frame.length;trace->frame_flags=frame.flags;}
                 const auto* p=r.data.data()+frame.payload_offset;
                 if (frame.type==MSG_IQ_DATA) {
