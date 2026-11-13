@@ -15,20 +15,35 @@
 #define LIMIT 0x00d0202cu
 #define MAGIC 0x585a4931u
 
-/* XZ常駐部で確認した地デジ用の入力設定。DMAの始動は最後に行う。 */
-static const struct reg_setting {
-    uint32_t address, value;
-} setup[] = {
-    {0xd00004, 0x43305},
-    {0xd01040, 0}, {0xd01064, 0}, {0xd010a0, 0}, {0xd010a4, 0},
-    {0xd010a8, 0}, {0xd01020, 0x02000000}, {0xd01004, 0x04000000},
-    {0xd01044, 0x00bc0000}, {0xd01048, 0x47000000}, {0xd0104c, 0x00ffffff},
-    {0xd01050, 0}, {0xd01060, 0}, {0xd01080, 0x01000000},
-    {0xd01088, 0}, {0xd0108c, 0xffffffff}, {0xd01084, 0}, {0xd01090, 0x01000000},
-    {0xd02020, RING & 0x7fffffffu}, {0xd02024, RING_SIZE}, {0xd02000, 0x03020300},
-    {PRODUCER, 0}, {LIMIT, 0}, {0xd02030, 0},
+/*
+ * XZ常駐部で確認した地デジ用の入力設定。DMAの始動は最後に行う。
+ * 番地はすべてTSブロック (0xd00000〜0xd03fff) にあるため、本体の窓を節約するよう
+ * 0xd00000からの16ビットの差分と値を別の表に持つ。書き込む値と順序は同じ。
+ */
+#define SETUP_BASE 0xd00000u
+static const uint16_t setup_offset[] = {
+    0x0004,
+    0x1040, 0x1064, 0x10a0, 0x10a4,
+    0x10a8, 0x1020, 0x1004,
+    0x1044, 0x1048, 0x104c,
+    0x1050, 0x1060, 0x1080,
+    0x1088, 0x108c, 0x1084, 0x1090,
+    0x2020, 0x2024, 0x2000,
+    PRODUCER - SETUP_BASE, LIMIT - SETUP_BASE, 0x2030,
 };
-#define NSETUP (sizeof(setup)/sizeof(setup[0]))
+static const uint32_t setup_value[] = {
+    0x43305,
+    0, 0, 0, 0,
+    0, 0x02000000, 0x04000000,
+    0x00bc0000, 0x47000000, 0x00ffffff,
+    0, 0, 0x01000000,
+    0, 0xffffffff, 0, 0x01000000,
+    RING & 0x7fffffffu, RING_SIZE, 0x03020300,
+    0, 0, 0,
+};
+#define NSETUP (sizeof(setup_value)/sizeof(setup_value[0]))
+_Static_assert(sizeof(setup_offset)/sizeof(setup_offset[0]) == NSETUP, "setup tables must match");
+#define SETUP_REG(i) REG(SETUP_BASE + setup_offset[i])
 
 #define SELECTOR 0xfd814cu
 #define EP_MODE 0xfdbc04u
@@ -37,7 +52,13 @@ static const struct reg_setting {
 #define EP_STATUS 0xfdbd0cu
 #define EP_FIFO 0xfdbd84u
 #define BULK_SIZE 196608u
+/* 操作12の既定かつ最大の送出量。 */
 #define STREAM_UNIT (3u * 1024 * 1024)
+/*
+ * 操作12の送出量の単位。192バイトのレコードと512バイトのUSB送出の最小公倍数で、
+ * 6 MiBのリングも割り切れるため、各要求はレコード境界で終わる。
+ */
+#define STREAM_GRAIN 1536u
 
 /* 本体と一緒に初期化し、STARTからSTOPまでの退避値を保持する。 */
 static struct {
@@ -54,6 +75,7 @@ static void ep_write(unsigned group,unsigned address,uint32_t value)
     REG(SELECTOR)=15;
 }
 
+#ifndef XZ_TS_RUNTIME
 static unsigned ep_ready(void)
 {
     for(unsigned polls=0;polls<250000;++polls)
@@ -61,7 +83,6 @@ static unsigned ep_ready(void)
     return 0;
 }
 
-#ifndef XZ_TS_RUNTIME
 static void bulk_snapshot(uint32_t *reply)
 {
     reply[4]=REG(EP_MODE);
@@ -110,8 +131,11 @@ static void stream_ring(uint32_t *reply,unsigned target)
     reply[5]=cursor;
     reply[6]=producer;
     reply[7]=sent;
+#ifndef XZ_TS_RUNTIME
+    /* 診断版だけが使う。共通版は本体の窓を節約するため返さない。 */
     reply[8]=ep_ready();
     reply[9]=REG(EP_STATUS);
+#endif
 }
 static unsigned endpoint_ready(void)
 {
@@ -122,7 +146,7 @@ static unsigned endpoint_ready(void)
 static void start_capture(unsigned reset)
 {
     capture.cursor=0;
-    for(unsigned i=0;i<NSETUP;++i) capture.saved[i]=REG(setup[i].address);
+    for(unsigned i=0;i<NSETUP;++i) capture.saved[i]=SETUP_REG(i);
     capture.pin=REG16(0xd01000);
     capture.pin_next=REG16(0xd01002);
     if(reset && REG(0xd00000)) {
@@ -133,7 +157,7 @@ static void start_capture(unsigned reset)
     }
     REG16(0xd01000)=0x600;
     REG16(0xd01002)=0;
-    for(unsigned i=0;i<NSETUP;++i) REG(setup[i].address)=setup[i].value;
+    for(unsigned i=0;i<NSETUP;++i) SETUP_REG(i)=setup_value[i];
     REG16(0xd01000)=0x607;
     REG(0xd01020)=0;
     REG(0xd01040)=0x03000000;
@@ -159,7 +183,7 @@ static uint32_t stop_capture(void)
 static void restore_capture(uint32_t state)
 {
     if(state) return;
-    for(unsigned i=NSETUP;i>0;--i) REG(setup[i-1].address)=capture.saved[i-1];
+    for(unsigned i=NSETUP;i>0;--i) SETUP_REG(i-1)=capture.saved[i-1];
     REG16(0xd01000)=capture.pin;
     REG16(0xd01002)=capture.pin_next;
     capture.active=0;
@@ -168,11 +192,13 @@ static void restore_capture(uint32_t state)
 #ifdef XZ_TS_RUNTIME
 static uint32_t read_cn(unsigned address)
 {
-    const uint8_t reg = address == 0x18 ? 0x8b : 0xbc;
-    const unsigned size = address == 0x18 ? 3 : 2;
+    /* 地デジは0x18の0x8bから3バイト、衛星は0x19の0xbcから2バイト。0x18以外は衛星として扱う。 */
+    const unsigned terrestrial = address == 0x18;
+    const uint8_t reg = terrestrial ? 0x8b : 0xbc;
+    const unsigned size = terrestrial ? 3 : 2;
     uint8_t bytes[3];
     /* DMAの消費を止める時間を抑えるため、統計取得の待機上限を短くする。 */
-    if (transfer_with_budget(address, &reg, 1, bytes, size, 4000u))
+    if (transfer_with_budget(terrestrial ? 0x18 : 0x19, &reg, 1, bytes, size, 4000u))
         return 0;
     uint32_t raw = 0;
     for (unsigned i = 0; i < size; ++i)
@@ -185,8 +211,9 @@ static void tune_transfer(uint32_t packet[16])
     unsigned error = XZ_INVALID;
     uint8_t *payload = (uint8_t *)(packet + 6);
     /* 選局操作はDMAを止めてから。送信を終えたペイロードへ受信データを格納する。 */
+    /* 長さ0の転送は復調器のアドレスだけを送り、状態を変えないため拒否しない。 */
     if (!capture.active && (address == 0x18 || address == 0x19) &&
-        tx <= 40 && rx <= 40 - tx && (tx || rx)) {
+        tx <= 40 && rx <= 40 - tx) {
         error = XZ_NOT_READY;
         if ((XZ_I2C_READ(I2C_DIVIDER) & 0x7fu) == 0x3cu)
             error = transfer(address, payload, tx, payload, rx);
@@ -195,6 +222,32 @@ static void tune_transfer(uint32_t packet[16])
     packet[3] = error;
     packet[4] = error ? 0 : 1;
     packet[5] = error ? 0 : rx;
+}
+/*
+ * 操作14: カードUARTのFIFOの一括転送。boot0のメモリ要求は1語ごとに約3 msかかり、
+ * カードの1バイトごとに1往復では、受信中のT=1の応答待ちに間に合わない。
+ * ワード3のバイト数をペイロードから送信FIFO (0xfea028) へ積み、続けて受信FIFO
+ * (0xfea014の上位16ビットが受信数) から最大31バイトをペイロードへ読む。
+ * 応答のワード5は読んだバイト数。送信開始などのレジスター操作はホストが行う。
+ * 本体の窓に余裕がないため、範囲の検査の代わりに送信のバイト数を下位5ビット
+ * (0〜31) へ切り詰め、どちらも40バイトのペイロードを超えないようにする。
+ * DMAの動作中も実行でき、TSのリングとI²Cには触れない。
+ */
+static void card_fifo(uint32_t packet[16])
+{
+    volatile uint32_t *uart = (volatile uint32_t *)0xfea000u;
+    const unsigned tx = packet[3] & 31u;
+    uint8_t *payload = (uint8_t *)(packet + 6);
+    for (unsigned i = 0; i < tx; ++i)
+        uart[10] = payload[i];
+    unsigned count = uart[5] >> 16;
+    if (count > 31u)
+        count = 31u;
+    for (unsigned i = 0; i < count; ++i)
+        payload[i] = (uint8_t)uart[11];
+    packet[2] |= 0x80000000u;
+    packet[3] = 0;
+    packet[5] = count;
 }
 #endif
 
@@ -208,18 +261,32 @@ void xz_i2c_relay(uint32_t packet[16])
         tune_transfer(packet);
         return;
     }
+    if(op==14) {
+        card_fifo(packet);
+        return;
+    }
     const unsigned cn_address=packet[4];
-    if(op<11 || op>13 || packet[3] || packet[5] ||
-       (cn_address && (op!=12 || (cn_address!=0x18 && cn_address!=0x19))))
+    /*
+     * 操作12のワード5の下位2ビットは送出量の段階で、STREAM_UNITを右へずらす数
+     * （0から3で3 MiB、1.5 MiB、768 KiB、384 KiB）。どの段階もSTREAM_GRAINの倍数になる。
+     * 操作12の間はEP0が応答せず、カードUARTの操作を挟めない。ホストは流量に合わせて
+     * 1回の時間を短く保つ一方、要求ごとの固定の負担がUSB FIFOへの送出の余裕を削らない
+     * 段階を選ぶ。本体の窓に余裕がないため、範囲の検査の代わりに2ビットへ切り詰める。
+     * 操作11と13はstream_targetを使わない。
+     * ワード4のC/Nの番地も検査の代わりに、read_cnが0x18以外を0x19として扱う。
+     * 操作11と13はワード4を使わない。
+     */
+    if(op<11 || op>13 || packet[3])
         return;
     const unsigned stream=0;
+    const unsigned stream_target=STREAM_UNIT>>(packet[5]&3u);
 #else
     if(packet[0]!=MAGIC || op<8 || op>13 || packet[3] || packet[4] || packet[5])
         return;
     const unsigned stream=op==10;
     const unsigned bulk=op==9;
-#endif
     const unsigned stream_target=STREAM_UNIT;
+#endif
     uint32_t *reply=packet+6;
     for(unsigned i=0;i<10;++i) reply[i]=0;
     packet[2]|=0x80000000u;
@@ -237,8 +304,11 @@ void xz_i2c_relay(uint32_t packet[16])
     if(op==12) {
         if(capture.active && endpoint_ready()) {
             stream_ring(reply,stream_target);
+#ifndef XZ_TS_RUNTIME
+            /* 共通版は本体の窓を節約するため返さない。消費前の書き込み位置はreply[6]にある。 */
             reply[1]=REG(RUN);
             reply[2]=REG(PRODUCER);
+#endif
             packet[3]=reply[7]==stream_target ? 0 : 2;
 #ifdef XZ_TS_RUNTIME
             /* DMAは動作したまま。I²C失敗はC/Nだけを無効にし、TSの結果に伝播させない。 */
