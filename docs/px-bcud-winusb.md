@@ -19,7 +19,7 @@ Linux / macOS 版の PX-BCUD 対応は含まれていません。
 `winusb/pkg/DriverHost_PX4/DriverHost_PX4.ini` にあります。
 通常の `winusb/build.ps1` で `dist/BonDriver_PX-BCUD_32bit` と
 `dist/BonDriver_PX-BCUD_64bit` を作成し、共通の `dist/Driver` に INF と署名済みカタログを収録します。
-配布物の作成は公開リリースとは別の工程で、未確認項目の検証完了までリリースを保留しています。
+公開リリースの配布物にも含まれていますが、長時間録画とスリープ復帰は未確認です（本文末尾を参照）。
 
 ## 制御と受信
 
@@ -226,4 +226,3 @@ PX-BCUD はアンテナ給電に非対応です。外部給電と `LNBPower=0` �
 対応周波数は公開 PLL テーブルの範囲（入力 IF 950500 <= f < 2151500 kHz）で、
 新4K8K衛星放送の受信対応は含まれません。
 未確認の項目は、長時間録画時の受信安定性と、スリープ（サスペンド）復帰後の動作です。
-公開リリースは、これらの確認と、torneの[現行統合版の実機検証](../winusb/docs/torne-integration-notes.md)が完了してから行う方針です。
