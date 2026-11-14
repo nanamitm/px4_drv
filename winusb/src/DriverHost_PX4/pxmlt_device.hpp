@@ -145,11 +145,6 @@ private:
 
 		int SetNullPacketFilter(bool enable);
 
-		static const struct PxMltReceiverCnTableIsdbS final {
-			uint16_t val;
-			uint32_t cnr;
-		} isdbs_cn_table_[];
-
 		PxMltDevice &parent_;
 		std::uintptr_t index_;
 

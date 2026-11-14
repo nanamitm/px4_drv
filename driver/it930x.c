@@ -1195,6 +1195,20 @@ static int it930x_set_uart_baudrate(struct it930x_bridge *it930x, u32 baudrate)
 				&write_buf, NULL, NULL, false);
 }
 
+/*
+ * XIT-SQR100 の Windows ドライバー (IT9300BDA.sys) は、通常の B-CAS API と別に、カード検出を GPIO H15 、リセットを GPIO H1 で扱う拡張 B-CAS API を持つ
+ * XIT-SQR100 の実機では、GPIO H15 はカードの挿入中に High になる (yyya-nico/px4_drv の feat/support-sqr100 の 2026年10月の検証記録)
+ */
+int it930x_bcas_detect_gpio(const struct it930x_bridge *it930x)
+{
+	return (it930x->bcas_is_extend) ? 15 : 6;
+}
+
+static int it930x_bcas_reset_gpio(const struct it930x_bridge *it930x)
+{
+	return (it930x->bcas_is_extend) ? 1 : 14;
+}
+
 int it930x_bcas_init(struct it930x_bridge *it930x)
 {
 	u8 mode = 1;
@@ -1208,20 +1222,22 @@ int it930x_bcas_init(struct it930x_bridge *it930x)
 	if (ret)
 		return ret;
 
-	/* カード検出は頻繁に呼ばれるため GPIO H6 の入力設定は初期化時に済ませる */
-	return it930x_set_gpio_mode(it930x, 6, IT930X_GPIO_IN, true);
+	/* カード検出は頻繁に呼ばれるため GPIO H6 (拡張配線では H15) の入力設定は初期化時に済ませる */
+	return it930x_set_gpio_mode(it930x, it930x_bcas_detect_gpio(it930x),
+				    IT930X_GPIO_IN, true);
 }
 
 int it930x_bcas_reset_card(struct it930x_bridge *it930x)
 {
+	int reset_gpio = it930x_bcas_reset_gpio(it930x);
 	int ret;
 
-	/* B-CAS のリセット線は GPIO H14 に接続されている */
-	ret = it930x_set_gpio_mode(it930x, 14, IT930X_GPIO_OUT, true);
+	/* B-CAS のリセット線は GPIO H14 (拡張配線では H1) に接続されている */
+	ret = it930x_set_gpio_mode(it930x, reset_gpio, IT930X_GPIO_OUT, true);
 	if (ret)
 		return ret;
 
-	ret = it930x_write_gpio(it930x, 14, false);
+	ret = it930x_write_gpio(it930x, reset_gpio, false);
 	if (ret)
 		return ret;
 
@@ -1235,7 +1251,7 @@ int it930x_bcas_reset_card(struct it930x_bridge *it930x)
 		return ret;
 
 	msleep(5);
-	return it930x_write_gpio(it930x, 14, true);
+	return it930x_write_gpio(it930x, reset_gpio, true);
 }
 
 int it930x_bcas_check_ready(struct it930x_bridge *it930x, bool *ready)
@@ -1337,17 +1353,18 @@ int it930x_bcas_send_data(struct it930x_bridge *it930x, const u8 *buf, u8 len)
 
 int it930x_bcas_detect_card(struct it930x_bridge *it930x, bool *detected)
 {
+	bool high;
 	int ret;
 
 	if (!detected)
 		return -EINVAL;
 
-	/* カード検出スイッチは GPIO H6 の Low Active 入力 */
-	ret = it930x_read_gpio(it930x, 6, detected);
+	/* カード検出スイッチは GPIO H6 の Low Active 入力 (拡張配線では GPIO H15 の High Active 入力) */
+	ret = it930x_read_gpio(it930x, it930x_bcas_detect_gpio(it930x), &high);
 	if (ret)
 		return ret;
 
-	*detected = !*detected;
+	*detected = (high == it930x->bcas_is_extend);
 	return 0;
 }
 

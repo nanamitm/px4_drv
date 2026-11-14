@@ -19,6 +19,7 @@ PLEX 社の [Webサイト](http://plex-net.co.jp) にて配布されている公
 - Sony torne CECH-ZD1J に実験的に対応（Windows WinUSB版のみ）。復調と内蔵カードリーダーの制御を `DriverHost_PX4.exe` に統合。現行の統合版と配布設定の組み合わせで、専用INFで導入したx64版により地デジを約2時間21分受信し、TSの異常は0件でした（[長時間受信の記録](winusb/docs/torne-long-run.md)）。TVTestでの映像復号、長時間録画、USBの抜き差しは未確認です。過去の別設定・旧実装での実測結果とは区別し、検証範囲と導入方法は[統合手順](winusb/docs/cech-zd1j-integration.md)を参照。
 - I-O DATA GV-MVP/XZ3（USB ID `04BB:0530`）に実験的に対応（Windows WinUSB版のみ、アンテナへの外部給電が必要）。通常配布に専用BonDriverとINFを同梱し、選局・TS転送用のファームウェアは `DriverHost_PX4.exe` に内蔵します。x64とx86で地デジ・BS・110度CSの選局と受信を確認済み。専用INFで導入したx64版で110度CSを約3時間受信し、TSの異常は0件でした（TS転送の送出量が3 MiB固定の版）。本体の内蔵カードリーダーにも実験的に対応し、x64版で地デジ・BSの復号と、復号しながらの110度CSの約3時間25分の受信を確認しました（TSの異常は放送側の要因と判断したCC不整合1件）。地デジ・BSの長時間受信、長時間録画、USBの抜き差し、x86版のカードは未確認です。導入方法と検証範囲は[GV-MVP/XZ3対応の詳細](winusb/docs/gv-mvp-xz3.md)を参照。
 - PIXELA PIX-DT295（USB ID `06B8:103B`）に実験的に対応（Windows WinUSB版のみ、アンテナへの外部給電が必要）。選局・TS転送用のファームウェアは `DriverHost_PX4.exe` に内蔵し、既定では無効です（`DriverHost_PX4.ini` で `Experimental=true` にすると有効）。x64で地デジ・BS・110度CSの選局と受信、同梱の `WinSCard.dll` による内蔵カードリーダーとの通信、地デジ・110度CSでの約4時間と110度CSでの約2時間44分の連続受信を確認済み。後者では番組の切り替わりの時刻にCCの飛びが1件あり、原因は特定していません。x86版の実機受信、USBの抜き差し、スリープ復帰は未確認です。導入方法と検証範囲は[PIX-DT295対応の詳細](winusb/docs/pix-dt295.md)を参照。
+- PIXELA XIT-SQR100（USB ID `06B8:106B`）に実験的に対応（Linux 版と WinUSB 版、BS/CS アンテナへの給電は非対応）。[yyya-nico 氏のフォーク](https://github.com/yyya-nico/px4_drv/tree/feat/support-sqr100) の対応を移植し、PX-MLT 系と同じ方式でスカパー！プレミアムサービス光 (J.83 Annex B) の選局を加えました。移植元では地デジ・BS/CS の受信と内蔵カードリーダーを短時間確認していますが、このリポジトリの版は実機でまだ確認していません。J.83B は実際の信号でも未確認です。詳細は [XIT-SQR100 対応の移植記録](docs/20261114_xitsqr100_port.md) を参照。
 - 最新coaxの選局改善、複数台管理、初回ロック待ちと自動復帰の設定は[統合版の保守情報](winusb/docs/torne-integration-notes.md)、DLL・EXEの署名と信頼登録は[アプリケーション署名](winusb/docs/application-signing.md)を参照。
 
 動作確認は Windows 10 / Windows 11 (x64) で行っています。
@@ -98,6 +99,7 @@ PLEX PX-S1UD（USB ID `3275:0080`）向けに、WinUSB を直接使う地デジ1
 - [hendecarows 氏のフォーク](https://github.com/hendecarows/px4_drv) での更新を取り込み、DTV03A-1TU に対応 (v0.5.4 以降)
 - チップ構成が一部変更された、ロット番号 2309 (2023年9月) 以降の DTV02A-1T1S-U に対応 (v0.4.5 以降)
 - PX-MLT5PE のリブランド品である DTV02A-5TS-P (USB Product ID: 0x924e) に対応 (v0.6.0 以降)
+- [yyya-nico 氏のフォーク](https://github.com/yyya-nico/px4_drv/tree/feat/support-sqr100) の対応を移植し、PIXELA XIT-SQR100 に実験的に対応 (地デジ・BS/CS・J.83 Annex B、内蔵カードリーダー)。このリポジトリの版は実機で未確認で、詳細は [XIT-SQR100 対応の移植記録](docs/20261114_xitsqr100_port.md) を参照
 - 各機種の内蔵 B-CAS カードリーダーを利用するためのドライバを追加 (v0.7.0 以降)
   - 別途 `px4-drv-pcsc` ドライバをインストールすることで、pcscd から内蔵カードリーダーを認識・利用できるようになる
   - pcscd が既定で認識している外付けカードリーダーも引き続き利用できる
@@ -165,6 +167,11 @@ PLEX PX-S1UD（USB ID `3275:0080`）向けに、WinUSB を直接使う地デジ1
 	- DTV03A-1TU (実験的)
 	  - チップ構成が大幅に変更された、ロット番号 2021-11 以降の個体のみ対応しています。
 
+- PIXELA
+
+	- XIT-SQR100 (実験的)
+	  - このリポジトリの版は実機での動作をまだ確認していません。
+
 > [!NOTE]  
 > 2021 年以降メンテナンスされていない [nns779/px4_drv](https://github.com/nns779/px4_drv) から、新規に下記チューナーのサポートを追加しています。
 > 
@@ -218,6 +225,7 @@ certutil.exe -addstore TrustedPublisher ".\px4_drv_winusb.cer"
 - DTV03A-1TU: `BonDriver_ISDBT2071`
 - PX-M1UR: `BonDriver_PX-M1UR`
 - PX-S1UR: `BonDriver_PX-S1UR`
+- XIT-SQR100: `BonDriver_XIT-SQR100`
 
 - RTL2838UHIDIR: `BonDriver_RTLSDR`（[導入手順](docs/rtlsdr-install.md)を参照。`rtlsdr` サブフォルダーも必須）
 - SDRplay RSP1 互換機 (MSi2500): `BonDriver_MSI2500`（[導入手順](docs/msi2500-install.md)を参照。`msi2500` サブフォルダーも必須）
@@ -415,6 +423,13 @@ gcc, make, カーネルソース/ヘッダ, dkms がインストールされて�
 	/dev/isdbt2071video0
 
 すべてのチューナーにおいて、ISDB-T のみ受信可能です。
+
+##### PIXELA XIT-SQR100 を接続した場合
+
+	$ ls /dev/sqr100video*
+	/dev/sqr100video0
+
+ISDB-T・ISDB-S と、拡張 ioctl による J.83 Annex B を受信できます (実機では未確認)。
 
 ##### e-Better DTV02-1T1S-U/DTV02A-1T1S-U を接続した場合
 
@@ -698,6 +713,9 @@ BonDriverProxy_Linux と、PLEX PX-MLT5PE や e-Better DTV02A-1T1S-U などの�
   - 実装にあたり、実際に PX-MLT5PE とケーブルテレビ（イッツコム）の環境で動作確認を行っています。
 - J.83 Annex B: フレッツ・テレビなどの光回線経由で送られる「スカパー！プレミアムサービス光」の放送
   - スカパー！プレミアムサービス光は、ユーザーの環境でチャンネルスキャン・受信が正常に行えたと報告を受けています。
+
+PIXELA XIT-SQR100 でも、同じ復調器 (CXD2856ER) と、チューナー (CXD6866AER) の Sony の J.83B の設定で J.83 Annex B を選局できるようにしています (ISDB-C は非対応)。  
+XIT-SQR100 の J.83B は実際の信号でまだ確認していないため、`BonDriver_XIT-SQR100.ini` でも既定では無効です。詳細は [XIT-SQR100 対応の移植記録](docs/20261114_xitsqr100_port.md) を参照してください。
 
 ### Windows
 

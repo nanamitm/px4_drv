@@ -64,6 +64,11 @@ struct it930x_bridge {
 	struct itedtv_bus bus;
 	struct it930x_config config;
 	struct i2c_comm_master i2c_master[3];
+	/*
+	 * 内蔵カードリーダーの拡張配線 (カード検出 GPIO H15 の High Active 、リセット GPIO H1) を使う
+	 * false (ゼロ初期化) は従来の配線 (カード検出 GPIO H6 の Low Active 、リセット GPIO H14) で、XIT-SQR100 だけが true にする
+	 */
+	bool bcas_is_extend;
 	void *priv;
 };
 
@@ -104,6 +109,8 @@ int it930x_bcas_check_ready(struct it930x_bridge *it930x, bool *ready);
 int it930x_bcas_get_data(struct it930x_bridge *it930x, u8 *buf, u8 *len);
 int it930x_bcas_send_data(struct it930x_bridge *it930x, const u8 *buf, u8 len);
 int it930x_bcas_detect_card(struct it930x_bridge *it930x, bool *detected);
+/* カード検出スイッチがつながる GPIO の番号 (配線によって H6 か H15) */
+int it930x_bcas_detect_gpio(const struct it930x_bridge *it930x);
 /* baudrate は bps で渡す (9600 、19200 、38400 のいずれか) */
 int it930x_bcas_set_baudrate(struct it930x_bridge *it930x, u32 baudrate);
 #ifdef __cplusplus

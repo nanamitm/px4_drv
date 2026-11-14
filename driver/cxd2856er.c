@@ -234,41 +234,82 @@ static int cxd2856er_set_ts_clock(struct cxd2856er_demod *demod,
 	if (ret)
 		return ret;
 
-	ret = cxd2856er_write_slvt_reg_mask(demod, 0xc4, 0x00, 0x03);
-	if (ret)
-		return ret;
+	if (demod->config.serial_ts_clock) {
+		/*
+		 * XIT-SQR100 は、Sony の sony_demod_SetTSClockModeAndFreq() の連続クロックの表のうち、Windows ドライバーが選局時に書き込む値を使う
+		 * (yyya-nico/px4_drv の feat/support-sqr100 で、Windows の USB キャプチャと照合された値)
+		 * 地デジは高い周波数・ハーフレート、BS/CS は中間の周波数・フルレートで、BS/CS の設定は地デジより高いレートの TS をこの基板で運べている
+		 * 256QAM の ISDB-C と J.83B (約 38.8Mbps) は、ハーフレートの地デジの設定よりレートに余裕がある BS/CS の設定を使う
+		 */
+		bool half_rate = (system == CXD2856ER_ISDB_T_SYSTEM);
 
-	ret = cxd2856er_write_slvt_reg_mask(demod, 0xd1, 0x02, 0x03);
-	if (ret)
-		return ret;
+		switch (system) {
+		case CXD2856ER_ISDB_T_SYSTEM:
+		case CXD2856ER_ISDB_S_SYSTEM:
+		case CXD2856ER_ISDB_C_SYSTEM:
+		case CXD2856ER_J83B_SYSTEM:
+			break;
 
-	ret = cxd2856er_write_slvt_reg(demod, 0xd9, 0x10);
-	if (ret)
-		return ret;
+		default:
+			return -EINVAL;
+		}
 
-	ret = cxd2856er_write_slvt_reg_mask(demod, 0x32, 0x00, 0x01);
-	if (ret)
-		return ret;
+		ret = cxd2856er_write_slvt_reg_mask(demod, 0xc4, half_rate ? 0x02 : 0x01, 0x03);
+		if (ret)
+			return ret;
 
-	switch (system) {
-	case CXD2856ER_ISDB_T_SYSTEM:
-		ret = cxd2856er_write_slvt_reg_mask(demod, 0x33, 0x02, 0x03);
-		break;
+		ret = cxd2856er_write_slvt_reg_mask(demod, 0xd1, half_rate ? 0x02 : 0x01, 0x03);
+		if (ret)
+			return ret;
 
-	case CXD2856ER_ISDB_S_SYSTEM:
-	/* 256QAM の TS は ISDB-T の TS クロックの上限を超えるため、PLEX の CXD2856.c が PX-MLT 系に設定する
-	 * 地上波・ケーブル用の TS クロック (ゲート式・ハーフレート・高い周波数) を使う */
-	case CXD2856ER_ISDB_C_SYSTEM:
-	case CXD2856ER_J83B_SYSTEM:
-		ret = cxd2856er_write_slvt_reg_mask(demod, 0x33, 0x00, 0x03);
-		break;
+		ret = cxd2856er_write_slvt_reg(demod, 0xd9, half_rate ? 0x10 : 0x08);
+		if (ret)
+			return ret;
 
-	default:
-		ret = -EINVAL;
-		break;
+		ret = cxd2856er_write_slvt_reg_mask(demod, 0x32, 0x00, 0x01);
+		if (ret)
+			return ret;
+
+		ret = cxd2856er_write_slvt_reg_mask(demod, 0x33, half_rate ? 0x00 : 0x01, 0x03);
+		if (ret)
+			return ret;
+	} else {
+		ret = cxd2856er_write_slvt_reg_mask(demod, 0xc4, 0x00, 0x03);
+		if (ret)
+			return ret;
+
+		ret = cxd2856er_write_slvt_reg_mask(demod, 0xd1, 0x02, 0x03);
+		if (ret)
+			return ret;
+
+		ret = cxd2856er_write_slvt_reg(demod, 0xd9, 0x10);
+		if (ret)
+			return ret;
+
+		ret = cxd2856er_write_slvt_reg_mask(demod, 0x32, 0x00, 0x01);
+		if (ret)
+			return ret;
+
+		switch (system) {
+		case CXD2856ER_ISDB_T_SYSTEM:
+			ret = cxd2856er_write_slvt_reg_mask(demod, 0x33, 0x02, 0x03);
+			break;
+
+		case CXD2856ER_ISDB_S_SYSTEM:
+		/* 256QAM の TS は ISDB-T の TS クロックの上限を超えるため、PLEX の CXD2856.c が PX-MLT 系に設定する
+		 * 地上波・ケーブル用の TS クロック (ゲート式・ハーフレート・高い周波数) を使う */
+		case CXD2856ER_ISDB_C_SYSTEM:
+		case CXD2856ER_J83B_SYSTEM:
+			ret = cxd2856er_write_slvt_reg_mask(demod, 0x33, 0x00, 0x03);
+			break;
+
+		default:
+			ret = -EINVAL;
+			break;
+		}
+		if (ret)
+			return ret;
 	}
-	if (ret)
-		return ret;
 
 	ret = cxd2856er_write_slvt_reg_mask(demod, 0x32, 0x01, 0x01);
 	if (ret)
