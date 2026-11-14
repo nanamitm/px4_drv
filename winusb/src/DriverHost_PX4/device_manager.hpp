@@ -40,6 +40,7 @@ enum class DeviceType : std::uint32_t {
 	MSI2500,
 	GVMVPXZ3,
 	PIXDT295,
+	XITSQR100,
 };
 
 class DeviceManager final {

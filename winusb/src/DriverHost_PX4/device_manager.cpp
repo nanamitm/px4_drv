@@ -13,6 +13,7 @@
 #include "pxmlt_device.hpp"
 #include "isdb2056_device.hpp"
 #include "isdbt2071_device.hpp"
+#include "xit_sqr100_device.hpp"
 #include "torne/experimental_device.hpp"
 #include "pxbcud/device.hpp"
 #include "rtlsdr/device.hpp"
@@ -73,6 +74,8 @@ DeviceManager::DeviceManager(const px4::DeviceDefinitionSet &device_defs, px4::R
 			type = DeviceType::GVMVPXZ3;
 		else if (it->first == L"PIXDT295")
 			type = DeviceType::PIXDT295;
+		else if (it->first == L"XITSQR100")
+			type = DeviceType::XITSQR100;
 		else if (it->first == L"RTLSDR")
 			type = DeviceType::RTLSDR;
 		else if (it->first == L"MSI2500")
@@ -269,6 +272,19 @@ void DeviceManager::Add(const std::wstring &path, const std::pair<DeviceType, px
 	case px4::DeviceType::ISDBT2071:
 	{
 		auto dev = std::make_shared<Isdbt2071Device>(path, def.second, ++index_, receiver_manager_);
+
+		if (!dev->Init()) {
+			if (dev->HasCardReader())
+				card_reader_generation_.fetch_add(1);
+			devices_.emplace(path, std::move(dev));
+		}
+
+		break;
+	}
+
+	case px4::DeviceType::XITSQR100:
+	{
+		auto dev = std::make_shared<XitSqr100Device>(path, def.second, ++index_, receiver_manager_);
 
 		if (!dev->Init()) {
 			if (dev->HasCardReader())
