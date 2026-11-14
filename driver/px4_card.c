@@ -42,27 +42,29 @@ struct px4_card {
 	bool disconnected;
 };
 
-/* Windows 版と同じパスを組み立てるため、winusb/pkg/inf にある INF の DeviceInterfaceGUIDs を PID ごとに保持する */
+/* Windows 版と同じパスを組み立てるため、winusb/pkg/inf にある INF の DeviceInterfaceGUIDs を VID と PID の組ごとに保持する */
 static const struct {
+	u16 vendor;
 	u16 product;
 	const char *guid;
 } px4_card_guids[] = {
-	{ 0x083f, "{6d78c843-49d8-4bb8-8dfa-286fdee4c8a3}" },
-	{ 0x084a, "{87b25983-d116-4ccf-8896-84d022fabd73}" },
-	{ 0x023f, "{47fc15e3-6791-4e24-8fbe-c4218eee0ad6}" },
-	{ 0x024a, "{60eaf2b6-548f-4aad-ab0b-87055528dfd6}" },
-	{ 0x073f, "{3c42fdc6-2438-455e-89db-538011777617}" },
-	{ 0x074a, "{c78aa8ba-8476-4047-a089-7c3ed43503a6}" },
-	{ 0x024e, "{eeb8e93b-1007-4e3e-8ce9-4f7ebdf3aba1}" },
-	{ 0x924e, "{eeb8e93b-1007-4e3e-8ce9-4f7ebdf3aba1}" },
-	{ 0x0252, "{bfafd6cd-29f8-46e7-b558-e3b0c493aaba}" },
-	{ 0x0253, "{145dce88-a4db-4737-8e5d-d1099814876a}" },
-	{ 0x004b, "{1f8fa351-3f75-42c1-b0f1-ec794294448f}" },
-	{ 0x084b, "{283639e3-0df2-40bd-a5cc-5051579745a7}" },
-	{ 0x0254, "{da23f91d-62ad-401e-812e-a7f054d665af}" },
-	{ 0x0854, "{28ec1517-6150-4025-acfb-a5447add0a57}" },
-	{ 0x0855, "{a3303a3b-ea2c-467f-beae-8e72fb158714}" },
-	{ 0x0052, "{ac1e5fa2-e265-4819-9b29-2be8a44ce4c9}" },
+	{ 0x0511, 0x083f, "{6d78c843-49d8-4bb8-8dfa-286fdee4c8a3}" },
+	{ 0x0511, 0x084a, "{87b25983-d116-4ccf-8896-84d022fabd73}" },
+	{ 0x0511, 0x023f, "{47fc15e3-6791-4e24-8fbe-c4218eee0ad6}" },
+	{ 0x0511, 0x024a, "{60eaf2b6-548f-4aad-ab0b-87055528dfd6}" },
+	{ 0x0511, 0x073f, "{3c42fdc6-2438-455e-89db-538011777617}" },
+	{ 0x0511, 0x074a, "{c78aa8ba-8476-4047-a089-7c3ed43503a6}" },
+	{ 0x0511, 0x024e, "{eeb8e93b-1007-4e3e-8ce9-4f7ebdf3aba1}" },
+	{ 0x0511, 0x924e, "{eeb8e93b-1007-4e3e-8ce9-4f7ebdf3aba1}" },
+	{ 0x0511, 0x0252, "{bfafd6cd-29f8-46e7-b558-e3b0c493aaba}" },
+	{ 0x0511, 0x0253, "{145dce88-a4db-4737-8e5d-d1099814876a}" },
+	{ 0x0511, 0x004b, "{1f8fa351-3f75-42c1-b0f1-ec794294448f}" },
+	{ 0x0511, 0x084b, "{283639e3-0df2-40bd-a5cc-5051579745a7}" },
+	{ 0x0511, 0x0254, "{da23f91d-62ad-401e-812e-a7f054d665af}" },
+	{ 0x0511, 0x0854, "{28ec1517-6150-4025-acfb-a5447add0a57}" },
+	{ 0x0511, 0x0855, "{a3303a3b-ea2c-467f-beae-8e72fb158714}" },
+	{ 0x0511, 0x0052, "{ac1e5fa2-e265-4819-9b29-2be8a44ce4c9}" },
+	{ 0x06b8, 0x106b, "{549967c7-74e1-49ec-94d1-fb8c0aa5b391}" },
 };
 
 static struct class *px4_card_class;
@@ -138,9 +140,10 @@ static int px4_card_request(struct px4_card *card, unsigned int command,
 	case PX4_CARD_DETECT:
 		/*
 		 * PX-W3U4 は基板電源が切れると、カードがなくても GPIO H6 が挿入済みの値になるため、呼び出し側で監視中の電源参照を保持する
-		 * GPIO H6 は入力モードで読み、2回目以降の設定はキャッシュで USB 転送を省く
+		 * GPIO H6 (拡張配線の XIT-SQR100 では H15) は入力モードで読み、2回目以降の設定はキャッシュで USB 転送を省く
 		 */
-		ret = it930x_set_gpio_mode(it930x, 6, IT930X_GPIO_IN, true);
+		ret = it930x_set_gpio_mode(it930x, it930x_bcas_detect_gpio(it930x),
+					   IT930X_GPIO_IN, true);
 		if (!ret)
 			ret = it930x_bcas_detect_card(it930x, &state);
 		*value = state;
@@ -325,6 +328,7 @@ static const struct file_operations px4_card_fops = {
 
 char *px4_card_reader_id(struct usb_device *usb)
 {
+	u16 vendor = le16_to_cpu(usb->descriptor.idVendor);
 	u16 product = le16_to_cpu(usb->descriptor.idProduct);
 	const char *serial = usb->serial;
 	const char *guid = NULL;
@@ -339,14 +343,15 @@ char *px4_card_reader_id(struct usb_device *usb)
 		return ERR_PTR(-EINVAL);
 
 	for (i = 0; i < ARRAY_SIZE(px4_card_guids); i++) {
-		if (px4_card_guids[i].product == product) {
+		if (px4_card_guids[i].vendor == vendor &&
+		    px4_card_guids[i].product == product) {
 			guid = px4_card_guids[i].guid;
 			break;
 		}
 	}
 	/* 未発売の PX-MLT5U には Windows 版の INF がないため、GUID を省いたパスで ID を求める */
 	path = kasprintf(GFP_KERNEL, "\\\\?\\usb#vid_%04x&pid_%04x#%s%s%s",
-			 le16_to_cpu(usb->descriptor.idVendor), product, usb->serial,
+			 vendor, product, usb->serial,
 			 guid ? "#" : "", guid ? guid : "");
 	if (!path)
 		return ERR_PTR(-ENOMEM);

@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /* 模擬 I2C で ISDB-C・J.83B の設定・停止と失敗時の復帰を検証する
+ * PX-MLT 系のチューナー (CXD2858ER) と、XIT-SQR100 のチューナー (CXD6866AER) と TS クロックを対象にする
  * 信号ロック、USB 負荷、実際の TS 品質はこの試験の確認範囲外
  */
 #include <stdio.h>
@@ -7,6 +8,7 @@
 #include <string.h>
 #include "cxd2856er.h"
 #include "cxd2858er.h"
+#include "cxd6866.h"
 
 #define CHECK(x) do { if (!(x)) { fprintf(stderr, "%s:%d: %s\n", __FILE__, __LINE__, #x); exit(1); } } while (0)
 
@@ -76,6 +78,133 @@ static void reset(struct cxd2856er_demod *demod, struct cxd2858er_tuner *tuner)
 	tuner->i2c = &master;
 	tuner->i2c_addr = 0x60;
 	tuner->config.xtal = 16000;
+}
+
+static void reset_freia(struct cxd6866_tuner *freia)
+{
+	memset(&bus, 0, sizeof(bus));
+	memset(freia, 0, sizeof(*freia));
+	freia->dev = &dev;
+	freia->i2c = &master;
+	freia->i2c_addr = 0x60;
+	freia->config.xtal = 24000;
+	freia->config.loop_filter_internal = true;
+	freia->config.refout_enable = true;
+	/* CXD6866AER のチップ ID (0x7F & 0xFC == 0xF8) */
+	bus.regs[2][0][0x7f] = 0xf8;
+}
+
+/* 地上波の動作モードの選局で、方式ごとに異なるレジスターの値 */
+static void check_freia_ter(bool j83b, u32 freq)
+{
+	u8 *r = bus.regs[2][0];
+
+	/* Sony の freia_tune() は、ケーブルの方式だけ OVLD のレジスターを別の値にする */
+	CHECK(memcmp(&r[0x3c], j83b ? "\xfc\x87\xcf" : "\xfc\x9c\x8f", 3) == 0);
+	CHECK(r[0x52] == (j83b ? 0x78 : 0x00));
+	CHECK(r[0x8b] == (j83b ? 0x05 : 0x75));
+	/* g_terr_param_table_freia の SONY_FREIA_DTV_SKP_OPT と SONY_FREIA_DTV_ISDBT_6 の行 */
+	CHECK(r[0x69] == (j83b ? 0x83 : 0x86));
+	CHECK(r[0x6b] == (j83b ? 0x0b : 0x0e));
+	CHECK(r[0x6c] == 0x33);
+	CHECK(r[0x6d] == 0x00);
+	CHECK(r[0x6e] == (j83b ? 0x1b : 0x17));
+	CHECK(r[0x6f] == (j83b ? 0x02 : 0x1b));
+	CHECK(r[0x70] == (u8)freq && r[0x71] == (u8)(freq >> 8) && r[0x72] == (u8)((freq >> 16) & 0x1f));
+	CHECK(r[0x73] == 0xff);
+	CHECK(memcmp(&r[0x91], "\x0a\x0c", 2) == 0);
+	/* 選局の後は CPU と内部の論理回路を待機させる */
+	CHECK(r[0x88] == 0x00 && r[0x87] == 0x80);
+}
+
+static void test_xit_sqr100(void)
+{
+	struct cxd6866_tuner freia;
+	struct cxd2856er_demod demod;
+	struct cxd2858er_tuner unused_tuner;
+	union cxd2856er_system_params params;
+	unsigned int count, fail, i;
+	static const struct {
+		enum cxd2856er_system system;
+		u8 c4, d1, d9, ck, d3;
+	} clocks[] = {
+		/* Sony の連続クロックの表の、高い周波数・ハーフレート (地デジ) と中間の周波数・フルレート (BS/CS・ケーブル) */
+		{ CXD2856ER_ISDB_T_SYSTEM, 0x02, 0x02, 0x10, 0x00, 0x01 },
+		{ CXD2856ER_ISDB_S_SYSTEM, 0x01, 0x01, 0x08, 0x01, 0x01 },
+		{ CXD2856ER_ISDB_C_SYSTEM, 0x01, 0x01, 0x08, 0x01, 0x01 },
+		/* J.83B だけパケット間の隙間を挿入する (OTSRATECTRLOFF = 0) */
+		{ CXD2856ER_J83B_SYSTEM, 0x01, 0x01, 0x08, 0x01, 0x00 },
+	};
+
+	/* J.83B (5.6Msps) と ISDB-T の地上波の動作モードの値 */
+	reset_freia(&freia);
+	CHECK(cxd6866_init(&freia) == 0 && !bus.gate_open);
+	CHECK(bus.regs[2][0][0x81] == 0x18 && bus.regs[2][0][0x84] == 0x83);
+	CHECK(cxd6866_set_params_j83b(&freia, 597250) == 0);
+	CHECK(freia.system == CXD6866_J83B_SYSTEM && !bus.gate_open);
+	check_freia_ter(true, 597250);
+	CHECK(cxd6866_set_params_t(&freia, CXD6866_ISDB_T_SYSTEM, 557143, 6) == 0);
+	CHECK(freia.system == CXD6866_ISDB_T_SYSTEM && !bus.gate_open);
+	check_freia_ter(false, 557143);
+	CHECK(cxd6866_set_params_j83b(&freia, 99250) == 0);
+	check_freia_ter(true, 99250);
+	puts("CXD6866 J83B 5.6Msps and ISDB-T terrestrial settings: PASS");
+
+	/* 地上波 (J.83B) と衛星の動作モードの切り替えでは、先に前のモードの回路を止める */
+	reset_freia(&freia);
+	CHECK(cxd6866_init(&freia) == 0);
+	CHECK(cxd6866_set_params_j83b(&freia, 597250) == 0);
+	CHECK(cxd6866_set_params_s(&freia, CXD6866_ISDB_S_SYSTEM, 1049480, 28860) == 0);
+	CHECK(freia.system == CXD6866_ISDB_S_SYSTEM);
+	/* TER_fin で OVLD のレジスターを戻し、地上波の回路を待機させている */
+	CHECK(bus.regs[2][0][0x3d] == 0 && bus.regs[2][0][0x3e] == 0 && bus.regs[2][0][0x5e] == 0x15);
+	CHECK(bus.regs[2][0][0x01] == 0x01);
+	CHECK(cxd6866_set_params_j83b(&freia, 597250) == 0);
+	CHECK(freia.system == CXD6866_J83B_SYSTEM);
+	/* SAT_fin で衛星の回路を待機させてから地上波のモードへ戻している */
+	CHECK(bus.regs[2][0][0x0c] == 0x14 && bus.regs[2][0][0x01] == 0x00);
+	check_freia_ter(true, 597250);
+	CHECK(cxd6866_term(&freia) == 0);
+	CHECK(freia.system == CXD6866_UNSPECIFIED_SYSTEM && !bus.gate_open);
+	CHECK(bus.regs[2][0][0x3d] == 0 && bus.regs[2][0][0x74] == 0x02 && bus.regs[2][0][0x5e] == 0x15);
+	puts("CXD6866 J83B <-> ISDB-S switching and term: PASS");
+
+	/* 範囲外の周波数はハードウェアへ触れずに失敗する */
+	reset_freia(&freia);
+	CHECK(cxd6866_set_params_j83b(&freia, 999) == -ERANGE);
+	CHECK(cxd6866_set_params_j83b(&freia, 1200001) == -ERANGE);
+	CHECK(bus.calls == 0 && freia.system == CXD6866_UNSPECIFIED_SYSTEM);
+	puts("CXD6866 J83B frequency range: PASS");
+
+	/* 選局の途中で I2C が失敗したときは、状態を不明に戻してゲートを閉じる */
+	reset_freia(&freia);
+	CHECK(cxd6866_set_params_j83b(&freia, 597250) == 0);
+	count = bus.calls;
+	for (fail = 1; fail <= count; fail++) {
+		reset_freia(&freia);
+		freia.system = CXD6866_ISDB_S_SYSTEM;
+		bus.fail_at = fail;
+		CHECK(cxd6866_set_params_j83b(&freia, 597250) == -EIO);
+		CHECK(freia.system == CXD6866_UNSPECIFIED_SYSTEM && !bus.gate_open);
+	}
+	printf("CXD6866 J83B %u tuner I/O failure boundaries and gate release: PASS\n", count);
+
+	/* XIT-SQR100 のシリアルの連続クロック (Windows ドライバーと同じ地デジ・BS/CS の値) と、ケーブルの方式の値 */
+	for (i = 0; i < sizeof(clocks) / sizeof(clocks[0]); i++) {
+		reset(&demod, &unused_tuner);
+		demod.config.serial_ts_clock = true;
+		memset(&params, 0, sizeof(params));
+		params.bandwidth = 6;
+		bus.regs[1][0][0xd1] = 0x03;
+		CHECK(cxd2856er_wakeup(&demod, clocks[i].system, &params) == 0);
+		CHECK((bus.regs[1][0][0xc4] & 0x03) == clocks[i].c4);
+		CHECK((bus.regs[1][0][0xd1] & 0x03) == clocks[i].d1);
+		CHECK(bus.regs[1][0][0xd9] == clocks[i].d9);
+		CHECK((bus.regs[1][0][0x33] & 0x03) == clocks[i].ck);
+		CHECK((bus.regs[1][0][0xd3] & 0x01) == clocks[i].d3);
+		CHECK((bus.regs[1][0][0x32] & 0x01) == 0x01);
+	}
+	puts("XIT-SQR100 serial continuous TS clock for ISDB-T/S/C and J83B: PASS");
 }
 
 int main(void)
@@ -402,5 +531,7 @@ int main(void)
 	CHECK(cxd2858er_stop(&tuner) == 0);
 	CHECK(bus.regs[2][0][0x67] == 0x02);
 	puts("Tuner RF input matching in standby: PASS");
+
+	test_xit_sqr100();
 	return 0;
 }

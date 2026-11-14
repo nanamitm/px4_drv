@@ -25,6 +25,8 @@
 #define USB_PID_PX_M1UR					0x0854
 #define USB_PID_PX_S1UR					0x0855
 #define USB_PID_DIGIBEST_ISDBT2071		0x0052
+/* PIXELA (ベンダー ID 0x06b8) */
+#define USB_PID_PIXELA_XIT_SQR100		0x106b
 
 
 enum px4_usb_device_type {
@@ -37,6 +39,7 @@ enum px4_usb_device_type {
 	PXM1UR_USB_DEVICE,
 	PXS1UR_USB_DEVICE,
 	ISDBT2071_USB_DEVICE,
+	XITSQR100_USB_DEVICE,
 	//----
 	MAX_USB_DEVICE_TYPE,
 };
