@@ -101,6 +101,7 @@ int it930x_purge_psb(struct it930x_bridge *it930x, int timeout);
 int it930x_bcas_init(struct it930x_bridge *it930x);
 int it930x_bcas_reset_card(struct it930x_bridge *it930x);
 int it930x_bcas_check_ready(struct it930x_bridge *it930x, bool *ready);
+int it930x_bcas_get_rx_length(struct it930x_bridge *it930x, u8 *length);
 int it930x_bcas_get_data(struct it930x_bridge *it930x, u8 *buf, u8 *len);
 int it930x_bcas_send_data(struct it930x_bridge *it930x, const u8 *buf, u8 len);
 int it930x_bcas_detect_card(struct it930x_bridge *it930x, bool *detected);

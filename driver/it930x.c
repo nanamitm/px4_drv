@@ -1254,6 +1254,15 @@ int it930x_bcas_check_ready(struct it930x_bridge *it930x, bool *ready)
 	return 0;
 }
 
+int it930x_bcas_get_rx_length(struct it930x_bridge *it930x, u8 *length)
+{
+	if (!length)
+		return -EINVAL;
+
+	/* 受信途中でも増えるため、完成判定には使わず受信の進み具合の観測に限る */
+	return it930x_read_reg(it930x, IT930X_REG_UART_RX_LENGTH, length);
+}
+
 int it930x_bcas_get_data(struct it930x_bridge *it930x, u8 *buf, u8 *len)
 {
 	u8 capacity;
