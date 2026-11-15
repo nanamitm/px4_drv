@@ -288,6 +288,18 @@ int Isdbt2071Device::IsCardDataReady(bool &ready)
 	return card_open_ ? it930x_bcas_check_ready(&it930x_, &ready) : -ENODEV;
 }
 
+int Isdbt2071Device::GetCardDataLength(std::size_t &length)
+{
+	std::lock_guard<std::recursive_mutex> lock(lock_);
+	if (!card_open_)
+		return -ENODEV;
+	u8 value = 0;
+	int ret = it930x_bcas_get_rx_length(&it930x_, &value);
+	if (!ret)
+		length = value;
+	return ret;
+}
+
 int Isdbt2071Device::ReadCardData(std::uint8_t *buf, std::uint8_t &len)
 {
 	std::lock_guard<std::recursive_mutex> lock(lock_);
