@@ -37,7 +37,10 @@ foreach($arch in $Architecture){
     }
     # rc.exe と対象アーキテクチャの SDK/LIB を Rust のリソースビルドにも渡す。
     $environmentScript=Join-Path $winusbRoot "build\rtlsdr-runtime\developer-env-$arch.cmd"
-    [IO.File]::WriteAllText($environmentScript,"@echo off`r`ncall `"$devCmd`" -no_logo -arch=$arch -host_arch=x64`r`nif errorlevel 1 exit /b %errorlevel%`r`nset`r`n",[Text.Encoding]::ASCII)
+    # VsDevCmd.bat は Installer フォルダーへ pushd してから vswhere.exe をパスなしで実行する。
+    # NoDefaultCurrentDirectoryInExePath が設定された環境ではカレントディレクトリが検索されず
+    # VsDevCmd.bat が失敗するため、Installer フォルダーを PATH から見つけられるようにする。
+    [IO.File]::WriteAllText($environmentScript,"@echo off`r`nset `"PATH=%ProgramFiles(x86)%\Microsoft Visual Studio\Installer;%PATH%`"`r`ncall `"$devCmd`" -no_logo -arch=$arch -host_arch=x64`r`nif errorlevel 1 exit /b %errorlevel%`r`nset`r`n",[Text.Encoding]::ASCII)
     $developerEnvironment=& cmd.exe /d /c $environmentScript
     if($LASTEXITCODE -ne 0){throw 'Visual Studio environment initialization failed.'}
     foreach($line in $developerEnvironment){
