@@ -7,6 +7,7 @@
 #include <memory>
 #include <vector>
 
+#include "atr_length.hpp"
 #include "smart_card.hpp"
 
 namespace {
@@ -671,6 +672,47 @@ int main()
 		!ready_device->read_called_before_ready,
 		"A B-CAS ATR with RX_READY did not use the ready path.") && succeeded;
 	ready_card.Close();
+
+	/*
+	 * 受信を1バイトずつ溜める機種 (PIX-DT295 、torne 、GV-MVP/XZ3) は ATR の構造から
+	 * 全体の長さを求め、B-CAS 以外の ATR でも受信を終えた時点を判定する
+	 */
+	{
+		std::size_t atr_length = 0;
+		bool atr_length_succeeded = true;
+		for (std::size_t received = 1; received < 7; received++) {
+			atr_length_succeeded = atr_length_succeeded &&
+				px4::GetAtrLength(premium_atr.data(), received, atr_length) == -EAGAIN;
+		}
+		atr_length_succeeded = atr_length_succeeded &&
+			px4::GetAtrLength(premium_atr.data(), 7, atr_length) == 0 &&
+			atr_length == premium_atr.size();
+		const std::uint8_t bcas_atr[] = {
+			0x3b, 0xf0, 0x12, 0x00, 0xff, 0x91, 0x81,
+			0xb1, 0x7c, 0x45, 0x1f, 0x03, 0x99,
+		};
+		atr_length_succeeded = atr_length_succeeded &&
+			px4::GetAtrLength(bcas_atr, sizeof(bcas_atr), atr_length) == 0 &&
+			atr_length == sizeof(bcas_atr);
+		/* T=0 だけを示す ATR は TCK を持たない */
+		const std::uint8_t t0_atr[] = { 0x3b, 0x12, 0x14, 0x50, 0x00 };
+		atr_length_succeeded = atr_length_succeeded &&
+			px4::GetAtrLength(t0_atr, sizeof(t0_atr), atr_length) == 0 &&
+			atr_length == 5;
+		/* 連続リセット時の残留バイトなど、TS が ATR の値でないものは形式不正にする */
+		const std::uint8_t residual[] = { 0xfc, 0xff };
+		atr_length_succeeded = atr_length_succeeded &&
+			px4::GetAtrLength(residual, sizeof(residual), atr_length) == -EBADMSG;
+		/* 33バイトを超える ATR は規格外のため形式不正にする */
+		const std::uint8_t too_long[] = {
+			0x3b, 0xff, 0x11, 0x00, 0x00, 0xf1, 0x00, 0x00, 0x00,
+			0xf1, 0x00, 0x00, 0x00, 0xf1, 0x00, 0x00, 0x00, 0x01,
+		};
+		atr_length_succeeded = atr_length_succeeded &&
+			px4::GetAtrLength(too_long, sizeof(too_long), atr_length) == -EBADMSG;
+		succeeded = Check(atr_length_succeeded,
+			"The ATR length was not derived from the ATR structure.") && succeeded;
+	}
 
 	/* 一度抜去を観測した接続は、別の監視者が再初期化しても復活させない。 */
 	auto generation_device = std::make_shared<MockCardDevice>();
