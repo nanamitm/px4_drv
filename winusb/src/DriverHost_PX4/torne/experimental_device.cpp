@@ -14,7 +14,7 @@
 #include "tune_result.hpp"
 #include "reception_policy.hpp"
 #include "mb86h47_card.hpp"
-#include "../../WinSCard_PX4/bcas_atr.hpp"
+#include "../atr_length.hpp"
 #include "msg.h"
 #include "util.hpp"
 #include <algorithm>
@@ -271,8 +271,13 @@ int ExperimentalDevice::IsCardDataReady(bool &ready) try
 	if (card_->received.size() + count > 518) return -EMSGSIZE;
 	card_->received.insert(card_->received.end(), bytes.begin(), bytes.begin() + count);
 	if (card_->atr) {
-		if (px4::winscard::IsBcasAtr(card_->received.data(), card_->received.size())) card_->remaining = card_->received.size();
-		else if (card_->received.size() >= 33) return -ENOTSUP;
+		// ATRの構造から全体の長さを求め、B-CAS以外の形式の正しいATRも受信を終えた時点で渡す。
+		// 長さを超えて溜まった場合はATRの前後に残留バイトがあるため、形式不正として再リセットさせる。
+		std::size_t atr_length = 0;
+		const int atr_rc = px4::GetAtrLength(card_->received.data(), card_->received.size(), atr_length);
+		if (atr_rc == -EBADMSG) return atr_rc;
+		if (!atr_rc && card_->received.size() > atr_length) return -EBADMSG;
+		if (!atr_rc && card_->received.size() == atr_length) card_->remaining = atr_length;
 	} else if (card_->received.size() >= 3) {
 		const auto length = std::size_t(4) + card_->received[2];
 		if (card_->received.size() >= length) card_->remaining = length;

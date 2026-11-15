@@ -6,7 +6,7 @@
 #include "../resource.h"
 #include "../tc90522_cnr.hpp"
 #include "../torne/winusb_control.hpp"
-#include "../../WinSCard_PX4/bcas_atr.hpp"
+#include "../atr_length.hpp"
 #include "msg.h"
 
 #include <algorithm>
@@ -1134,10 +1134,16 @@ int Device::IsCardDataReady(bool& ready) try
         return -EMSGSIZE;
     card_received_.insert(card_received_.end(), bytes, bytes + count);
     if (card_atr_) {
-        if (px4::winscard::IsBcasAtr(card_received_.data(), card_received_.size()))
-            card_remaining_ = card_received_.size();
-        else if (card_received_.size() >= 33)
-            return -ENOTSUP;
+        // ATRの構造から全体の長さを求め、B-CAS以外の形式の正しいATRも受信を終えた時点で渡す。
+        // 長さを超えて溜まった場合はATRの前後に残留バイトがあるため、形式不正として再リセットさせる。
+        std::size_t atr_length = 0;
+        const int atr_rc = px4::GetAtrLength(card_received_.data(), card_received_.size(), atr_length);
+        if (atr_rc == -EBADMSG)
+            return atr_rc;
+        if (!atr_rc && card_received_.size() > atr_length)
+            return -EBADMSG;
+        if (!atr_rc && card_received_.size() == atr_length)
+            card_remaining_ = atr_length;
     } else if (card_received_.size() >= 3) {
         const auto length = std::size_t(4) + card_received_[2];
         if (card_received_.size() >= length)
