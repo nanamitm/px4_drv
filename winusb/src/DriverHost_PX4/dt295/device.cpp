@@ -498,7 +498,6 @@ Device::Device(const std::wstring &path,const px4::DeviceDefinition &definition,
 }
 Device::~Device(){Term();if(removed_)CloseHandle(removed_);}
 int Device::Init(){
-    if(!px4::util::wtob(device_def_.configs.Get(L"Experimental",L"false")))return -EOPNOTSUPP;
     if(usb_dev_.descriptor.idVendor!=0x06b8 || usb_dev_.descriptor.idProduct!=0x103b ||
         device_def_.receivers.size()!=1)return -EINVAL;
     UCHAR alt=0xff;USB_INTERFACE_DESCRIPTOR desc{};

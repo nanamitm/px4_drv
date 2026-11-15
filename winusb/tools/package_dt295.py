@@ -42,4 +42,4 @@ coax = dist / 'licenses/coax'
 coax.mkdir(parents=True, exist_ok=True)
 for name in ('COPYING', 'NOTICE', 'upstream.json', 'LOCAL-CHANGES.md'):
     shutil.copy2(root / 'tools/torne_frontend' / name, coax / name)
-print('Prepared experimental DT295 x86/x64 folders; Experimental=false remains the default.')
+print('Prepared DT295 x86/x64 folders.')

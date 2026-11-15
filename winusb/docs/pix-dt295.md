@@ -34,16 +34,15 @@ x86/x64 の上流 bootstrap / loader / session / USB window / stream input、Win
 
 1. `06b8:103b` のPIX-DT295であることを確認し、`PIX-DT295.inf` を使用する機器だけへWinUSBを割り当てます。PIX-DT295 Wなど別PIDは対象外です。
 2. `BonDriver_DT295_32bit` または `64bit` をアプリのビット数に合わせて配置します。PIX-DT295のファームウェアはDriverHostに組み込まれているため、別のファイルは不要です。同梱の `firmware` フォルダーは、同じDriverHostで使うPX-S1UDのファームウェアです。
-3. `DriverHost_PX4.ini` の `[DeviceDefinition20.Config]` を `Experimental=true` へ変更します。初期設定はfalseのため受信機を登録せず、ファームウェアの転送もありません。
-4. BS/CSアンテナには外部から給電します。本機は給電に対応していないため、BonDriverの `LNBPower=0` を維持します。内蔵カードリーダーを使う場合は、アプリと同じフォルダーに同梱の `WinSCard.dll` を配置します。未確認の条件は [内蔵カードリーダー](pix-dt295-card.md) にあります。
-5. ソース生成版は初回選局でRAM前像を保存し、一時コードを配置します（約1.3～2秒）。旧ファームウェアがRAMに残っている場合はUSBを抜き差しします。既知のRev.01とブートRAMが一致しない機器では初期化に失敗します。ログの `PIX-DT295 direct-fr` と `PIX-DT295 source-fr` の行で初期化結果を確認できます。
-6. 動作確認では、sync / TEI / CC、TS量と無入力時間、終了の所要時間を記録します。地デジと110度CSの長時間受信は [長時間受信の記録](pix-dt295-long-run.md) で確認済みで、無信号、USB抜去・再接続、スリープ復帰、x86版の実機受信は未確認です。
+3. BS/CSアンテナには外部から給電します。本機は給電に対応していないため、BonDriverの `LNBPower=0` を維持します。内蔵カードリーダーを使う場合は、アプリと同じフォルダーに同梱の `WinSCard.dll` を配置します。未確認の条件は [内蔵カードリーダー](pix-dt295-card.md) にあります。
+4. ソース生成版は初回選局でRAM前像を保存し、一時コードを配置します（約1.3～2秒）。旧ファームウェアがRAMに残っている場合はUSBを抜き差しします。既知のRev.01とブートRAMが一致しない機器では初期化に失敗します。ログの `PIX-DT295 direct-fr` と `PIX-DT295 source-fr` の行で初期化結果を確認できます。
+5. 動作確認では、sync / TEI / CC、TS量と無入力時間、終了の所要時間を記録します。地デジと110度CSの長時間受信は [長時間受信の記録](pix-dt295-long-run.md) で確認済みで、無信号、USB抜去・再接続、スリープ復帰、x86版の実機受信は未確認です。
 
 USB応答不明のセッションは再送による二重実行を避けるため再利用できません。ログに物理的な再接続が必要と出た場合は、本体を接続し直してから確認します。正常終了では保存したRAMと設定を復元します。
 
 無入力は5秒ごとの警告で観察し、実機の根拠がない期限で受信を終了しません。TSバッファ満杯やUSB/プロトコルの破損は受信エラーとして扱います。ソース生成版のCNRは後述の節を参照してください。
 
-配布フォルダーの `channel_switch_stress.exe` は同梱BonDriverを通して選局反復とTSを検査するツールです。実行すると機器を開くため、実機接続と設定変更後に使用します。引数のspace / channelはBonDriverが列挙するインデックスで、物理チャンネル番号ではありません。
+配布フォルダーの `channel_switch_stress.exe` は同梱BonDriverを通して選局反復とTSを検査するツールです。実行すると機器を開くため、実機を接続してから使用します。引数のspace / channelはBonDriverが列挙するインデックスで、物理チャンネル番号ではありません。
 
 ```text
 channel_switch_stress.exe .\BonDriver_DT295.dll <space> <channel-a> <channel-b> <cycles> <measure-ms>
@@ -65,7 +64,6 @@ I²Cパススルーを機器側、初期化・選局をホスト側へ置く構�
 
 ```ini
 [DeviceDefinition20.Config]
-Experimental=true
 FirmwareBackend=source-fr
 ```
 
@@ -111,11 +109,10 @@ CNRを250msごとに取得する10分試験の1回目では、試験中にPX-W3U
 
 `FirmwareBackend=direct-fr` はPIX-DT295 Rev.01向けの経路で、配布設定の既定です。補助CPUを起動しません。BonDriver IPC、選局ロジック、TS配信バッファは既存のDriverHostと共有します。機器側は主CPUのboot0に一時的なPIF1フックを置き、I²CとTS送出をそこで実行します。初期化列は `source-fr` と共用し、初期化の連続書き込みは最大40バイトの操作列にまとめます。主CPUが192バイトのリングレコードを188バイトTSに整形し、HostはBulk INに8 KiBの読み取りを64本投入します。C/Nは同じ復調レジスタとdB換算式を使用します。
 
-配布設定には次の値が含まれています。以前の配布物のINIを使い続ける場合は、次の値を追記します。
+配布設定には次の値が含まれています。以前の配布物のINIを使い続ける場合は、次の値を追記します。以前の配布物のINIに残る `Experimental` の行は読み込まれないため、`Experimental=false` のままでもPIX-DT295は有効になります。
 
 ```ini
 [DeviceDefinition20.Config]
-Experimental=true
 FirmwareBackend=direct-fr
 ```
 

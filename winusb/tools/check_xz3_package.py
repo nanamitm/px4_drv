@@ -45,8 +45,8 @@ def check(dist):
         section, = (key for key in host.sections() if host[key].get("Type", "").strip('"') == "GVMVPXZ3")
         if UUID(host[section]["DeviceInterfaceGUID"].strip('"')) != UUID(match[1]):
             raise ValueError(f"XZ3 INF and DriverHost GUID do not match: {folder}")
-        if not host[section + ".Config"].getboolean("Experimental"):
-            raise ValueError(f"XZ3 is disabled in the distribution: {folder}")
+        if host.has_option(section + ".Config", "Experimental"):
+            raise ValueError(f"Obsolete Experimental key in the distribution: {folder}")
 
         bon = configuration(folder / "BonDriver_XZ3.ini")
         if (not bon["BonDriver"].getboolean("FramedStream") or
