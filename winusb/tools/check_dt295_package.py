@@ -38,7 +38,8 @@ for bits, machine in ((32, 0x14c), (64, 0x8664)):
     if 'FramedStream=true' not in ini or 'System="ISDB-T,ISDB-S"' not in ini:
         raise SystemExit('DT295 stream/receiver configuration mismatch')
     host = (folder / 'DriverHost_PX4.ini').read_bytes()
-    if b'Experimental=false' not in host or b'f5b71c91-0634-4a6b-902f-fd5756f591d3' not in host:
+    if (any(line.strip().startswith(b'Experimental=') for line in host.splitlines()) or
+            b'f5b71c91-0634-4a6b-902f-fd5756f591d3' not in host):
         raise SystemExit('DT295 device definition mismatch')
     print('PASS DT295 package ' + str(bits) + 'bit')
 for folder in args.dist.glob('BonDriver_*'):

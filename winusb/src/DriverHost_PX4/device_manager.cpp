@@ -162,8 +162,7 @@ void DeviceManager::Add(const std::wstring &path, const std::pair<DeviceType, px
 	case px4::DeviceType::GVMVPXZ3:
 	{
 		// Zadig用の旧設定も使えるため、共通GUIDのときも対象USB IDだけを開く。
-		if (path.rfind(L"\\\\?\\usb#vid_04bb&pid_0530#", 0) != 0 ||
-		    !px4::util::wtob(def.second.configs.Get(L"Experimental", L"false")))
+		if (path.rfind(L"\\\\?\\usb#vid_04bb&pid_0530#", 0) != 0)
 			break;
 		auto dev = std::make_shared<px4::xz3::Device>(path, def.second, ++index_, receiver_manager_);
 		const int ret = dev->Init();

@@ -30,7 +30,7 @@ ZadigのWinUSBが優先されたままの場合は、デバイスマネージャ
 専用INFを使う設定では、XZ3の `DeviceInterfaceGUID` は
 `{44e46df4-5fbd-40c8-84d6-e56ddceb12be}` です。
 Zadigの共通WinUSB GUIDで動作している環境を継続する場合は、XZ3の定義で
-`DeviceInterfaceGUID="{dee824ef-729b-4a0e-9c14-b7117d33a817}"` と `Experimental=true` を使います。
+`DeviceInterfaceGUID="{dee824ef-729b-4a0e-9c14-b7117d33a817}"` を使います。
 
 ## 検証範囲
 
