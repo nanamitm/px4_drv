@@ -94,6 +94,25 @@ DeviceManager::DeviceManager(const px4::DeviceDefinitionSet &device_defs, px4::R
 
 	for (auto it = device_map_.cbegin(); it != device_map_.cend(); ++it)
 		Search(it->first, it->second);
+
+	/*
+	 * 機器を1台も検出しない原因が、INI からの定義の読み込みと機器の列挙のどちらにあるかをログから区別できるよう、起動時の件数を残す
+	 * 到着通知の処理は既に動いているため、検出台数は Add() と同じロックの下で読む
+	 */
+	std::size_t definitions = 0;
+
+	for (auto it = all_devs.cbegin(); it != all_devs.cend(); ++it)
+		definitions += it->second.size();
+
+	{
+		std::lock_guard<std::mutex> lock(mtx_);
+
+		msg_info("Device definitions: %zu (supported interfaces: %zu), devices found: %zu\n",
+			 definitions, device_map_.size(), devices_.size());
+	}
+
+	if (device_map_.empty())
+		msg_warn("No supported device definition was loaded. Check DriverHost_PX4.ini.\n");
 }
 
 DeviceManager::~DeviceManager()

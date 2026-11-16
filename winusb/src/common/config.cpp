@@ -91,10 +91,11 @@ bool ConfigSet::Load(const std::wstring &path) noexcept
 	for (WCHAR *p = sct.get(); *p != L'\0'; p += std::wcslen(p) + 1) {
 		auto v = configs_.emplace(p, Config());
 
-		if (!v.first->second.Load(path, p)) {
-			configs_.clear();
-			return false;
-		}
+		/*
+		 * 一覧に現れたセクションで GetPrivateProfileSectionW() が 0 を返すのは、; のコメントだけでキーを持たない場合に限られる
+		 * そのセクションで設定全体を破棄すると、機器定義がすべて消えて DriverHost_PX4 が機器を1台も検出しなくなるため、空の設定として残す
+		 */
+		v.first->second.Load(path, p);
 	}
 
 	return true;

@@ -17,7 +17,9 @@ DriverHost::DriverHost()
 	const std::wstring config_path = px4::util::path::GetFileBase() + L".ini";
 
 	msg_info("DriverHost config: %ls\n", config_path.c_str());
-	configs_.Load(config_path);
+	/* 読めない場合も既定値で起動を続けるが、機器定義がないことの原因をログから追えるようにする */
+	if (!configs_.Load(config_path))
+		msg_err("Cannot read DriverHost config: %ls\n", config_path.c_str());
 	/* 短い待機を削る変更は既定へ入れず、機種ごとの比較測定用に明示設定する。 */
 	const bool precise_wait = configs_.Exists(L"DriverHost_PX4") &&
 		px4::util::wtob(configs_.Get(L"DriverHost_PX4").Get(L"HighPrecisionDeviceWait", L"false"));

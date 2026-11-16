@@ -457,6 +457,12 @@ if ($LASTEXITCODE -ne 0) { throw 'PIX-DT295 package check failed.' }
 & python (Join-Path $PSScriptRoot 'tools/check_xz3_package.py')
 if ($LASTEXITCODE -ne 0) { throw 'GV-MVP/XZ3 package check failed.' }
 
+# キーを持たないセクションは以前の DriverHost_PX4 と BonDriver_PX4 で設定全体の読み込みを失敗させ、機器定義が消えるため配布しない
+& python (Join-Path $PSScriptRoot 'tests/ini_sections_test.py')
+if ($LASTEXITCODE -ne 0) { throw 'INI section check regression failed.' }
+& python (Join-Path $PSScriptRoot 'tools/check_ini_sections.py')
+if ($LASTEXITCODE -ne 0) { throw 'Key-less INI section found in the distribution.' }
+
 # アプリ署名も CAT と同じ上流の署名者へ固定する。通常の開発ビルドは従来どおり
 # 署名キー不要とし、配布用途では検証に成功した成果物だけを渡す。
 if ($SigningPfxPath -or $UseDriverPublisher) {

@@ -7,6 +7,7 @@
 #include <memory>
 #include <vector>
 
+#include "atr_length.hpp"
 #include "smart_card.hpp"
 
 namespace {
@@ -55,6 +56,7 @@ public:
 		} else {
 			read_queue.insert(read_queue.end(), atr_bytes.begin(), atr_bytes.end());
 		}
+		atr_pending_without_ready = atr_without_ready;
 		return 0;
 	}
 
@@ -72,15 +74,33 @@ public:
 			read_allowed = false;
 			return 0;
 		}
+		/* IT930x が一部カードの ATR で RX_READY を立てない状態を再現する */
+		if (atr_pending_without_ready) {
+			ready = false;
+			read_allowed = false;
+			return 0;
+		}
 		ready = !read_queue.empty();
 		read_allowed = ready;
 		return 0;
 	}
 
+	int GetCardDataLength(std::size_t &length) override
+	{
+		if (!report_length)
+			return -EOPNOTSUPP;
+		length_queried = true;
+		length = read_queue.size();
+		return 0;
+	}
+
 	int ReadCardData(std::uint8_t *buffer, std::uint8_t &length) override
 	{
-		if (!read_allowed)
+		if (atr_pending_without_ready) {
+			atr_read_without_ready = true;
+		} else if (!read_allowed) {
 			read_called_before_ready = true;
+		}
 		read_allowed = false;
 		std::size_t copy_length = std::min<std::size_t>(length, read_queue.size());
 		for (std::size_t index = 0; index < copy_length; index++) {
@@ -88,6 +108,8 @@ public:
 			read_queue.pop_front();
 		}
 		length = static_cast<std::uint8_t>(copy_length);
+		if (read_queue.empty())
+			atr_pending_without_ready = false;
 		return 0;
 	}
 
@@ -114,6 +136,16 @@ public:
 			return 0;
 		}
 
+		/* スカパー！プレミアムサービスのカードは RESYNCH へ状態語 6E00 を付けた C0 を返す */
+		if (resynch_unsupported && pcb == 0xc0) {
+			const std::uint8_t status_word[] = { 0x6e, 0x00 };
+			QueueBlock(0xc0, status_word, sizeof(status_word));
+			return 0;
+		}
+		if (resynch_empty_reply && pcb == 0xc0) {
+			QueueBlock(0xc0, nullptr, 0);
+			return 0;
+		}
 		/* 初期化 S ブロックは要求データをそのまま応答する */
 		if ((pcb & 0xc0) == 0xc0) {
 			if (endless_wtx && pcb == 0xe3) {
@@ -289,6 +321,13 @@ public:
 	bool drop_first_ifs = false;
 	bool read_called_before_ready = false;
 	bool read_allowed = false;
+	bool atr_without_ready = false;
+	bool atr_pending_without_ready = false;
+	bool atr_read_without_ready = false;
+	bool report_length = false;
+	bool length_queried = false;
+	bool resynch_unsupported = false;
+	bool resynch_empty_reply = false;
 	unsigned int ready_delay_checks = 0;
 	int detect_error = 0;
 	int detect_count = 0;
@@ -564,6 +603,116 @@ int main()
 	succeeded = Check(unsupported_card.Open() == -EOPNOTSUPP &&
 		!unsupported_device->is_open,
 		"An unsupported TA1 value was accepted.") && succeeded;
+
+	/*
+	 * スカパー！プレミアムサービスのカードは TA1=0x33 (744/4) で B-CAS と同じ19200bps になり、
+	 * IT930x はこの ATR で RX_READY を立てないため受信バイト数の停止で読み出す
+	 */
+	const std::vector<std::uint8_t> premium_atr = {
+		0x3b, 0xb0, 0x33, 0x00, 0x91, 0x81, 0x31, 0x6b, 0x35, 0xfc,
+	};
+	auto premium_device = std::make_shared<MockCardDevice>();
+	premium_device->atr_bytes = premium_atr;
+	premium_device->atr_without_ready = true;
+	premium_device->report_length = true;
+	premium_device->resynch_unsupported = true;
+	premium_device->is_present = true;
+	px4::SmartCard premium_card(premium_device);
+	bool premium_present = false, premium_initialized = false;
+	std::vector<std::uint8_t> premium_status_atr;
+	succeeded = Check(premium_card.Open() == 0 &&
+		premium_card.GetStatus(premium_present, premium_initialized,
+			premium_status_atr) == 0 &&
+		premium_present && premium_initialized &&
+		premium_status_atr == premium_atr &&
+		premium_device->baudrate == 19200 &&
+		premium_device->atr_read_without_ready &&
+		!premium_device->read_called_before_ready &&
+		premium_device->written_pcbs.size() >= 2 &&
+		premium_device->written_pcbs[0] == 0xc0 &&
+		premium_device->written_pcbs[1] == 0xc1 &&
+		premium_device->ifs_values.size() == 1 && premium_device->ifs_values[0] == 251,
+		"A card without RESYNCH support was not initialized through IFS.") &&
+		succeeded;
+
+	/* RESYNCH への応答は、実機で確認した形以外を従来どおり拒否する */
+	auto bad_resynch_device = std::make_shared<MockCardDevice>();
+	bad_resynch_device->is_present = true;
+	bad_resynch_device->resynch_empty_reply = true;
+	px4::SmartCard bad_resynch_card(bad_resynch_device);
+	succeeded = Check(bad_resynch_card.Open() == -EPROTO &&
+		!bad_resynch_device->is_open,
+		"An unexpected RESYNCH reply was accepted.") && succeeded;
+	response_length = sizeof(response);
+	succeeded = Check(premium_card.Transmit(apdu, sizeof(apdu), response,
+		response_length) == 0 && response_length == 2,
+		"A T=1 APDU failed after an ATR read without RX_READY.") && succeeded;
+	premium_card.Close();
+
+	/* 受信バイト数を返せない機種は、従来どおり RX_READY を待って期限で失敗する */
+	auto no_length_device = std::make_shared<MockCardDevice>();
+	no_length_device->atr_bytes = premium_atr;
+	no_length_device->atr_without_ready = true;
+	no_length_device->is_present = true;
+	px4::SmartCard no_length_card(no_length_device);
+	succeeded = Check(no_length_card.Open() == -ETIMEDOUT &&
+		!no_length_device->atr_read_without_ready &&
+		!no_length_device->read_called_before_ready,
+		"An ATR was read before RX_READY on a device without a received length.") &&
+		succeeded;
+
+	/* RX_READY が立つ B-CAS は、受信バイト数を返せる機種でも従来の読み出しを使う */
+	auto ready_device = std::make_shared<MockCardDevice>();
+	ready_device->report_length = true;
+	ready_device->is_present = true;
+	px4::SmartCard ready_card(ready_device);
+	succeeded = Check(ready_card.Open() == 0 &&
+		ready_device->baudrate == 19200 &&
+		!ready_device->length_queried &&
+		!ready_device->read_called_before_ready,
+		"A B-CAS ATR with RX_READY did not use the ready path.") && succeeded;
+	ready_card.Close();
+
+	/*
+	 * 受信を1バイトずつ溜める機種 (PIX-DT295 、torne 、GV-MVP/XZ3) は ATR の構造から
+	 * 全体の長さを求め、B-CAS 以外の ATR でも受信を終えた時点を判定する
+	 */
+	{
+		std::size_t atr_length = 0;
+		bool atr_length_succeeded = true;
+		for (std::size_t received = 1; received < 7; received++) {
+			atr_length_succeeded = atr_length_succeeded &&
+				px4::GetAtrLength(premium_atr.data(), received, atr_length) == -EAGAIN;
+		}
+		atr_length_succeeded = atr_length_succeeded &&
+			px4::GetAtrLength(premium_atr.data(), 7, atr_length) == 0 &&
+			atr_length == premium_atr.size();
+		const std::uint8_t bcas_atr[] = {
+			0x3b, 0xf0, 0x12, 0x00, 0xff, 0x91, 0x81,
+			0xb1, 0x7c, 0x45, 0x1f, 0x03, 0x99,
+		};
+		atr_length_succeeded = atr_length_succeeded &&
+			px4::GetAtrLength(bcas_atr, sizeof(bcas_atr), atr_length) == 0 &&
+			atr_length == sizeof(bcas_atr);
+		/* T=0 だけを示す ATR は TCK を持たない */
+		const std::uint8_t t0_atr[] = { 0x3b, 0x12, 0x14, 0x50, 0x00 };
+		atr_length_succeeded = atr_length_succeeded &&
+			px4::GetAtrLength(t0_atr, sizeof(t0_atr), atr_length) == 0 &&
+			atr_length == 5;
+		/* 連続リセット時の残留バイトなど、TS が ATR の値でないものは形式不正にする */
+		const std::uint8_t residual[] = { 0xfc, 0xff };
+		atr_length_succeeded = atr_length_succeeded &&
+			px4::GetAtrLength(residual, sizeof(residual), atr_length) == -EBADMSG;
+		/* 33バイトを超える ATR は規格外のため形式不正にする */
+		const std::uint8_t too_long[] = {
+			0x3b, 0xff, 0x11, 0x00, 0x00, 0xf1, 0x00, 0x00, 0x00,
+			0xf1, 0x00, 0x00, 0x00, 0xf1, 0x00, 0x00, 0x00, 0x01,
+		};
+		atr_length_succeeded = atr_length_succeeded &&
+			px4::GetAtrLength(too_long, sizeof(too_long), atr_length) == -EBADMSG;
+		succeeded = Check(atr_length_succeeded,
+			"The ATR length was not derived from the ATR structure.") && succeeded;
+	}
 
 	/* 一度抜去を観測した接続は、別の監視者が再初期化しても復活させない。 */
 	auto generation_device = std::make_shared<MockCardDevice>();

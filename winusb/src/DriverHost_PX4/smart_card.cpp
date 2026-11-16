@@ -25,6 +25,13 @@ constexpr std::uint8_t T1_S_WTX = 0x03;
 constexpr std::size_t CARD_UART_FRAME_MAX_LENGTH = 255;
 constexpr unsigned int CARD_POLL_INTERVAL_MS = 5;
 constexpr unsigned int ATR_TIMEOUT_MS = 1000;
+/*
+ * RX_READY が立たないまま受信バイト数の増加がこの時間止まったら、溜まった ATR を読み出す
+ * PX-MLT5PE ではスカパー！プレミアムサービスのカードの ATR 10バイトが最初の観測から15ms以内に揃い、
+ * 9600bps の1文字は約1.1msのため、文字間でこの時間増えなければ RX_READY を待たずに解析へ進める
+ * ATR は解析で完成を判定するため、途中を読み出しても残りは次の読み出しで連結される
+ */
+constexpr unsigned int ATR_STALL_MS = 50;
 /* 通常応答は約70msで返るため、取りこぼしを500msで再送処理へ移す */
 constexpr unsigned int BLOCK_TIMEOUT_MS = 500;
 constexpr unsigned int MAX_RETRIES = 3;
@@ -248,9 +255,41 @@ int SmartCard::ReadAtr(std::vector<std::uint8_t> &atr, AtrParameters &parameters
 		std::chrono::milliseconds(ATR_TIMEOUT_MS);
 	std::size_t expected_length = 0;
 
+	/*
+	 * RX_READY が立つ前の ATR を読み出すと末尾が FIFO に残るため、通常は完成を待つ
+	 * RX_READY を立てない ATR に備え、受信バイト数の増加が ATR_STALL_MS 止まった場合も読み出す
+	 * 末尾が残っても ParseAtr() が不足を -EAGAIN で返し、次の読み出しで連結する
+	 */
+	auto wait_atr_data = [this, &deadline]() -> int {
+		std::size_t last_length = 0;
+		auto stalled_since = std::chrono::steady_clock::now();
+		while (std::chrono::steady_clock::now() < deadline) {
+			bool ready = false;
+			int ret = device_->IsCardDataReady(ready);
+			if (ret || ready)
+				return ret;
+
+			std::size_t length = 0;
+			ret = device_->GetCardDataLength(length);
+			if (ret && ret != -EOPNOTSUPP)
+				return ret;
+			const auto now = std::chrono::steady_clock::now();
+			if (!ret && length) {
+				if (length != last_length) {
+					last_length = length;
+					stalled_since = now;
+				} else if (now - stalled_since >=
+					std::chrono::milliseconds(ATR_STALL_MS)) {
+					return 0;
+				}
+			}
+			std::this_thread::sleep_for(std::chrono::milliseconds(CARD_POLL_INTERVAL_MS));
+		}
+		return -ETIMEDOUT;
+	};
+
 	while (std::chrono::steady_clock::now() < deadline) {
-		/* RX_READY が立つ前の ATR を読み出すと末尾が FIFO に残るため完成を待つ */
-		int ret = WaitCardDataReady(deadline);
+		int ret = wait_atr_data();
 		if (ret)
 			return ret;
 
@@ -362,15 +401,31 @@ int SmartCard::ParseAtr(const std::vector<std::uint8_t> &atr,
 		}
 
 		if (group == 1 && has_ta) {
-			/* IT930x が生成できる FI=1 の速度だけを受理する */
-			switch (ta) {
-			case 0x11:
+			/*
+			 * 速度は 1etu のクロック数 Fi/Di で決まり、カード UART は ATR 受信時の
+			 * 372クロック (9600bps) を基準に 9600 、19200 、38400bps だけを生成できる
+			 * B-CAS は TA1=0x12 (372/2) 、スカパー！プレミアムサービスのカードは
+			 * TA1=0x33 (744/4) で、どちらも 186クロックの 19200bps になる
+			 */
+			static constexpr unsigned int FI_TABLE[16] = {
+				372, 372, 558, 744, 1116, 1488, 1860, 0,
+				0, 512, 768, 1024, 1536, 2048, 0, 0,
+			};
+			static constexpr unsigned int DI_TABLE[16] = {
+				0, 1, 2, 4, 8, 16, 32, 64, 12, 20, 0, 0, 0, 0, 0, 0,
+			};
+			const unsigned int fi = FI_TABLE[ta >> 4];
+			const unsigned int di = DI_TABLE[ta & 0x0f];
+			if (!fi || !di || fi % di)
+				return -EOPNOTSUPP;
+			switch (fi / di) {
+			case 372:
 				parameters.baudrate = 9600;
 				break;
-			case 0x12:
+			case 186:
 				parameters.baudrate = 19200;
 				break;
-			case 0x13:
+			case 93:
 				parameters.baudrate = 38400;
 				break;
 			default:
@@ -449,8 +504,17 @@ int SmartCard::InitializeT1(bool resynchronize, std::uint8_t ifsd)
 			data, deadline);
 		if (ret)
 			return ret;
-		if (pcb != (T1_S_BLOCK | T1_S_RESPONSE | T1_S_RESYNCH) ||
-			!data.empty())
+		/*
+		 * スカパー！プレミアムサービスのカードは RESYNCH に S ブロックの応答を返さず、
+		 * 検査値の正しい 00 C0 02 6E 00 (状態語 6E00) を返すが、続く IFS には正しく応答する
+		 * 完成フレームの応答は受信できており通信路は同期しているため、
+		 * RESYNCH 非対応として IFS へ進み、IFS の応答で初期化の成否を判定する
+		 * 送受信の連番は送信前に初期化済みで、RESYNCH の応答では進めない
+		 */
+		const bool resynch_unsupported =
+			pcb == (T1_S_BLOCK | T1_S_RESYNCH) && data.size() == 2;
+		if (!resynch_unsupported &&
+			(pcb != (T1_S_BLOCK | T1_S_RESPONSE | T1_S_RESYNCH) || !data.empty()))
 			return -EPROTO;
 	}
 
