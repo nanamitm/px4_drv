@@ -18,6 +18,7 @@
 #include <windows.h>
 #include <winscard.h>
 
+#include "call_log.hpp"
 #include "card_client.hpp"
 #include "native_winscard.hpp"
 #include "proxy_support.hpp"
@@ -129,7 +130,7 @@ LONG MapError(px4::card_command::Error error)
 	}
 }
 
-LONG Call(px4::CardClient &client, px4::card_command::Command &command)
+LONG CallUnlogged(px4::CardClient &client, px4::card_command::Command &command)
 {
 	const auto requested_code = command.code;
 	if (!client.Call(command))
@@ -160,6 +161,30 @@ LONG Call(px4::CardClient &client, px4::card_command::Command &command)
 		command.data_length > px4::card_command::MAX_DATA_SIZE)
 		return SCARD_F_INTERNAL_ERROR;
 	return SCARD_S_SUCCESS;
+}
+
+LONG Call(px4::CardClient &client, px4::card_command::Command &command)
+{
+	if (!px4::winscard::LogEnabled())
+		return CallUnlogged(client, command);
+
+	/* 応答で上書きされる前に、記録する要求の内容を写す */
+	const auto code = command.code;
+	std::wstring reader;
+	if (wmemchr(command.reader_name, L'\0', px4::card_command::MAX_READER_NAME))
+		reader = command.reader_name;
+	std::uint8_t header[4] = {};
+	const std::size_t send_length = code == px4::card_command::Code::TRANSMIT
+		? (std::min<std::size_t>)(command.data_length, px4::card_command::MAX_DATA_SIZE) : 0;
+	memcpy(header, command.data, (std::min<std::size_t>)(send_length, sizeof(header)));
+
+	const auto start = std::chrono::steady_clock::now();
+	const LONG result = CallUnlogged(client, command);
+	const auto elapsed_us = static_cast<std::uint64_t>(
+		std::chrono::duration_cast<std::chrono::microseconds>(
+			std::chrono::steady_clock::now() - start).count());
+	px4::winscard::LogCall(code, reader, result, elapsed_us, header, send_length, command);
+	return result;
 }
 
 LONG QueryPx4Readers(px4::CardClient &client,
