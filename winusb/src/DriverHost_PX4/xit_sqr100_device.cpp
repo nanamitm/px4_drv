@@ -2,7 +2,7 @@
 //
 // yyya-nico/px4_drv の feat/support-sqr100 (2026年10月) の XIT-SQR100 対応を、このリポジトリの受信機・カード・電源の共通処理へ合わせて移植した
 // 移植元では Windows の実機で地デジ・BS/CS の受信と内蔵カードの APDU を短時間確認している
-// J.83B (5.6Msps) は PX-MLT 系と同じ復調器 (CXD2856ER) の手順と、チューナー (CXD6866AER) の Sony の J.83B の設定で受信し、信号での受信は確認していない
+// J.83B (5.6Msps) は PX-MLT 系と同じ復調器 (CXD2856ER) の手順と、チューナー (CXD6866AER) の Sony の J.83B の設定で受信する
 
 #include "xit_sqr100_device.hpp"
 
@@ -339,6 +339,18 @@ int XitSqr100Device::IsCardDataReady(bool &ready)
 {
 	std::lock_guard<std::recursive_mutex> lock(lock_);
 	return card_open_ ? it930x_bcas_check_ready(&it930x_, &ready) : -ENODEV;
+}
+
+int XitSqr100Device::GetCardDataLength(std::size_t &length)
+{
+	std::lock_guard<std::recursive_mutex> lock(lock_);
+	if (!card_open_)
+		return -ENODEV;
+	u8 value = 0;
+	int ret = it930x_bcas_get_rx_length(&it930x_, &value);
+	if (!ret)
+		length = value;
+	return ret;
 }
 
 int XitSqr100Device::ReadCardData(std::uint8_t *buf, std::uint8_t &len)

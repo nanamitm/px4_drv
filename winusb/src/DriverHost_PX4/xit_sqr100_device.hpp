@@ -72,6 +72,7 @@ public:
 	int ResetCard() override;
 	int SetCardBaudrate(std::uint32_t baudrate) override;
 	int IsCardDataReady(bool &ready) override;
+	int GetCardDataLength(std::size_t &length) override;
 	int ReadCardData(std::uint8_t *buf, std::uint8_t &len) override;
 	int WriteCardData(const std::uint8_t *buf, std::uint8_t len) override;
 
