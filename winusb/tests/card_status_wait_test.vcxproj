@@ -60,6 +60,8 @@
     <ClCompile Include="card_status_wait_test.cpp" />
     <ClCompile Include="..\src\common\pipe.cpp" />
     <ClCompile Include="..\src\BonDriver_PX4\pipe_client.cpp" />
+    <ClCompile Include="..\src\WinSCard_PX4\call_log.cpp" />
+    <ClCompile Include="..\src\common\msg.c" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="..\src\DriverHost_PX4\ringbuffer.hpp" />
