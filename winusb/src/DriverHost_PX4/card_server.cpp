@@ -1,14 +1,63 @@
+#define msg_prefix	"card"
+
 #include "card_server.hpp"
 #include "ipc_names.hpp"
 
 #include <algorithm>
+#include <cstdio>
 #include <cstring>
 #include <vector>
 
 #include "card_command.hpp"
 #include "card_status_lock.hpp"
+#include "msg.h"
 
 namespace px4 {
+
+namespace {
+
+/*
+ * 成功した APDU を個別に記録する処理時間の下限。通常の応答は約70msで返り、
+ * ブロックの待機時間の既定値 500ms を超えた要求は再送か WTX を経ている
+ */
+constexpr std::uint64_t SLOW_TRANSMIT_US = 500000;
+/* 数日間の受信でもログを数MBに抑えつつ、ドロップの時刻と照合できる粒度で集計する */
+constexpr auto SUMMARY_INTERVAL = std::chrono::seconds(60);
+
+bool CardLogEnabled() noexcept
+{
+	/* 通常運用ではログファイルを開かないため、文字列の組み立ても省く */
+	return (msg_get_mode() & MSG_MODE_LOG_FILE) != 0;
+}
+
+std::string ToHex(const std::uint8_t *data, std::size_t length)
+{
+	std::string text;
+	char byte[4];
+	for (std::size_t index = 0; index < length; index++) {
+		sprintf_s(byte, sizeof(byte), index ? " %02X" : "%02X", data[index]);
+		text += byte;
+	}
+	return text;
+}
+
+std::uint64_t ElapsedUs(std::chrono::steady_clock::time_point start,
+	std::chrono::steady_clock::time_point end) noexcept
+{
+	return static_cast<std::uint64_t>(
+		std::chrono::duration_cast<std::chrono::microseconds>(end - start).count());
+}
+
+const char* ShareModeName(card_command::ShareMode mode) noexcept
+{
+	switch (mode) {
+	case card_command::ShareMode::SHARED: return "shared";
+	case card_command::ShareMode::EXCLUSIVE: return "exclusive";
+	default: return "undefined";
+	}
+}
+
+} // namespace
 
 CardServer::CardServer(DeviceManager &device_manager,
 			       ReceiverManager &receiver_manager) noexcept
@@ -137,6 +186,10 @@ void CardServer::CardConnection::ReleaseCard() noexcept
 {
 	if (!card_)
 		return;
+	LogTransmitSummary("release");
+	if (CardLogEnabled())
+		msg_info("release reader=%ls share=%s\n", reader_.c_str(), ShareModeName(share_mode_));
+	stats_ = TransmitStats();
 	if (transaction_) {
 		card_->transaction_active = false;
 		card_->io_mutex.unlock();
@@ -146,6 +199,7 @@ void CardServer::CardConnection::ReleaseCard() noexcept
 	card_.reset();
 	share_mode_ = card_command::ShareMode::UNDEFINED;
 	generation_ = 0;
+	reader_.clear();
 }
 
 void CardServer::CardConnection::SetError(card_command::Command &command,
@@ -184,6 +238,116 @@ void CardServer::CardConnection::SetError(card_command::Command &command,
 		command.error = card_command::Error::INTERNAL;
 		break;
 	}
+}
+
+void CardServer::CardConnection::LogTransmit(int ret, const std::uint8_t header[4],
+	std::size_t send_length, const card_command::Command &command,
+	std::size_t recv_length, std::uint64_t io_us, std::uint64_t wait_us,
+	const SmartCard::Diagnostics &before,
+	const SmartCard::Diagnostics &after) noexcept try
+{
+	if (!CardLogEnabled())
+		return;
+
+	const auto now = std::chrono::steady_clock::now();
+	if (!stats_.has_baseline) {
+		stats_.baseline = before;
+		stats_.has_baseline = true;
+		stats_.window_start = now;
+	}
+	stats_.latest = after;
+	stats_.count++;
+	stats_.total_us += io_us;
+	stats_.max_us = (std::max)(stats_.max_us, io_us);
+	stats_.max_wait_us = (std::max)(stats_.max_wait_us, wait_us);
+	if (ret)
+		stats_.failures++;
+
+	const bool recovered = after.block_retries != before.block_retries ||
+		after.wtx_requests != before.wtx_requests ||
+		after.i_block_resends != before.i_block_resends ||
+		after.response_recoveries != before.response_recoveries ||
+		after.resets != before.resets;
+	const bool slow = io_us >= SLOW_TRANSMIT_US;
+	if (slow)
+		stats_.slow++;
+
+	/* 失敗、遅延、再送を伴った APDU だけを個別に記録し、時刻を TS のドロップと照合できるようにする */
+	if (ret || slow || recovered) {
+		unsigned int sw = 0;
+		if (!ret && recv_length >= 2)
+			sw = (static_cast<unsigned int>(command.data[recv_length - 2]) << 8) |
+				command.data[recv_length - 1];
+		/* APDU の本文には鍵を含む応答があるため、ヘッダー4バイトと長さ、状態語だけを残す */
+		msg_printf("%s " msg_prefix ": transmit reader=%ls result=%d apdu=%02X%02X%02X%02X send=%zu recv=%zu sw=%04X io_ms=%.1f wait_ms=%.1f block_retry=+%llu wtx=+%llu i_resend=+%llu recover=+%llu reset=+%llu/%llu\n",
+			ret ? "[WARN]" : "[INFO]",
+			reader_.c_str(), ret, header[0], header[1], header[2], header[3],
+			send_length, recv_length, sw, io_us / 1000.0, wait_us / 1000.0,
+			static_cast<unsigned long long>(after.block_retries - before.block_retries),
+			static_cast<unsigned long long>(after.wtx_requests - before.wtx_requests),
+			static_cast<unsigned long long>(after.i_block_resends - before.i_block_resends),
+			static_cast<unsigned long long>(after.response_recoveries - before.response_recoveries),
+			static_cast<unsigned long long>(after.resets - before.resets),
+			static_cast<unsigned long long>(after.reset_failures - before.reset_failures));
+	}
+
+	if (now - stats_.window_start >= SUMMARY_INTERVAL) {
+		LogTransmitSummary("periodic");
+		stats_.count = stats_.failures = stats_.slow = 0;
+		stats_.total_us = stats_.max_us = stats_.max_wait_us = 0;
+		stats_.baseline = after;
+		stats_.window_start = now;
+	}
+}
+catch (...) {
+}
+
+void CardServer::CardConnection::LogTransmitSummary(const char *reason) noexcept
+{
+	if (!CardLogEnabled() || !stats_.has_baseline)
+		return;
+	/*
+	 * 累積値は最後の APDU の直後にカード I/O の排他下で写した値を使う
+	 * 切断時に排他を取り直すと、他接続のトランザクションの終了まで切断が待たされる
+	 */
+	const auto &current = stats_.latest;
+	const auto &base = stats_.baseline;
+	const double seconds = std::chrono::duration<double>(
+		std::chrono::steady_clock::now() - stats_.window_start).count();
+	msg_info("summary reader=%ls reason=%s window_s=%.0f transmits=%llu failures=%llu slow=%llu avg_ms=%.1f max_ms=%.1f max_wait_ms=%.1f block_retry=%llu wtx=%llu i_resend=%llu recover=%llu reset=%llu reset_fail=%llu\n",
+		reader_.c_str(), reason, seconds,
+		static_cast<unsigned long long>(stats_.count),
+		static_cast<unsigned long long>(stats_.failures),
+		static_cast<unsigned long long>(stats_.slow),
+		stats_.count ? stats_.total_us / 1000.0 / stats_.count : 0.0,
+		stats_.max_us / 1000.0, stats_.max_wait_us / 1000.0,
+		static_cast<unsigned long long>(current.block_retries - base.block_retries),
+		static_cast<unsigned long long>(current.wtx_requests - base.wtx_requests),
+		static_cast<unsigned long long>(current.i_block_resends - base.i_block_resends),
+		static_cast<unsigned long long>(current.response_recoveries - base.response_recoveries),
+		static_cast<unsigned long long>(current.resets - base.resets),
+		static_cast<unsigned long long>(current.reset_failures - base.reset_failures));
+}
+
+void CardServer::CardConnection::LogStatus(const std::wstring &reader, int ret,
+	const card_command::Command &command) noexcept try
+{
+	if (!CardLogEnabled())
+		return;
+	char text[160];
+	sprintf_s(text, sizeof(text), "result=%d present=%d initialized=%d atr=",
+		ret, ret ? 0 : command.card_present, ret ? 0 : command.card_initialized);
+	std::string signature = text;
+	if (!ret)
+		signature += ToHex(command.atr,
+			(std::min<std::size_t>)(command.atr_length, card_command::MAX_ATR_SIZE));
+	auto &last = last_status_[reader];
+	if (last == signature)
+		return;
+	last = signature;
+	msg_info("status reader=%ls %s\n", reader.c_str(), signature.c_str());
+}
+catch (...) {
 }
 
 void CardServer::CardConnection::Worker() noexcept
@@ -249,14 +413,22 @@ void CardServer::CardConnection::Worker() noexcept
 						command.error = card_command::Error::NO_READER;
 					else
 						SetError(command, ret);
+					if (CardLogEnabled())
+						msg_warn("connect reader=%ls share=%s result=%d\n",
+							command.reader_name, ShareModeName(share_mode), ret);
 					break;
 				}
 				card_ = std::move(card);
 				share_mode_ = share_mode;
+				reader_ = command.reader_name;
 				{
 					std::lock_guard<std::recursive_mutex> lock(card_->io_mutex);
 					ret = card_->card.BindConnection(generation_);
 				}
+				if (CardLogEnabled())
+					msg_printf("%s " msg_prefix ": connect reader=%ls share=%s result=%d\n",
+						ret ? "[WARN]" : "[INFO]", reader_.c_str(),
+						ShareModeName(share_mode), ret);
 				if (ret) { SetError(command, ret); ReleaseCard(); }
 				break;
 			}
@@ -270,15 +442,15 @@ void CardServer::CardConnection::Worker() noexcept
 				auto requested_mode =
 					static_cast<card_command::ShareMode>(command.share_mode);
 				int ret = card_parent_.ChangeShareMode(card_, share_mode_, requested_mode);
-				if (ret) {
-					SetError(command, ret);
-					break;
-				}
-				share_mode_ = requested_mode;
-				{
+				if (!ret) {
+					share_mode_ = requested_mode;
 					std::lock_guard<std::recursive_mutex> lock(card_->io_mutex);
 					ret = card_->card.BindConnection(generation_);
 				}
+				if (CardLogEnabled())
+					msg_printf("%s " msg_prefix ": reconnect reader=%ls share=%s result=%d\n",
+						ret ? "[WARN]" : "[INFO]", reader_.c_str(),
+						ShareModeName(requested_mode), ret);
 				if (ret) SetError(command, ret);
 				break;
 			}
@@ -319,6 +491,7 @@ void CardServer::CardConnection::Worker() noexcept
 							command.error = card_command::Error::NO_READER;
 						else
 							SetError(command, ret);
+						LogStatus(command.reader_name, ret, command);
 						break;
 					}
 					/* 監視用パイプが生きている間だけカード状態と ATR を保持する */
@@ -335,13 +508,17 @@ void CardServer::CardConnection::Worker() noexcept
 				/* 在否の照会は GetStatus の1回だけにし、その観測で自接続の失効を判定する */
 				if (!ret && status_card == card_)
 					ret = card_->card.CheckGeneration(generation_);
+				lock.unlock();
 				if (ret) {
 					SetError(command, ret);
+					LogStatus(command.reader_name, ret, command);
 					break;
 				}
 				command.atr_length = static_cast<std::uint32_t>(atr.size());
 				if (!atr.empty())
 					memcpy(command.atr, atr.data(), atr.size());
+				/* 他接続のトランザクション中の -EBUSY は短い周期で交互に現れるため、記録の対象から外す */
+				LogStatus(command.reader_name, 0, command);
 				break;
 			}
 
@@ -352,8 +529,25 @@ void CardServer::CardConnection::Worker() noexcept
 					break;
 				}
 				std::vector<std::uint8_t> atr;
-				std::lock_guard<std::recursive_mutex> lock(card_->io_mutex);
-				int ret = card_->card.ResetConnection(generation_, atr);
+				int ret;
+				SmartCard::Diagnostics diagnostics;
+				std::uint64_t io_us;
+				{
+					std::lock_guard<std::recursive_mutex> lock(card_->io_mutex);
+					const auto start = std::chrono::steady_clock::now();
+					ret = card_->card.ResetConnection(generation_, atr);
+					io_us = ElapsedUs(start, std::chrono::steady_clock::now());
+					diagnostics = card_->card.GetDiagnostics();
+				}
+				if (CardLogEnabled())
+					msg_printf("%s " msg_prefix ": reset reader=%ls result=%d io_ms=%.1f atr=%s baud=%u ifsc=%u crc=%d bwt_ms=%u atr_retry_total=%llu\n",
+						ret ? "[WARN]" : "[INFO]", reader_.c_str(), ret, io_us / 1000.0,
+						ToHex(atr.data(), atr.size()).c_str(),
+						ret ? 0U : diagnostics.baudrate,
+						ret ? 0U : static_cast<unsigned int>(diagnostics.ifsc),
+						ret ? 0 : static_cast<int>(diagnostics.use_crc),
+						ret ? 0U : diagnostics.block_timeout_ms,
+						static_cast<unsigned long long>(diagnostics.atr_retries));
 				if (ret) {
 					SetError(command, ret);
 					break;
@@ -375,14 +569,32 @@ void CardServer::CardConnection::Worker() noexcept
 				}
 				/* 必要サイズを返せるよう、共有コマンド領域の全容量で受信する */
 				std::size_t recv_length = card_command::MAX_DATA_SIZE;
-				std::lock_guard<std::recursive_mutex> lock(card_->io_mutex);
-				int ret = card_->card.TransmitConnection(generation_, command.data,
-					command.data_length, command.data, recv_length);
+				/* 応答で上書きされる前に、診断ログ用の APDU ヘッダーを写す */
+				std::uint8_t header[4] = {};
+				const std::size_t send_length = command.data_length;
+				memcpy(header, command.data, (std::min<std::size_t>)(send_length, sizeof(header)));
+				SmartCard::Diagnostics before, after;
+				std::uint64_t io_us, wait_us;
+				int ret;
+				const auto wait_start = std::chrono::steady_clock::now();
+				{
+					std::lock_guard<std::recursive_mutex> lock(card_->io_mutex);
+					const auto io_start = std::chrono::steady_clock::now();
+					before = card_->card.GetDiagnostics();
+					ret = card_->card.TransmitConnection(generation_, command.data,
+						command.data_length, command.data, recv_length);
+					after = card_->card.GetDiagnostics();
+					io_us = ElapsedUs(io_start, std::chrono::steady_clock::now());
+					wait_us = ElapsedUs(wait_start, io_start);
+				}
 				command.data_length = static_cast<std::uint32_t>(recv_length);
 				if (!ret && recv_length > command.data_capacity)
 					ret = -ENOBUFS;
 				if (ret)
 					SetError(command, ret);
+				/* ログの書き込みはカード I/O の排他を解放してから行い、他接続の APDU を待たせない */
+				LogTransmit(ret, header, send_length, command, recv_length, io_us, wait_us,
+					before, after);
 				break;
 			}
 
@@ -440,7 +652,17 @@ void CardServer::CardConnection::Worker() noexcept
 			}
 		} catch (...) {
 			SetError(command, -EIO);
+			if (CardLogEnabled())
+				msg_err("exception code=%u reader=%ls\n",
+					static_cast<unsigned int>(command.code), reader_.c_str());
 		}
+
+		if (CardLogEnabled() && command.status == card_command::Status::FAILED &&
+			(command.code == card_command::Code::BEGIN_TRANSACTION ||
+			 command.code == card_command::Code::END_TRANSACTION))
+			msg_warn("transaction code=%u reader=%ls error=%u disposition=%u\n",
+				static_cast<unsigned int>(command.code), reader_.c_str(),
+				static_cast<unsigned int>(command.error), command.disposition);
 
 		std::size_t written = 0;
 		if (!conn_->Write(&command, sizeof(command), written, quit_event_) || written != sizeof(command))
