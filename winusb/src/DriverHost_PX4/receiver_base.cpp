@@ -482,11 +482,12 @@ void ReceiverBase::StreamBuffer::HandleReadWithEpoch(std::size_t buf_size, std::
 }
 
 
-bool ReceiverBase::StreamBuffer::AdvanceEpoch() noexcept
+bool ReceiverBase::StreamBuffer::AdvanceEpoch(std::uint32_t *new_epoch) noexcept
 {
 	std::lock_guard<std::mutex> lock(epoch_mtx_);
 	if(!Purge())return false;
 	if(!++epoch_)++epoch_;
+	if(new_epoch)*new_epoch=epoch_;
 	return true;
 }
 

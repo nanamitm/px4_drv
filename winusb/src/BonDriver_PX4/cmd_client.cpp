@@ -138,6 +138,20 @@ bool CtrlCmdClient::CheckLock(bool &locked) noexcept
 	return ret;
 }
 
+bool CtrlCmdClient::PurgeStream(std::uint32_t &epoch) noexcept
+{
+	px4::command::CtrlPurgeStreamCmd purge_cmd{};
+
+	purge_cmd.cmd = px4::command::CtrlCmdCode::PURGE_STREAM;
+	purge_cmd.status = px4::command::CtrlStatusCode::NONE;
+
+	if (!Call(purge_cmd) || !purge_cmd.epoch)
+		return false;
+
+	epoch = purge_cmd.epoch;
+	return true;
+}
+
 bool CtrlCmdClient::SetLnbVoltage(std::int32_t voltage) noexcept
 {
 	px4::command::CtrlLnbVoltageCmd lnb_cmd;

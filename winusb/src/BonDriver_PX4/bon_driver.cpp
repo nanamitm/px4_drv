@@ -514,16 +514,27 @@ const BOOL BonDriver::GetTsStream(BYTE **ppDst, DWORD *pdwSize, DWORD *pdwRemain
 
 void BonDriver::PurgeTsStream(void)
 {
+	std::uint32_t epoch = 0;
 	{
-		px4::command::DataCmd data_cmd;
-		std::size_t ret_size;
 		std::lock_guard<std::mutex> lock(mtx_);
 
-		data_cmd.cmd = px4::command::DataCmdCode::PURGE;
-		data_pipe_->Write(&data_cmd, sizeof(data_cmd), ret_size);
+		/*
+		 * データのパイプの PURGE は世代を変えず、応答も待たないため、DriverHost がパージを処理する前に送った TS が
+		 * パイプと受信中のバッファーに残り、パージ後の TS の前に渡っていた (J.83B の選局直後の CC の飛び)。
+		 * 世代付きの接続では制御のパイプでパージを頼み、返った世代より前のデータを IoQueue で捨てる。
+		 * このコマンドを知らない古い DriverHost では、従来のデータのパイプの PURGE に戻す
+		 */
+		if (!framed_stream_ || !ctrl_client_.PurgeStream(epoch)) {
+			px4::command::DataCmd data_cmd;
+			std::size_t ret_size;
+
+			epoch = 0;
+			data_cmd.cmd = px4::command::DataCmdCode::PURGE;
+			data_pipe_->Write(&data_cmd, sizeof(data_cmd), ret_size);
+		}
 	}
 
-	ioq_->PurgeDataBuffer();
+	ioq_->PurgeDataBuffer(epoch);
 	if (ts_diagnostics_enabled_) {
 		std::lock_guard<std::mutex> diagnostic_lock(diagnostic_mtx_);
 		ts_diagnostics_.Reset();

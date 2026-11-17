@@ -106,6 +106,52 @@ static void QueueTests(){
     for(unsigned i=0;i<8;++i)Check(static_cast<std::uint8_t*>(current)[i]==2,"mixed epochs in queue");
     source.End();queue.Stop();
 }
+// パージで受け取った世代より前のデータは、キュー、受信中のバッファー、パイプに残っていた分のいずれも渡さない。
+// パージ後の世代と、その後の選局で進んだ世代は受け付ける
+static void PurgeEpochTests(){
+    std::uint32_t got=0;void* current=nullptr;std::size_t size=0,remain=0;
+    {
+        Provider source;px4::IoQueue queue(px4::IoQueue::IoOperation::READ,source,8,8,2,0);
+        Check(queue.Start(),"purge queue start");
+        source.Push(1,8);                         // パージ前に完成してキューに入ったバッファー
+        source.Push(1,4);                         // パージの時点で読み込み中のバッファー
+        Until([&]{return source.calls>=3;});
+        queue.PurgeDataBuffer(2);
+        Check(queue.GetDataBufferCount()==0,"queued pre-purge buffer kept");
+        source.Push(1,4);                         // パイプに残っていたパージ前のデータ
+        source.Push(1,4);                         // 同上 (読み込み中のバッファーの残りの長さで届く)
+        source.Push(2,4);source.Push(2,4);        // パージ後の世代
+        Until([&]{return source.calls>=7;});
+        Until([&]{return queue.GetDataBufferCount()==1;});
+        Check(queue.ReadBuffer(&current,size,remain,false,&got)&&size==8&&got==2,"post-purge epoch delivered first");
+        for(unsigned i=0;i<8;++i)Check(static_cast<std::uint8_t*>(current)[i]==2,"pre-purge bytes delivered after purge");
+        source.Push(3,8);                         // 後の選局で進んだ世代
+        Until([&]{return queue.GetDataBufferCount()==1;});
+        Check(queue.ReadBuffer(&current,size,remain,false,&got)&&size==8&&got==3,"later epoch accepted");
+        source.End();queue.Stop();
+    }
+    {
+        // 32 ビットの折り返し。世代は 0 を飛ばすため、0xfffffffe の後は 0xffffffff、1 と進む
+        Provider source;px4::IoQueue queue(px4::IoQueue::IoOperation::READ,source,8,8,2,0);
+        Check(queue.Start(),"wrap queue start");
+        queue.PurgeDataBuffer(0xffffffffu);
+        source.Push(0xfffffffeu,8);source.Push(1,8);
+        Until([&]{return source.calls>=3;});
+        Until([&]{return queue.GetDataBufferCount()==1;});
+        Check(queue.ReadBuffer(&current,size,remain,false,&got)&&got==1,"wrapped epoch after purge accepted, older rejected");
+        source.End();queue.Stop();
+    }
+    {
+        // 世代を指定しないパージ (古い DriverHost との組み合わせ) は従来どおり世代で捨てない
+        Provider source;px4::IoQueue queue(px4::IoQueue::IoOperation::READ,source,8,8,2,0);
+        Check(queue.Start(),"legacy purge queue start");
+        queue.PurgeDataBuffer();
+        source.Push(1,8);
+        Until([&]{return queue.GetDataBufferCount()==1;});
+        Check(queue.ReadBuffer(&current,size,remain,false,&got)&&got==1,"legacy purge filters by epoch");
+        source.End();queue.Stop();
+    }
+}
 static void HostTests(){
     px4::ReceiverBase::StreamBuffer buffer;Check(buffer.Alloc(188*16),"host allocation");
     buffer.SetThresholdSize(188);buffer.PrepareRead();buffer.Start();
@@ -183,4 +229,14 @@ static void TsmfHostTests() {
     cancelled.get(); buffer.Stop();
 }
 
-int main(){FrameTests();ByteFrameTests();QueueTests();HostTests();TsmfHostTests();std::cout<<"PASS: stream epochs, fragmented frames, stale queue discard and pointer lifetime (no hardware)\n";}
+// 制御のパージは世代を進め、進めた後の世代を返す (0 は飛ばす)
+static void HostPurgeEpochTests(){
+    px4::ReceiverBase::StreamBuffer buffer;Check(buffer.Alloc(188*16),"host purge allocation");
+    buffer.SetThresholdSize(188);buffer.PrepareRead();buffer.Start();
+    std::uint32_t first=0,second=0;
+    Check(buffer.AdvanceEpoch(&first)&&first!=0,"purge epoch returned");
+    Check(buffer.AdvanceEpoch(&second)&&second==first+1,"purge epoch advances");
+    buffer.Stop();
+}
+
+int main(){FrameTests();ByteFrameTests();QueueTests();PurgeEpochTests();HostTests();HostPurgeEpochTests();TsmfHostTests();std::cout<<"PASS: stream epochs, fragmented frames, stale queue discard, purge epochs and pointer lifetime (no hardware)\n";}

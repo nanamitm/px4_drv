@@ -137,11 +137,15 @@ bool IoQueue::WaitDataBuffer(std::chrono::milliseconds ms)
 	return true;
 }
 
-void IoQueue::PurgeDataBuffer()
+void IoQueue::PurgeDataBuffer(std::uint32_t min_epoch)
 {
 	std::lock_guard<std::mutex> lock(mtx_);
 	std::unique_lock<std::mutex> free_lock(free_mtx_);
 	std::lock_guard<std::mutex> data_lock(data_mtx_);
+
+	// 受信スレッドが読み込み中のバッファーはここから触れないため、世代で区別して受信スレッドが捨てる
+	if (min_epoch)
+		min_epoch_.store(min_epoch);
 
 	if (current_buf_) {
 		free_buf_.push_back(std::move(current_buf_));
@@ -282,6 +286,15 @@ bool IoQueue::PushBackDataBuffer(std::unique_ptr<IoBuffer> &&buf)
 {
 	std::unique_lock<std::mutex> lock(data_mtx_);
 
+	/*
+	 * パージの前に読み込みを始め、その後に新しい世代が届かなかったバッファーは、パージ前のデータだけを持つ。
+	 * PurgeDataBuffer は data_mtx_ を持って min_epoch_ を設定するため、ここで調べればキューを空にした直後の追加も捨てられる
+	 */
+	if (buf && buf->actual_length && StaleEpoch(buf->epoch)) {
+		lock.unlock();
+		return PushBackFreeBuffer(std::move(buf));
+	}
+
 	if (data_ignore_remain_ > 0) {
 		data_ignore_remain_--;
 		lock.unlock();
@@ -384,6 +397,9 @@ void IoQueue::ReadWorker()
 			}
 			if(!rlen || rlen>buf_size_-rofs){quit=true;break;}
 			const auto epoch=iop_.Epoch();
+			// パージより前の世代は、パイプに残っていた分も捨てる (受け取ったバイトを読み捨て、同じ位置へ読み直す)
+			if(StaleEpoch(epoch))
+				continue;
 			if(epoch!=stream_epoch_.load()) {
 				ChangeEpoch(epoch);
 				// 同じキューバッファーへ新旧世代を連結しない。
@@ -424,6 +440,13 @@ void IoQueue::ChangeEpoch(std::uint32_t epoch)
 	// 解放は Read/ReadBuffer 側で世代を確認してから行うため、受信スレッドから触れない。
 	stream_epoch_.store(epoch);
 	free_lock.unlock();free_cond_.notify_all();
+}
+
+bool IoQueue::StaleEpoch(std::uint32_t epoch) const noexcept
+{
+	// 世代は 1 ずつ進み、0 を飛ばして 32 ビットで折り返すため、差を符号付きで比べる
+	const auto min = min_epoch_.load();
+	return min && static_cast<std::int32_t>(epoch - min) < 0;
 }
 
 void IoQueue::WriteWorker()
