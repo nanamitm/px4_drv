@@ -57,6 +57,15 @@ int main(int argc,char **argv){
             if(test==3 || test==4 || test==6)CHECK(rc==-ENODEV);
             unsigned calls=io.submits;transport.Begin(1000);
             CHECK(callbacks.control(callbacks.opaque,0x40,0xbc,0,0,bytes,64,2)==rc);CHECK(io.submits==calls);
+            CHECK(transport.Failed()==rc);
+            // カード操作の終わりの解除の後は、失敗した要求を再送せず、次の要求だけを送る。
+            if(test==1 || test==2){
+                transport.ClearFailure();CHECK(!transport.Failed());
+                io.short_read=false;io.signal=true;io.collect=0;const unsigned collects=io.collects;
+                CHECK(!callbacks.control(callbacks.opaque,0x40,0xbc,0x0c7d,0x4620,bytes,64,2));
+                CHECK(io.submits==calls+1 && io.collects==collects+1);
+                io.collects=collects; // 後続の回収数の検査を元の要求だけで行う。
+            }
         }
         CHECK(io.collects==((test<=3)?1u:0u));CHECK(io.cancels==((test==2 || test==3)?1u:0u));
         dt295_runtime *runtime=nullptr;

@@ -134,18 +134,24 @@ public:
         ++command_waiters_;
         std::unique_lock<std::mutex> command(command_mutex_);
         --command_waiters_;
+        // 選局、SERVICE、CN、復元の転送失敗は、それぞれの経路が受信の停止と次回のCloseでの復元で扱う。
+        // 応答の分からない要求が残る間は、カード操作からも転送を始めない。
+        if(const int failed=transport_.Failed())return failed;
         auto hold=Clock::now();
         transport_.Begin(2000);
+        bool inherited=false;
         // PIF1の導入後は、FIFOをファームウェアの一括転送で移す。導入前はTSを受信していない。
         DirectBus::BulkFifo bulk;
         if(source_->Ready())
             bulk=[this](bool write,std::uint8_t *data,std::size_t &count){return source_->CardFifo(write,data,count);};
-        DirectBus bus(transport_.Callbacks(),[this,&command,&hold](unsigned ms){
+        DirectBus bus(transport_.Callbacks(),[this,&command,&hold,&inherited](unsigned ms){
             RecordHold(StallHistory::Kind::Card,hold);
             command.unlock();
             const DWORD wait=WaitForSingleObject(parent_.removed_,ms);
             ++command_waiters_;command.lock();--command_waiters_;
             hold=Clock::now();
+            // 待機中に他の経路の転送が失敗した場合は、その失敗を解除せずにカード操作を終える。
+            if(const int failed=transport_.Failed()){inherited=true;return failed;}
             transport_.Begin(2000);
             return wait==WAIT_TIMEOUT?0:-ENODEV;
         },std::move(bulk));
@@ -154,6 +160,11 @@ public:
         RecordHold(StallHistory::Kind::Card,hold);
         if(rc && bus.Error())
             msg_err("PIX-DT295: card transfer failed errno=%d win32=%lu\n",bus.Error(),transport_.LastError());
+        // カード操作の転送失敗は、DirectBusがこの操作の後続を止め、SmartCardが次のAPDUでカードをリセットし直す。
+        // 次の操作は失敗した要求の結果に依存しないため、ここで解除する。解除しないと、受信していない間は
+        // カードがDriverHost_PX4の再起動まで使えず、受信中はSERVICEも失敗してTSが止まる。
+        // PIF1の応答は連番で照合するため、遅れて実行された要求の応答はSERVICEが-EPROTOとして検出する。
+        if(!inherited && transport_.Failed())transport_.ClearFailure();
         return rc;
     }
 protected:
