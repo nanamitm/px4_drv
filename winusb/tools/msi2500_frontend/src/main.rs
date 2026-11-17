@@ -209,9 +209,9 @@ fn run_capture(a: Args) -> i32 {
     }
     let el = t0.elapsed().as_secs_f64();
     let rate = counter.blocks as f64 * 384.0 / el.max(1e-9);
-    eprintln!("[capture] total: {:.2}s blocks={} samples={} startup_blocks={} lost={} gaps={} backward={} bad_packets={} odd_packets={} transfer_errors={} mean_rate={:.0}",
+    eprintln!("[capture] total: {:.2}s blocks={} samples={} startup_blocks={} lost={} gaps={} backward={} bad_packets={} odd_packets={} transfer_errors={} max_submit_gap_ms={:.1} mean_rate={:.0}",
         el, counter.blocks, counter.blocks * 384, counter.startup_blocks, counter.lost_samples, counter.gaps, counter.backward,
-        stats.bad_packets, stats.odd_packets, stats.transfer_errors, rate);
+        stats.bad_packets, stats.odd_packets, stats.transfer_errors, stats.max_submit_gap_us as f64 / 1e3, rate);
     match r {
         Ok(()) if !write_failed => 0,
         Ok(()) => {
@@ -431,8 +431,9 @@ fn run_live(a: Args) -> i32 {
             eprintln!("[live] capture stopped: {e}");
             device_error = Some(e);
         }
-        eprintln!("[live] usb: transfers={} packets={} bad_packets={} odd_packets={} transfer_errors={} last_error=0x{:x} unwritten_blocks={}",
-            stats.transfers, stats.packets, stats.bad_packets, stats.odd_packets, stats.transfer_errors, stats.last_error, stats.unwritten_blocks);
+        eprintln!("[live] usb: transfers={} packets={} bad_packets={} odd_packets={} transfer_errors={} last_error=0x{:x} unwritten_blocks={} max_submit_gap_ms={:.1}",
+            stats.transfers, stats.packets, stats.bad_packets, stats.odd_packets, stats.transfer_errors, stats.last_error, stats.unwritten_blocks,
+            stats.max_submit_gap_us as f64 / 1e3);
     }
     let wall_in = t0.elapsed().as_secs_f64();
     let overflow = live.overflow_chunks();
@@ -552,8 +553,9 @@ fn run_live_j83b(a: Args) -> i32 {
             eprintln!("[live] capture stopped: {e}");
             device_error = Some(e);
         }
-        eprintln!("[live] usb: transfers={} packets={} bad_packets={} odd_packets={} transfer_errors={} last_error=0x{:x} unwritten_blocks={} first_block={:.3}s",
+        eprintln!("[live] usb: transfers={} packets={} bad_packets={} odd_packets={} transfer_errors={} last_error=0x{:x} unwritten_blocks={} max_submit_gap_ms={:.1} first_block={:.3}s",
             stats.transfers, stats.packets, stats.bad_packets, stats.odd_packets, stats.transfer_errors, stats.last_error, stats.unwritten_blocks,
+            stats.max_submit_gap_us as f64 / 1e3,
             first_block.unwrap_or(f64::NAN));
     }
     let wall_in = t0.elapsed().as_secs_f64();
@@ -835,8 +837,9 @@ fn run_serve(mut it: impl Iterator<Item = String>) -> i32 {
                 feeder.push(blk);
                 !stop.load(Ordering::Relaxed)
             });
-            eprintln!("[serve] usb: transfers={} packets={} bad_packets={} odd_packets={} transfer_errors={} last_error=0x{:x} unwritten_blocks={}",
-                cs.transfers, cs.packets, cs.bad_packets, cs.odd_packets, cs.transfer_errors, cs.last_error, cs.unwritten_blocks);
+            eprintln!("[serve] usb: transfers={} packets={} bad_packets={} odd_packets={} transfer_errors={} last_error=0x{:x} unwritten_blocks={} max_submit_gap_ms={:.1}",
+                cs.transfers, cs.packets, cs.bad_packets, cs.odd_packets, cs.transfer_errors, cs.last_error, cs.unwritten_blocks,
+                cs.max_submit_gap_us as f64 / 1e3);
             eprintln!("[serve] done: {}", pipe.finish(feeder));
             let _ = otx.send(match r {
                 Err(e) if !stop.load(Ordering::Relaxed) => OutMsg::Error(format!("capture stopped: {e}")),
