@@ -591,7 +591,11 @@ impl Ofdm {
         let mut out: Vec<[Vec<usize>; 4]> = Vec::with_capacity(13);
         let mut center_ok = None;
         for pos in 0..13 {
-            let mut sc: Vec<(f32, usize)> = (0..432).map(|l| {
+            // TMCC・AC のキャリアは全シンボルで同じ位置にあり、4 シンボルで 3 の倍数の位置をすべて巡る SP と重ならない
+            // (中央セグメントの既知の 12 本もすべて 3 の倍数でない)。候補を 3 の倍数でない位置に限ると、
+            // どの SP 位相でもデータキャリアが 384 本になる。全位置を候補にしていたときは、無信号や雑音で
+            // SP の位置を選ぶと 385 本以上になり、出力の配列の範囲外を書いて helper が異常終了した
+            let mut sc: Vec<(f32, usize)> = (0..432).filter(|l| l % 3 != 0).map(|l| {
                 let k = pos * 432 + l;
                 (self.ctrl_num[k].norm() / self.ctrl_den[k].max(1e-12), l)
             }).collect();
