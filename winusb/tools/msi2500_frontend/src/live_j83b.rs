@@ -4,7 +4,8 @@
 //!   取り込み (呼び出し側) → [生ブロックのキュー] → QAM 復調 → [シンボルのキュー] → 誤り訂正 → TS
 //!
 //! 取り込みのスレッドはキューが満杯でもチャンクを捨てて進み、捨てたチャンクはブロックのサンプル番号の欠落として
-//! 復調側で検出される。欠落の前後はつながないため、復調と誤り訂正の状態をすべて作り直す。
+//! 復調側で検出される。判定帰還で追従している間の MAX_BRIDGE_SAMPLES 以下の欠落は、失ったサンプル数の 0 を消失として入れ、
+//! 時刻を保って復調と誤り訂正の状態を引き継ぐ。それ以外の欠落と番号の巻き戻りでは、状態をすべて作り直す。
 
 use crate::blocks::{BlockCounter, BlockState};
 use crate::j83b::{J83bDecoder, J83bStats};
@@ -26,6 +27,12 @@ const BLOCK: usize = 1024;
 const FS: f64 = 512e6 / 63.0;
 /// PX-S1UD (SMS2270) の IQ の 12 MS/s
 const S1UD_FS: f64 = 12e6;
+/// 判定帰還で追従している間に、状態を作り直さずに埋める欠落の上限 (サンプル数、10,000 ブロック = 約 473 ms)。
+/// これより長い欠落と番号の巻き戻り、判定帰還に入る前の欠落は作り直す。
+/// 録画 IQ (H008、MER 約 32 dB) から欠落を 3 回抜いた試験では、作り直すと欠落の長さの分に加えて 1 回あたり約 470〜500 パケット
+/// (等化器の収束とフレーム同期の取り直し) を失い、埋めると 0.14 ms〜473 ms のどの長さでも上乗せが約 20〜140 パケットだった。
+/// それより長い欠落は試していない
+pub const MAX_BRIDGE_SAMPLES: u64 = 10_000 * 384;
 
 pub struct J83bLiveConfig {
     /// 生ブロックのキューの長さ (チャンク数、1 チャンク約 12 ms)。live.rs の LiveConfig と同じ理由で 256 を使う
@@ -46,6 +53,8 @@ pub struct J83bLiveStats {
     pub backward: u64,
     /// 不連続で状態を作り直した回数 + 1
     pub segments: u64,
+    /// 状態を作り直さずに埋めた欠落の回数 (gaps に含まれる)
+    pub bridged: u64,
     /// 復調に入れたサンプル数 (全区間)
     pub samples: u64,
     /// I か Q が ADC の最大値に達したサンプル数。利得が大きすぎると MER はほとんど下がらないまま
@@ -188,6 +197,7 @@ fn qam_loop(rx: Receiver<Vec<u8>>, tx: SyncSender<SymMsg>, stats: Arc<Mutex<J83b
     let mut demod = QamDemod::new(FS, pll);
     let mut samples = Vec::with_capacity(CHUNK_BLOCKS * 384);
     let mut segments = 1u64;
+    let mut bridged = 0u64;
     let mut total_samples = 0u64;
     let mut clipped = 0u64;
     const CLIP: f32 = 0.99;
@@ -211,6 +221,21 @@ fn qam_loop(rx: Receiver<Vec<u8>>, tx: SyncSender<SymMsg>, stats: Arc<Mutex<J83b
             }
             match state {
                 BlockState::Startup => continue,
+                BlockState::Gap(lost) if lost <= MAX_BRIDGE_SAMPLES && demod.stats.dd => {
+                    // 判定帰還で追従している間の短い欠落は、失ったサンプル数の 0 を消失として入れて時刻を保ち、
+                    // 復調と誤り訂正の状態を引き継ぐ。作り直すと等化器の収束とフレーム同期の取り直しの分も TS を失う
+                    if !run(&mut samples, &mut demod, &mut total_samples) {
+                        break 'outer;
+                    }
+                    let fill = vec![Complex32::default(); lost as usize];
+                    let mut syms = Vec::with_capacity(fill.len() * 3 / 4);
+                    demod.push_erased(&fill, 0..fill.len(), &mut syms);
+                    total_samples += lost;
+                    if !syms.is_empty() && tx.send(SymMsg::Syms(syms)).is_err() {
+                        break 'outer;
+                    }
+                    bridged += 1;
+                }
                 BlockState::Gap(_) | BlockState::Backward => {
                     // 不連続の前までを処理してから、前後をつながずに状態をすべて作り直す
                     if !run(&mut samples, &mut demod, &mut total_samples) {
@@ -239,6 +264,7 @@ fn qam_loop(rx: Receiver<Vec<u8>>, tx: SyncSender<SymMsg>, stats: Arc<Mutex<J83b
         s.gaps = counter.gaps;
         s.backward = counter.backward;
         s.segments = segments;
+        s.bridged = bridged;
         s.samples = total_samples;
         s.clipped = clipped;
         s.qam = demod.stats.clone();

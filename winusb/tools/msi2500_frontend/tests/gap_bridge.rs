@@ -105,6 +105,52 @@ fn run_live(data: &[u8], drop: Option<(usize, usize)>) -> (Vec<u8>, msi2500_fron
     (out, stats)
 }
 
+/// J.83B の録画を処理系へ流し、出力した TS と統計を返す。drop は落とすブロックの範囲
+fn run_j83b(data: &[u8], drop: Option<(usize, usize)>) -> (Vec<u8>, msi2500_frontend::live_j83b::J83bLiveStats) {
+    use msi2500_frontend::live_j83b::{J83bLive, J83bLiveConfig};
+    let ts = Shared::default();
+    let (live, mut feeder) = J83bLive::start(J83bLiveConfig {
+        raw_queue: 64,
+        symbol_queue: 512,
+        pll_scale: 1.0,
+        ts_out: Some(Box::new(ts.clone())),
+    });
+    for (i, blk) in data.chunks_exact(1024).enumerate() {
+        if drop.is_some_and(|(a, b)| a <= i && i < b) {
+            continue;
+        }
+        feeder.push_wait(blk);
+    }
+    let stats = live.finish(feeder);
+    let out = ts.0.lock().unwrap().clone();
+    (out, stats)
+}
+
+/// J.83B の録画 (MSI2500_TEST_J83B、20 秒以上) から実機で観測した長さ (171 ブロック、約 8 ms) の欠落を抜き、
+/// 作り直さずに埋めて、失う TS が欠落の長さの分 (約 220 パケット) と小さな上乗せに収まることを確かめる。
+/// 作り直す扱いでは、同じ欠落で約 700 パケットを失った
+#[test]
+fn recorded_j83b_survives_short_gap_without_restart() {
+    let Some(path) = std::env::var_os("MSI2500_TEST_J83B") else {
+        eprintln!("MSI2500_TEST_J83B is not set; skipping");
+        return;
+    };
+    use msi2500_frontend::live_j83b::MAX_BRIDGE_SAMPLES as J83B_MAX;
+    let data = std::fs::read(path).unwrap();
+    let blocks_per_s = 8_126_984 / 384;
+    assert!(data.len() / 1024 > 20 * blocks_per_s, "recording shorter than 20 s");
+    let at = 12 * blocks_per_s;
+    let (base, s0) = run_j83b(&data, None);
+    let (gap, s1) = run_j83b(&data, Some((at, at + 171)));
+    assert_eq!((s0.gaps, s0.segments, s0.bridged), (0, 1, 0));
+    assert_eq!((s1.gaps, s1.bridged, s1.segments), (1, 1, 1));
+    assert!(171 * 384 <= J83B_MAX);
+    assert_eq!(s0.fec_total().rs_uncorrectable, 0, "baseline must decode cleanly");
+    let lost = (base.len() - gap.len()) / 188;
+    // 8.08 ms 分は約 220 パケット。作り直すと約 700 パケットになる
+    assert!(lost < 400, "lost {lost} packets across an 8 ms gap");
+}
+
 #[test]
 fn recorded_iq_survives_short_gap_without_restart() {
     let Some(path) = std::env::var_os("MSI2500_TEST_IQ") else {
