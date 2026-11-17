@@ -160,10 +160,12 @@ DriverHost と helper の間のキューがあふれた場合も、捨てたブ�
 
 ### 設定
 
-`DriverHost_PX4.ini` の `[DeviceDefinition18.Config]` に同梱の J.83B 用 firmware と helper を指定し、
-`[DeviceDefinition18.Receiver0]` の `System` を `"ISDB-T,J.83B"` にします。
-相対パスは `DriverHost_PX4.exe` の配置先が基準です。helper は MSi2500 の配布物の
-`msi2500` フォルダーにあり、PX-S1UD の配布物には含まれていません。
+配布物の設定では J.83B が既定で有効です。PX-S1UD の配布物には、J.83B 用の firmware
+（`firmware\s1ud_j83b.inp`）、MSi2500 と同じ helper（`msi2500\msi2500_frontend.exe`、GPL-3.0）、
+helper の対応ソース（`Sources`）、J.83B のチャンネル定義（`BonDriver_PX4-J83B.ChSet.txt`）が含まれます。
+`DriverHost_PX4.ini` の `[DeviceDefinition18.Config]` が firmware と helper を指定し、
+`[DeviceDefinition18.Receiver0]` の `System` は `"ISDB-T,J.83B"` です。
+相対パスは `DriverHost_PX4.exe` の配置先が基準です。
 
 ```ini
 [DeviceDefinition18.Config]
@@ -172,9 +174,20 @@ J83BFirmwarePath="firmware\s1ud_j83b.inp"
 HelperPath="msi2500\msi2500_frontend.exe"
 ```
 
-`BonDriver_PX-S1UD.ini` では、`[BonDriver]` と `[ReceiverDefinition0]` の `System` を
-`"ISDB-T,J.83B"` にし、`[BonDriver.J.83B]` の `ChSetPath` に `BonDriver_PX4-J83B.ChSet.txt` を指定します。
+`BonDriver_PX-S1UD.ini` では、`[BonDriver]` と `[ReceiverDefinition0]` の `System` が
+`"ISDB-T,J.83B"` で、`[BonDriver.J.83B]` の `ChSetPath` が `BonDriver_PX4-J83B.ChSet.txt` を指します。
 `System` に J.83B を書いて `J83BFirmwarePath` を指定しない場合、DriverHost は機器を登録しません。
+
+`DriverHost_PX4.ini` はすべての機種の配布物で共通です。DriverHost は最初に起動した BonDriver の
+フォルダーから動くため、helper を含まない機種のフォルダーから起動した DriverHost では、
+PX-S1UD の J.83B の選局が helper を起動できずに失敗します。ISDB-T の受信には影響しません。
+J.83B も使う場合は、PX-S1UD の BonDriver を最初に開くか、PX-S1UD の配布物の `msi2500` フォルダーを
+DriverHost の配置先へ置きます。
+
+J.83B を使わない場合は、`DriverHost_PX4.ini` の `J83BFirmwarePath` と `HelperPath` をコメントにして
+`Receiver0` の `System` を `"ISDB-T"` にし、`BonDriver_PX-S1UD.ini` の 2 つの `System` も `"ISDB-T"` にして
+`[BonDriver.J.83B]` の節をコメントにします。以前の版の設定ファイルは J.83B が無効のため、
+上書きしない限りそのまま ISDB-T だけで動作します。
 
 helper の標準エラー出力は、`DriverHost_PX4.exe` の配置先の `px-s1ud_j83b-<機器番号>.log` に残ります。
 終了時の行の `queue_dropped_blocks` は DriverHost と helper の間で捨てたブロック数、

@@ -22,7 +22,9 @@
     .equ STREAM_SLOTS_MAX, 64
     .equ RING_BASE, 0xf68500
     .equ RING_END, 0xf6f800
-    /* DMA は 1 ブロック分の環状領域の最後の語を書いて停止する。この語の変化で終端を検出する */
+    /* DMA は 1 ブロック分の環状領域の最後の語を書いて停止する。この語の変化で終端を検出する。
+       DMA の語は I と Q の 16 ビットのそれぞれでビット 12 が常に立ち (実機の 3 チャンネルで取った約 1.2 億語の
+       AND が 0x10001000)、標本が 0 でも語は 0 にならないため、0 を書いてから 0 以外を待つ判定で足りる */
     .equ RING_LAST, 0xf6f7fc
     .equ RING_WORDS, 7360
     /* 別の firmware への読み込み直し。参照 firmware と同じく、0xe00000 からのアドレスで受け取った
@@ -159,12 +161,17 @@ reload_start_reply:
     mov r3, 703
     b small_reply
 
-/* 660: 0xe00000 からのアドレスのデータを 0xe20000 以降へ書く。範囲外は 661 で 1 を返す */
+/* 660: 0xe00000 からのアドレスのデータを 0xe20000 以降へ書く。範囲外は 661 で 1 を返す。
+   702 は停止を要求するだけで、送出タスクは最後のブロックと USB の完了を待ってから止まる。
+   読み込み先は送出の枠と重なるため、送出タスクが止まるまでは書かずに 1 を返す */
 staging_write:
     push_s blink
     push_s r13
     mov r13, r0
     mov r2, 1
+    mov r0, stream_active
+    ld.di r0, [r0]
+    brne r0, 0, staging_write_reply
     ldh r4, [r13, 4]
     cmp r4, 12
     bls staging_write_reply
@@ -187,7 +194,8 @@ staging_check:
     mov r3, STAGING_ADDRESS
     cmp r2, r3
     blo staging_check_rom
-    mov r3, STAGING_ADDRESS + 0x20000
+    /* staging_map が受け付ける範囲だけを扱い、0xe10000 の鏡像を含む残りは ROM に任せる */
+    mov r3, STAGING_ADDRESS + STAGING_SIZE
     cmp r2, r3
     bhs staging_check_rom
     push_s blink
@@ -219,6 +227,9 @@ staging_map:
     mov r3, STAGING_SIZE
     cmp r0, r3
     bhs staging_map_bad
+    /* 662 のバイト数はホストの 32 ビット値のため、足す前に上限を確かめて桁あふれを防ぐ */
+    cmp r4, r3
+    bhi staging_map_bad
     add r2, r0, r4
     cmp r2, r3
     bhi staging_map_bad
@@ -235,6 +246,10 @@ reload_request:
     push_s blink
     push_s r13
     mov r13, r0
+    /* 送出タスクが枠へ書いている間は、置いたイメージが壊れている可能性があるため実行しない */
+    mov r0, stream_active
+    ld.di r0, [r0]
+    brne r0, 0, reload_reject
     mov r0, STAGING_BASE
     ld r1, [r0, 0x14]
     mov r2, STAGING_ADDRESS
@@ -850,6 +865,11 @@ fixed_data:
     bne iq_request
     b status
 fixed_command:
+    /* 以下は調査用の要求で、選局、DMA、送出の枠を送出タスクと共用する。送出中に実行すると連続送出が
+       壊れるため、送出中は何もせず状態だけを返す */
+    mov r2, stream_active
+    ld.di r2, [r2]
+    brne r2, 0, status
     cmp r1, 2
     beq snapshot
     cmp r1, 3
@@ -1578,7 +1598,19 @@ stream_idle_wait:
    書かれていた) ブロックの次は、番号の上位 2 ビットへ 2 を入れる。通常は 1 */
 stream_run:
     push_s blink
+    /* 送出中の印。660、704、調査用の要求は、この値が 0 に戻るまで枠と DMA に触れない */
+    mov r0, stream_active
+    mov_s r1, 1
+    st.di r1, [r0]
     jl stream_init_slots
+    brne r0, 0, stream_slots_ready
+    /* 枠の配置が不正なら送出せず、errors を数えて待機へ戻る */
+    mov r0, stream_stats
+    ld.di r1, [r0, 20]
+    add r1, r1, 1
+    st.di r1, [r0, 20]
+    b stream_stopped
+stream_slots_ready:
     /* r24 は枠の中の何番目のブロックか、r25 は 1 回の送信にまとめるブロック数 */
     mov r24, 0
     mov r0, slot_config
@@ -1767,6 +1799,9 @@ stream_stop_scan:
     sub.f r15, r15, 1
     bne stream_stop_wait
 stream_stopped:
+    mov r0, stream_active
+    mov_s r1, 0
+    st.di r1, [r0]
     pop_s blink
     j_s [blink]
 
@@ -1793,7 +1828,9 @@ stream_arm:
     j_s [blink]
 
 /* 環状領域の語 r15 から r1 の手前までを r16 の枠へ詰める。1 語は 16 ビットの I と Q で、
-   2 語から I0, I1, Q0, Q1 の 4 バイトを作る。参照 firmware の 0x48938 と同じビット位置 */
+   2 語から I0, I1, Q0, Q1 の 4 バイトを作る。参照 firmware の 0x48938 と同じビット位置。
+   Rio-A0 の ARC700 はデータキャッシュを持たない (DCACHE_BUILD と ICACHE_BUILD が 0) ため、DMA と共有する
+   領域でも .di のない読み書きで最新の値を扱える */
 stream_pack:
     sub r2, r1, r15
     lsr.f r2, r2, 1
@@ -1900,6 +1937,23 @@ stream_init_slots:
     mov r10, 14724
     cmp r9, 2
     mov.eq r10, 29448
+    /* slot_config は引数 100 で書き換えられるため、送出前に配置を確かめる。枠が 0 個なら以降の
+       数え下げが一周し、枠の間隔が 1 回の送信より狭いか、HIF ヘッダー (12 バイト) と DMA 記述子
+       (16 バイト) の表が重なると、隣の枠や記述子を壊す。不正なら r0 = 0 を返して送出しない */
+    breq r3, 0, stream_init_bad
+    brlo r6, r10, stream_init_bad
+    asl r4, r3, 3
+    asl r12, r3, 2
+    add r4, r4, r12
+    brlo r1, r0, stream_init_desc_first
+    add r4, r4, r0
+    brlo r1, r4, stream_init_bad
+    b stream_init_layout_ok
+stream_init_desc_first:
+    asl r4, r3, 4
+    add r4, r4, r1
+    brlo r0, r4, stream_init_bad
+stream_init_layout_ok:
     add r11, r10, 8
     or r11, r11, 0x000d0000
     mov r5, slot_busy
@@ -1926,6 +1980,10 @@ stream_init_place:
     add r5, r5, 1
     sub.f r3, r3, 1
     bne stream_init_next
+    mov_s r0, 1
+    j_s [blink]
+stream_init_bad:
+    mov_s r0, 0
     j_s [blink]
 
 pll_lock_sequence:
@@ -2356,6 +2414,9 @@ stream_req:
 /* 作成済み, ROM が返したタスク */
 stream_state:
     .long 0, 0
+/* 送出タスクが stream_run の中にいる間は 1 (枠と DMA を使用中) */
+stream_active:
+    .long 0
 /* filled, sent, late, dropped, timeouts, errors */
 stream_stats:
     .long 0, 0, 0, 0, 0, 0
