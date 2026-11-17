@@ -461,8 +461,8 @@ fn j83b_line(s: &msi2500_frontend::live_j83b::J83bLiveStats) -> String {
     let f = s.fec_total();
     let q = &s.qam;
     format!(
-        "signal={:7.2}s blocks={} lost={} gaps={} seg={} clip={:.1e} MER={:.1}dB dd={} restarts={} timing={:+.2}ppm carrier={:+.0}Hz | frames={} sync_loss={} acq={} ctrl_rej={} | RS blk={} corr={} unc={} | pkt={} cs_err={} pkt_sync_loss={} tei={} cc={}",
-        s.signal_s(), s.blocks, s.lost_samples, s.gaps, s.segments, s.clipped as f64 / s.samples.max(1) as f64,
+        "signal={:7.2}s blocks={} lost={} gaps={} bridged={} seg={} clip={:.1e} MER={:.1}dB dd={} restarts={} timing={:+.2}ppm carrier={:+.0}Hz | frames={} sync_loss={} acq={} ctrl_rej={} | RS blk={} corr={} unc={} | pkt={} cs_err={} pkt_sync_loss={} tei={} cc={}",
+        s.signal_s(), s.blocks, s.lost_samples, s.gaps, s.bridged, s.segments, s.clipped as f64 / s.samples.max(1) as f64,
         q.mer_db, q.dd as u8, q.restarts, q.timing_ppm, q.carrier_hz,
         f.frames, f.frame_sync_losses, f.acquisitions, f.control_word_rejects, f.rs_blocks, f.rs_corrected, f.rs_uncorrectable,
         s.ts_packets, f.checksum_errors, f.packet_sync_losses, s.tei, s.cc_errors
