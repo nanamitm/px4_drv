@@ -452,6 +452,27 @@ a continuous stream of 892 (0x37C) blocks, like the reference firmware.
 Frequencies from 90 MHz to 775 MHz are accepted, the same range as
 DriverHost. Frequencies above that range return result 1.
 
+The stream task detects the end of each DMA block when the last ring
+word changes from zero. A measurement build sampled the 64 ring words
+before the last one in every block on 333.75 MHz (10 min), 574.25 MHz
+(about 4 min) and 132.25 MHz (5 min), about 117 million words in all.
+The AND of all of them was 0x10001000: bit 12 of both the I and Q
+halves is always set, so a word is never zero even when both 12-bit
+samples are zero. Zero 12-bit I or Q samples occurred about 102,000
+and 107,000 times, but no zero words occurred. In those runs the end
+wait needed at most 1,541 of its 200,000 iterations, and no wait timed
+out. The same build read DCACHE_BUILD (0x72) and ICACHE_BUILD (0x77)
+as 0 and DCCM_BUILD (0x74) as 0x301. The ARC700 in this chip has no
+data cache, so the cached loads and stores in `stream_pack` see the
+DMA data directly.
+
+Code placed between the end detection and the DMA restart delays the
+restart. An earlier measurement build recorded statistics there, and
+the demodulator then failed to lock (MER 17 dB with 33 restarts in
+2 s, against about 30 dB without it). The same statistics recorded
+after the restart had no effect. That path is limited to the restart
+itself.
+
 The tuning follows the reference routines at 0x47afc and 0x478b4.
 The sub-band boundaries are 84, 150, and 360 MHz. Below 84 MHz the PLL
 step is one sixteenth of the 12 MHz reference. Below 360 MHz it is one
