@@ -98,6 +98,8 @@ pub struct Stats {
     pub mer_db: [f32; 3],
     pub tmcc: Option<Tmcc>,
     pub ctrl_matches_center: Option<bool>,
+    /// 欠落を埋めた区間に FFT の窓が掛かり、消失として出したシンボルの数
+    pub erased_symbols: u64,
 }
 
 enum State {
@@ -122,7 +124,10 @@ pub struct Ofdm {
     sh: i32,
     q: usize,
     n: u64, // 追従開始からの FFT 済みシンボル数
-    ring: VecDeque<(u64, Vec<Complex32>)>,
+    /// FFT 済みのシンボル (番号、有効キャリア、欠落を埋めた区間に掛かったか)
+    ring: VecDeque<(u64, Vec<Complex32>, bool)>,
+    /// push_gap で埋めた区間 (絶対サンプル位置の [始め, 終わり))
+    erased: VecDeque<(u64, u64)>,
     col_prev: Vec<(i64, Complex32)>,
     col_last: Vec<(i64, Complex32)>,
     acc: Vec<Complex32>,
@@ -168,6 +173,7 @@ impl Ofdm {
             q: 0,
             n: 0,
             ring: VecDeque::new(),
+            erased: VecDeque::new(),
             col_prev: vec![(-100, Complex32::new(0.0, 0.0)); NCOL],
             col_last: vec![(-100, Complex32::new(0.0, 0.0)); NCOL],
             acc: vec![Complex32::new(0.0, 0.0); NC],
@@ -189,6 +195,22 @@ impl Ofdm {
             stats: Stats::default(),
             scratch: vec![Complex32::new(0.0, 0.0); N],
         }
+    }
+
+    /// 初期同期を終え、シンボル位置と周波数を追従しているか
+    pub fn tracking(&self) -> bool {
+        matches!(self.state, State::Track)
+    }
+
+    /// 取り込みの欠落を、失ったサンプル数の 0 で埋めて復調を続ける。追従中だけ使う。
+    /// シンボル位置と周波数の追従はサンプル数で時刻を保つため、欠落の前後で同期を取り直さずに済む。
+    /// 埋めた区間に FFT の窓が掛かるシンボルは、伝送路・追従・誤差統計の更新に使わず、
+    /// 全キャリアの重みを 0 (消失) として出す。消失はビタビ復号と RS 符号が時間インターリーブ越しに訂正する
+    pub fn push_gap(&mut self, n: usize) -> Vec<SymbolOut> {
+        debug_assert!(self.tracking());
+        let start = self.base + self.buf.len() as u64;
+        self.erased.push_back((start, start + n as u64));
+        self.push(&vec![Complex32::new(0.0, 0.0); n])
     }
 
     fn sp_phase(&self, n: u64) -> usize {
@@ -336,6 +358,11 @@ impl Ofdm {
         let frac = self.pos - start;
         let ws = start as i64 + (G / 2) as i64;
         let off = (ws - self.base as i64) as usize;
+        // 窓 [ws, ws + N) が push_gap で埋めた区間に掛かるか。過ぎた区間は捨てる
+        while self.erased.front().is_some_and(|&(_, b)| (b as i64) <= ws) {
+            self.erased.pop_front();
+        }
+        let erased = self.erased.iter().any(|&(a, b)| (a as i64) < ws + N as i64 && ws < b as i64);
         // NCO の位相を窓の先頭まで進める (周波数を変えても位相は連続)
         let step = -2.0 * std::f64::consts::PI * self.f_hz / FS;
         let ph0 = self.nco_phase + step * (ws as f64 - self.nco_ref);
@@ -352,7 +379,7 @@ impl Ofdm {
             self.scratch[i] = (v - self.dc) * r;
             rot *= inc;
         }
-        {
+        if !erased {
             self.dc = self.dc * 0.98 + (mean / N as f32) * 0.02;
         }
         self.fft.process(&mut self.scratch);
@@ -370,23 +397,26 @@ impl Ofdm {
         }
         let n = self.n;
         let ph = self.sp_phase(n);
-        // 追従用: 4 シンボル前との SP 位相差
-        if let Some((_, y4)) = self.ring.iter().find(|(m, _)| *m + 4 == n) {
+        // 欠落を埋めた区間に掛かるシンボルは、追従と伝送路の推定に使わない (前後の観測で補間する)
+        if !erased {
+            // 追従用: 4 シンボル前との SP 位相差
+            if let Some((_, y4, _)) = self.ring.iter().find(|(m, _, e)| *m + 4 == n && !*e) {
+                let mut k = 3 * ph;
+                while k < NC {
+                    self.acc[k] += y[k] * y4[k].conj();
+                    k += 12;
+                }
+            }
+            // SP 列の観測を更新 (PRBS の符号を外して伝送路にする)
             let mut k = 3 * ph;
             while k < NC {
-                self.acc[k] += y[k] * y4[k].conj();
+                let j = k / 3;
+                self.col_prev[j] = self.col_last[j];
+                self.col_last[j] = (n as i64, y[k] * self.pr[k]);
                 k += 12;
             }
         }
-        // SP 列の観測を更新 (PRBS の符号を外して伝送路にする)
-        let mut k = 3 * ph;
-        while k < NC {
-            let j = k / 3;
-            self.col_prev[j] = self.col_last[j];
-            self.col_last[j] = (n as i64, y[k] * self.pr[k]);
-            k += 12;
-        }
-        self.ring.push_back((n, y));
+        self.ring.push_back((n, y, erased));
         if self.ring.len() > 8 { self.ring.pop_front(); }
         self.n += 1;
         self.pos += L as f64 + self.delta + self.delta_extra;
@@ -421,7 +451,10 @@ impl Ofdm {
     }
 
     fn equalize(&mut self, m: u64) -> Option<SymbolOut> {
-        let y = &self.ring.iter().find(|(i, _)| *i == m)?.1;
+        if self.ring.iter().find(|(i, _, _)| *i == m)?.2 {
+            return self.erased_output(m);
+        }
+        let y = &self.ring.iter().find(|(i, _, _)| *i == m)?.1;
         let mi = m as i64;
         let mut hc = vec![Complex32::new(0.0, 0.0); NCOL];
         for j in 0..NCOL {
@@ -533,6 +566,38 @@ impl Ofdm {
         // この関数の冒頭で out_count を進めたため、このシンボルの番号は out_count - 1
         let frame_symbol = self.frame_origin.map(|o| self.out_count - 1 - o);
         Some(SymbolOut { index: m, z: zo, w: wo, tmcc: tm, frame_symbol })
+    }
+
+    /// 欠落を埋めた区間に掛かったシンボルの出力。フレーム内の位置と番号は通常のシンボルと同じく進め、
+    /// 全キャリアを値 0・重み 0 の消失とする。TMCC・制御キャリアの検出と誤差統計は更新しない
+    fn erased_output(&mut self, m: u64) -> Option<SymbolOut> {
+        // tmcc_bits の添字と out_count の対応を保つため、TMCC のビットは 0 として 1 つ進める。
+        // 差動の基準 (prev_tmcc) は欠落前のシンボルのまま残す
+        self.tmcc_bits.push(0);
+        if self.tmcc.is_none() { self.try_tmcc(); }
+        self.out_count += 1;
+        self.stats.erased_symbols += 1;
+        if self.data_idx.is_none() {
+            return None;
+        }
+        let tm = self.tmcc;
+        if let Some(t) = tm {
+            if self.out_count % 64 == 0 { self.update_layer_stats(&t); }
+            let since = self.out_count - *self.tmcc_at.get_or_insert(self.out_count);
+            if since < 128 {
+                if since == 127 { self.update_layer_stats(&t); }
+                return None;
+            }
+        }
+        self.stats.symbols_out = self.out_count;
+        let frame_symbol = self.frame_origin.map(|o| self.out_count - 1 - o);
+        Some(SymbolOut {
+            index: m,
+            z: vec![Complex32::new(0.0, 0.0); 13 * NDC],
+            w: vec![0.0; 13 * NDC],
+            tmcc: tm,
+            frame_symbol,
+        })
     }
 
     fn update_layer_stats(&mut self, t: &Tmcc) {

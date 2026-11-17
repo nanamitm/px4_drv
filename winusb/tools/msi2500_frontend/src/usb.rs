@@ -347,24 +347,13 @@ pub fn capture(
                 // 完了していない転送のバッファーはドライバーが使っているため、投入し直さずに完了を待ち続ける
                 continue 'run;
             }
-            // 完了した転送の失敗 (検証環境では USBD_STATUS_ISO_NOT_ACCESSED_LATE、投入が間に合わなかった) の後は
-            // 連続性が切れるため、この転送だけを新しいストリームとして投入し直す。
-            // パイプを止めて全転送を投入し直す方法は、以後の転送がすべて ERROR_BUSY で失敗し続けたため採用しなかった
-            buf[k * xlen..(k + 1) * xlen].fill(UNWRITTEN);
-            match submit(k, false, &mut desc[k], &mut ov[k]) {
-                Ok(()) => {
-                    inflight[k] = true;
-                    note_submit(&mut submitted_at[k], &mut last_submit, stats);
-                }
-                Err(e) => {
-                    result = Err(UsbError::DeviceGone(e));
-                    break 'run;
-                }
-            }
-            k = (k + 1) % TRANSFERS;
-            continue 'run;
         } else {
             consecutive_errors = 0;
+        }
+        // 失敗した転送でも、状態が 0 のパケットはデータを受け取っている。USBD_STATUS_ISO_TD_ERROR では
+        // 64 パケット (8 ms) のうち 1 パケットだけが失敗した例があり、転送ごと捨てると欠落が 64 倍に広がる。
+        // 失敗したパケットと、触れられなかったパケット (投入前に長さを 0 にしている) と、印が残るブロックは下で除く
+        {
             for d in desc[k].iter() {
                 stats.packets += 1;
                 if d.Status != 0 {
@@ -406,7 +395,14 @@ pub fn capture(
             break;
         }
         buf[k * xlen..(k + 1) * xlen].fill(UNWRITTEN);
-        if submit(k, true, &mut desc[k], &mut ov[k]).is_err() {
+        // 投入が間に合わなかった失敗 (USBD_STATUS_ISO_NOT_ACCESSED_LATE など) の後はストリームの時刻が切れているため、
+        // この転送だけを新しいストリームとして投入し直す。パイプを止めて全転送を投入し直す方法は、以後の転送が
+        // すべて ERROR_BUSY で失敗し続けたため採用しなかった。
+        // 一部のパケットの通信エラー (USBD_STATUS_ISO_TD_ERROR) では後続の転送の時刻は保たれているため、
+        // 続きとして投入する。新しいストリームとして投入していたときは、約 0.5 秒後 (先行分の約 512 ms に相当) に
+        // 数 ms の 2 回目の欠落があり、先行分の後に空きを挟んで予約されたためと推定している
+        let cont = ok || (consecutive_errors == 1 && desc[k].iter().all(|d| !is_late_status(d.Status)));
+        if !cont || submit(k, true, &mut desc[k], &mut ov[k]).is_err() {
             // 続きとして投入できなければ新しいストリームとして投入する。抜去などでそれも失敗すると DeviceGone で終わる
             if let Err(e) = submit(k, false, &mut desc[k], &mut ov[k]) {
                 result = Err(UsbError::DeviceGone(e));
@@ -448,6 +444,27 @@ pub fn capture(
         }
     }
     result
+}
+
+/// 投入が間に合わずに等時転送のパケットが送受信されなかったことを示す状態 (usb.h)。
+/// USBD_STATUS_ISO_NOT_ACCESSED_BY_HW、USBD_STATUS_ISO_NA_LATE_USBPORT、USBD_STATUS_ISO_NOT_ACCESSED_LATE
+fn is_late_status(status: i32) -> bool {
+    matches!(status as u32, 0xC002_0000 | 0xC004_0000 | 0xC005_0000)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_late_status;
+
+    #[test]
+    fn only_late_statuses_restart_the_stream() {
+        // USBD_STATUS_ISO_TD_ERROR (パケットの通信エラー) は時刻が保たれるため続きとして投入する
+        assert!(!is_late_status(0xC003_0000u32 as i32));
+        assert!(!is_late_status(0));
+        assert!(is_late_status(0xC002_0000u32 as i32));
+        assert!(is_late_status(0xC004_0000u32 as i32));
+        assert!(is_late_status(0xC005_0000u32 as i32));
+    }
 }
 
 /// 取り込みの転送方式

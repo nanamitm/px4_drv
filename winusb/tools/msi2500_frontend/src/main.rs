@@ -383,8 +383,8 @@ fn run_live(a: Args) -> i32 {
         max_ws = max_ws.max(ws);
         let s = live.stats.lock().unwrap().clone();
         let (fa, fb) = (s.layer_total(0), s.layer_total(1));
-        eprintln!("[live] t={el:7.2}s signal={:7.2}s blocks={} lost={} gaps={} overflow={} seg={} MER A/B={:.1}/{:.1}dB | B blk={} corr={} unc={} tei={} cc={} | A blk={} unc={} cc={} | cpu={cores:.2} ws={}MB private={}MB",
-            s.symbols as f64 * L as f64 / FS, s.blocks, s.lost_samples, s.gaps, live.overflow_chunks(), s.segments,
+        eprintln!("[live] t={el:7.2}s signal={:7.2}s blocks={} lost={} gaps={} bridged={} overflow={} seg={} MER A/B={:.1}/{:.1}dB | B blk={} corr={} unc={} tei={} cc={} | A blk={} unc={} cc={} | cpu={cores:.2} ws={}MB private={}MB",
+            s.symbols as f64 * L as f64 / FS, s.blocks, s.lost_samples, s.gaps, s.bridged, live.overflow_chunks(), s.segments,
             s.ofdm.mer_db[0], s.ofdm.mer_db[1], fb.blocks, fb.corrected, fb.uncorrectable, fb.tei, fb.cc_errors,
             fa.blocks, fa.uncorrectable, fa.cc_errors, ws >> 20, private >> 20);
     };
@@ -450,8 +450,8 @@ fn run_live(a: Args) -> i32 {
     let m = &fin.remux;
     eprintln!("[live] remux: frames={} packets={} late={} untagged={} forced={} partial_frames={}{}",
         m.frames, m.packets, m.late, m.untagged, m.forced, m.partial_frames, if fin.write_failed[2] { " (TS write failed)" } else { "" });
-    eprintln!("[live] done: input={wall_in:.2}s drain={:.2}s signal={signal:.2}s blocks={} startup={} lost={} gaps={} backward={} overflow_chunks={overflow} segments={} cpu_mean={:.2} cpu_max={max_cores:.2} ws_max={}MB",
-        wall - wall_in, fin.blocks, fin.startup_blocks, fin.lost_samples, fin.gaps, fin.backward, fin.segments,
+    eprintln!("[live] done: input={wall_in:.2}s drain={:.2}s signal={signal:.2}s blocks={} startup={} lost={} gaps={} bridged={} erased_symbols={} backward={} overflow_chunks={overflow} segments={} cpu_mean={:.2} cpu_max={max_cores:.2} ws_max={}MB",
+        wall - wall_in, fin.blocks, fin.startup_blocks, fin.lost_samples, fin.gaps, fin.bridged, fin.ofdm.erased_symbols, fin.backward, fin.segments,
         (cpu - cpu0) / wall.max(1e-9), max_ws >> 20);
     if device_error.is_some() { 3 } else { 0 }
 }
@@ -607,8 +607,8 @@ impl Pipe {
             Pipe::Isdbt(live) => {
                 let fin = live.finish(feeder);
                 let (fa, fb) = (fin.layer_total(0), fin.layer_total(1));
-                format!("blocks={} lost={} gaps={} backward={} segments={} B blk={} unc={} | A blk={} unc={} | remux frames={} packets={} late={} forced={}",
-                    fin.blocks, fin.lost_samples, fin.gaps, fin.backward, fin.segments, fb.blocks, fb.uncorrectable, fa.blocks, fa.uncorrectable,
+                format!("blocks={} lost={} gaps={} bridged={} erased_symbols={} backward={} segments={} B blk={} unc={} | A blk={} unc={} | remux frames={} packets={} late={} forced={}",
+                    fin.blocks, fin.lost_samples, fin.gaps, fin.bridged, fin.ofdm.erased_symbols, fin.backward, fin.segments, fb.blocks, fb.uncorrectable, fa.blocks, fa.uncorrectable,
                     fin.remux.frames, fin.remux.packets, fin.remux.late, fin.remux.forced)
             }
             Pipe::J83b(live) => {
