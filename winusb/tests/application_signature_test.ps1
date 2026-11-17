@@ -84,6 +84,24 @@ $manifest=Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
 $manifest.Files.'rtlsdr\rtlsdr_frontend.exe'=(Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash
 $manifest | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $manifestPath -Encoding ascii
 Rejected {Test-Px4ApplicationSignatures $rtlTampered} 'Modified RTL-SDR helper accepted after rewriting its manifest hash.'
+# PX-S1UD は MSi2500 と同じ J.83B helper を同梱するため、helper の欠落と書き換えを同じ基準で拒否する。
+$s1udSource=Join-Path (Resolve-Path -LiteralPath $DistributionPath).Path 'BonDriver_PX-S1UD_64bit'
+Assert ((RunTrust $s1udSource Verify) -eq 0) 'PX-S1UD distribution Verify entry point failed.'
+$s1udMissing=Join-Path $area 's1ud-missing-helper'
+Copy-Item -LiteralPath $s1udSource -Destination $s1udMissing -Recurse
+Remove-Item -LiteralPath (Join-Path $s1udMissing 'msi2500\msi2500_frontend.exe')
+Rejected {Test-Px4ApplicationSignatures $s1udMissing} 'PX-S1UD helper omission accepted.'
+$s1udTampered=Join-Path $area 's1ud-tampered-helper'
+Copy-Item -LiteralPath $s1udSource -Destination $s1udTampered -Recurse
+$file=Join-Path $s1udTampered 'msi2500\msi2500_frontend.exe'
+$bytes=[IO.File]::ReadAllBytes($file);$pe=[BitConverter]::ToInt32($bytes,0x3c)
+$section=$pe+24+[BitConverter]::ToUInt16($bytes,$pe+20);$raw=[BitConverter]::ToInt32($bytes,$section+20)
+$bytes[$raw]=$bytes[$raw] -bxor 1;[IO.File]::WriteAllBytes($file,$bytes)
+$manifestPath=Join-Path $s1udTampered 'application-signatures.json'
+$manifest=Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
+$manifest.Files.'msi2500\msi2500_frontend.exe'=(Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash
+$manifest | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $manifestPath -Encoding ascii
+Rejected {Test-Px4ApplicationSignatures $s1udTampered} 'Modified PX-S1UD helper accepted after rewriting its manifest hash.'
 # PIX-DT295 の検査ツールも、欠落とマニフェストの書き換えを BonDriver と同じ基準で拒否する。
 $dt295Source=Join-Path (Resolve-Path -LiteralPath $DistributionPath).Path 'BonDriver_DT295_64bit'
 Assert ((RunTrust $dt295Source Verify) -eq 0) 'PIX-DT295 distribution Verify entry point failed.'

@@ -47,8 +47,9 @@ function Get-Px4ApplicationFiles([string]$Directory) {
         if (@(Compare-Object $expected $actual).Count) { throw 'Unexpected or missing RTL-SDR runtime binary.' }
         $required += $helper
     }
-    if (Test-Path -LiteralPath (Join-Path $Directory 'BonDriver_MSI2500.dll')) {
+    if ((Test-Path -LiteralPath (Join-Path $Directory 'BonDriver_MSI2500.dll')) -or (Test-Path -LiteralPath (Join-Path $Directory 'BonDriver_PX-S1UD.dll'))) {
         # MSi2500 の helper は外部 DLL を同梱しない単一の実行ファイルで、アプリ署名で検証する。
+        # PX-S1UD の配布物も J.83B の復調に同じ helper を同梱するため、同じ基準で署名と検証の対象にする。
         $helper='msi2500\msi2500_frontend.exe'
         if (-not (Test-Path -LiteralPath (Join-Path $Directory $helper) -PathType Leaf)) { throw "Missing required binary: $helper" }
         $actual=@(Get-ChildItem -LiteralPath (Join-Path $Directory 'msi2500') -File | Where-Object {$_.Extension -in '.exe','.dll'} | ForEach-Object {$_.Name})
