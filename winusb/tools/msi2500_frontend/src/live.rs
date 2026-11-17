@@ -23,6 +23,12 @@ use std::thread::JoinHandle;
 /// 生ブロックのチャンクの大きさ (256 ブロック = 98,304 サンプル、約 12 ms)
 pub const CHUNK_BLOCKS: usize = 256;
 const BLOCK: usize = 1024;
+/// 状態を作り直さずに埋める欠落の上限 (サンプル数、256 シンボル = 約 290 ms)。これより長い欠落と番号の巻き戻りは作り直す。
+/// 録画 IQ (13ch、B 階層 64QAM 3/4、MER 約 20.7 dB) から欠落を 3 回抜いた試験では、
+/// 18 ms までは TS が欠落のない場合と一致し、36 ms で 1 回あたり約 140 パケット、290 ms で約 5,000 パケットを失った。
+/// 290 ms でも同期は保たれ、作り直し (約 2 秒、B 階層だけで約 2 万パケット) より損失が小さい。
+/// それより長い欠落は試していないため作り直す
+pub const MAX_BRIDGE_SAMPLES: u64 = 256 * crate::ofdm::L as u64;
 
 pub struct LiveConfig {
     /// B 階層のビタビのスレッド数
@@ -48,6 +54,8 @@ pub struct LiveStats {
     pub backward: u64,
     /// 不連続で状態を作り直した回数 + 1
     pub segments: u64,
+    /// 状態を作り直さずに埋めた欠落の回数 (gaps に含まれる)
+    pub bridged: u64,
     pub symbols: u64,
     pub ofdm: ofdm::Stats,
     /// 現在の区間の誤り訂正の統計 (A, B)
@@ -214,6 +222,9 @@ fn ofdm_loop(rx: Receiver<Vec<u8>>, fec_tx: Vec<SyncSender<FecMsg>>, stats: Arc<
     let mut samples = Vec::with_capacity(CHUNK_BLOCKS * 384);
     let mut symbols = 0u64;
     let mut segments = 1u64;
+    let mut bridged = 0u64;
+    // 作り直す前の区間で消失として出したシンボルの数
+    let mut erased_done = 0u64;
     // 誤り訂正のスレッドが終わっていたら、それ以上は送らずに終える
     let send_sym = |s: Arc<SymbolOut>| fec_tx.iter().all(|t| t.send(FecMsg::Sym(s.clone())).is_ok());
     let send_reset = || fec_tx.iter().all(|t| t.send(FecMsg::Reset).is_ok());
@@ -241,12 +252,27 @@ fn ofdm_loop(rx: Receiver<Vec<u8>>, fec_tx: Vec<SyncSender<FecMsg>>, stats: Arc<
             }
             match state {
                 BlockState::Startup => continue,
+                BlockState::Gap(lost) if lost <= MAX_BRIDGE_SAMPLES && ofdm.tracking() => {
+                    // 短い欠落は失ったサンプル数だけ埋めて時刻を保ち、同期と誤り訂正の状態を引き継ぐ。
+                    // 作り直すと初期同期と時間インターリーブの充填に約 2 秒かかり、その間の TS をすべて失う
+                    if !run(&mut samples, &mut ofdm, &mut symbols) {
+                        break 'outer;
+                    }
+                    for s in ofdm.push_gap(lost as usize) {
+                        symbols += 1;
+                        if !send_sym(Arc::new(s)) {
+                            break 'outer;
+                        }
+                    }
+                    bridged += 1;
+                }
                 BlockState::Gap(_) | BlockState::Backward => {
                     // 不連続の前までを処理してから、前後をつながずに状態をすべて作り直す。
                     // 不連続を検出したブロックは新しい区間の先頭になる
                     if !run(&mut samples, &mut ofdm, &mut symbols) {
                         break 'outer;
                     }
+                    erased_done += ofdm.stats.erased_symbols;
                     ofdm = Ofdm::new();
                     segments += 1;
                     if !send_reset() {
@@ -267,8 +293,10 @@ fn ofdm_loop(rx: Receiver<Vec<u8>>, fec_tx: Vec<SyncSender<FecMsg>>, stats: Arc<
         s.gaps = counter.gaps;
         s.backward = counter.backward;
         s.segments = segments;
+        s.bridged = bridged;
         s.symbols = symbols;
         s.ofdm = ofdm.stats.clone();
+        s.ofdm.erased_symbols += erased_done;
     }
     // ここで送信側が閉じ、誤り訂正のスレッドはキューの残りを処理して終わる
 }

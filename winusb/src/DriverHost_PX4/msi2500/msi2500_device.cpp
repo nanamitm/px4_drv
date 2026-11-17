@@ -115,8 +115,10 @@ public:
         bool locked=false;const int result=CheckLock(locked);value=0;
         if(result)return result;
         if(type!=command::StatType::CNR)return -ENOSYS;
-        // RTL-SDR と同じ 0〜100 の品質点 (ISDB-T は B 階層、J.83B は全ブロックの RS 復号の成功割合)。校正した RF C/N ではない。
-        if(locked)value=static_cast<std::int32_t>(quality_.load()*10);
+        // helper が報告する復調器の MER (dB×100、ISDB-T は B 階層、J.83B は判定帰還中の復調器) を、
+        // 他の受信機の CNR と同じ dB×1000 で返す。RS の成功割合は正常受信中ほぼ 100% で変わらず、受信状態の目安にならないため。
+        // MER をまだ受け取っていない間 (TS 出力の直後、MER を送らない古い helper) は、成功割合 (0〜100 の品質点) を返す。
+        if(locked){const auto mer=mer_x100_.load();value=mer>=0?mer*10:static_cast<std::int32_t>(quality_.load()*10);}
         return 0;
     }
 protected:
@@ -205,7 +207,7 @@ private:
         if(!AssignProcessToJobObject(job_.Get(),process_.Get())){
             TerminateProcess(process_.Get(),ERROR_ACCESS_DENIED);WaitForSingleObject(process_.Get(),1000);StopHelper();return -EIO;
         }
-        stop_=false;drain_only_=false;worker_error_=false;ready_=false;last_ts_=0;quality_=0;
+        stop_=false;drain_only_=false;worker_error_=false;ready_=false;last_ts_=0;quality_=0;mer_x100_=-1;
         if(ResumeThread(thread.Get())==static_cast<DWORD>(-1)){StopHelper();return -EIO;}
         // 子への出力書込端を親が残すと、子の終了を EOF として検出できなくなる。
         child_input.Set(nullptr);child_output.Set(nullptr);child_error.Set(nullptr);
@@ -227,7 +229,7 @@ private:
         stop_=true;
         if(worker_.joinable())worker_.join();
         output_.Set(nullptr);process_.Set(nullptr);job_.Set(nullptr);
-        ready_=false;last_ts_=0;quality_=0;
+        ready_=false;last_ts_=0;quality_=0;mer_x100_=-1;
     }
     void ReadHelper() noexcept
     {
@@ -252,7 +254,12 @@ private:
                         last_message=GetTickCount64();
                         if(frame.kind==1)ready_=true;
                         if(frame.kind==4){msg_err("MSi2500: helper error: %.*s\n",static_cast<int>(frame.size),reinterpret_cast<const char *>(data));return false;}
-                        if(frame.kind==3)quality_=frame.quality;
+                        if(frame.kind==3){
+                            quality_=frame.quality;
+                            // MER は TS 出力中だけ載る。載らない状態フレームでは直前の値を残し、ロックの判定は TS の到着で行う。
+                            std::uint32_t mer=0;
+                            if(px4::rtlsdr::StatusMer(frame,data,mer))mer_x100_=static_cast<std::int32_t>(mer);
+                        }
                         if(frame.kind==2){
                             quality_=frame.quality;last_ts_=GetTickCount64();
                             if(capture_ && !stop_ && !drain_only_){
@@ -284,6 +291,8 @@ private:
     std::mutex mutex_;std::condition_variable closed_;
     std::atomic_bool available_{true},open_{false},capture_{false},stop_{true},drain_only_{true},worker_error_{false},ready_{false};
     std::atomic<std::uint32_t> quality_{0};
+    // 復調器の MER (dB×100)。helper の起動と停止で破棄し、未受信の間は -1
+    std::atomic<std::int32_t> mer_x100_{-1};
     std::atomic<ULONGLONG> last_ts_{0};
     Handle process_,job_,input_,output_;
     std::thread worker_;
