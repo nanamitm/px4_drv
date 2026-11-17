@@ -15,6 +15,7 @@
 #include "reception_policy.hpp"
 #include "mb86h47_card.hpp"
 #include "../atr_length.hpp"
+#include "../stream_overflow.hpp"
 #include "msg.h"
 #include "util.hpp"
 #include <algorithm>
@@ -499,6 +500,7 @@ private:
             for(;;) {
                 StreamFramer framer(parent_.output_error_packets_);
                 TsQuality quality;
+                px4::StreamOverflowLog overflow("torne");
                 ReceptionWatch watch(Clock::now());
                 auto next_status=Clock::now()+std::chrono::seconds(1);
                 std::array<std::uint8_t,6144> raw{};
@@ -564,7 +566,7 @@ private:
                     output.clear();framer.Feed(raw.data(),transferred,output);
                     for(std::size_t offset=0;offset<output.size();offset+=188) {
                         quality.Feed(output.data()+offset);std::size_t count=188;
-                        if(!stream_buf_->Write(output.data()+offset,count)||count!=188){worker_error_=ERROR_BUFFER_OVERFLOW;break;}
+                        overflow.Record(stream_buf_->Write(output.data()+offset,count),188,count);
                     }
                     stream_buf_->NotifyWrite();
                     if(!output.empty() && !worker_error_) {

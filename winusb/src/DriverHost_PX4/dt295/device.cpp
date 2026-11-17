@@ -6,6 +6,7 @@
 #include "stall_history.hpp"
 #include "../atr_length.hpp"
 #include "../tc90522_cnr.hpp"
+#include "../stream_overflow.hpp"
 #include "msg.h"
 #include "util.hpp"
 #include "ts_continuity.hpp"
@@ -314,6 +315,7 @@ private:
             {std::lock_guard<std::mutex> state(state_mutex_);armed_=!worker_error_;}changed_.notify_all();
             size_t head=0;auto last=Clock::now();auto warning=last;auto previous_read=last;
             std::vector<uint8_t> output;output.reserve(32768);
+            px4::StreamOverflowLog overflow("PIX-DT295");
             while(!worker_error_){
                 auto &read=*reads[head];HANDLE events[]{stop_.value,parent_.removed_,read.event.value};
                 const DWORD wait=WaitForMultipleObjects(3,events,FALSE,1);
@@ -337,10 +339,9 @@ private:
                             quality->Feed(output.data(),output.size(),[](const px4::TsContinuityMonitor::Event &){});
                             for(size_t offset=0;offset<output.size();offset+=188){
                                 size_t size=188;
-                                // trueの短縮は利用者のPurgeによる意図した破棄。満杯(false)と区別する。
-                                if(!stream_buf_->Write(output.data()+offset,size)){worker_error_=-ENOBUFS;break;}
+                                const bool written=stream_buf_->Write(output.data()+offset,size);
+                                overflow.Record(written,188,size);
                             }
-                            if(worker_error_)break;
                             stream_buf_->NotifyWrite();last=Clock::now();
                         }
                     }else last=Clock::now();

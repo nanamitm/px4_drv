@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 #include "device.hpp"
 #include "protocol.hpp"
+#include "../stream_overflow.hpp"
 #include "msg.h"
 #include "util.hpp"
 #include <array>
@@ -204,6 +205,7 @@ private:
     {
         try {
             Frames frames;std::array<std::uint8_t,16384> bytes{};
+            px4::StreamOverflowLog overflow("RTL-SDR");
             auto last_message=GetTickCount64();
             while(!stop_ && available_) {
                 DWORD available=0;
@@ -229,7 +231,7 @@ private:
                         quality_=frame.quality;last_ts_=GetTickCount64();
                         if(capture_ && !stop_ && !drain_only_){
                             std::size_t size=frame.size;
-                            if(!stream_buf_->Write(data,size)||size!=frame.size){msg_err("RTL-SDR: TS ring overflow\n");return false;}
+                            overflow.Record(stream_buf_->Write(data,size),frame.size,size);
                             stream_buf_->NotifyWrite();
                         }
                     }

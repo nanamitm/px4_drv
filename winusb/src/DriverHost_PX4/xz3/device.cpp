@@ -7,6 +7,7 @@
 #include "../tc90522_cnr.hpp"
 #include "../torne/winusb_control.hpp"
 #include "../atr_length.hpp"
+#include "../stream_overflow.hpp"
 #include "msg.h"
 
 #include <algorithm>
@@ -935,8 +936,8 @@ private:
             if (packet[0] != 0x47)
                 return -EIO;
             std::size_t size = 188;
-            if (!stream_buf_->Write(packet, size))
-                return -ENOBUFS;
+            const bool written = stream_buf_->Write(packet, size);
+            overflow_.Record(written, 188, size);
         }
         stream_buf_->NotifyWrite();
         return 0;
@@ -948,6 +949,8 @@ private:
     // mutex_は受信機の状態、control_mutex_はRelay (EP0の制御転送) を守る。
     // 取得順はmutex_、control_mutex_の順。カード操作はcontrol_mutex_だけを取得する。
     std::mutex mutex_, control_mutex_;
+    // Deliver を呼ぶ受信スレッドだけが使う。
+    px4::StreamOverflowLog overflow_{"GV-MVP/XZ3"};
     std::atomic<int> card_waiters_{0};
     // 最後のカード操作からCardBusyWindowが経つ時刻と、最後のカード操作を終えた時刻
     // (steady_clockの値)。

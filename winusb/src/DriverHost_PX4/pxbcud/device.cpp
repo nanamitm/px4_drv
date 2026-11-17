@@ -4,6 +4,7 @@
 #include "plain_framer.hpp"
 #include "pat_gate.hpp"
 #include "recovery_budget.hpp"
+#include "../stream_overflow.hpp"
 #include "msg.h"
 #include <chrono>
 #include <cmath>
@@ -399,6 +400,7 @@ private:
         std::vector<std::uint8_t> output;
         bool first=true;
         bool reported_recovery=false;
+        px4::StreamOverflowLog overflow("PX-BCUD");
         const auto started=Clock::now();
         msg_info("PX-BCUD: timing start pid=%lu tid=%lu priority=%d requests=%u microframes_per_request=64 nominal_queue_us=%u\n",
             GetCurrentProcessId(),GetCurrentThreadId(),GetThreadPriority(GetCurrentThread()),
@@ -561,11 +563,10 @@ private:
                 if (begin<output.size()) {
                     const std::size_t requested=output.size()-begin;
                     std::size_t written=requested;
-                    // 部分書き込みはリング満杯を示す。書けた分は配信済みとして残し、
-                    // パケット単位で書いていたときと同じく失敗として扱う。
-                    if (!stream_buf_->Write(output.data()+begin,written) || written!=requested) {
-                        fail("stream_buffer_write",next,ERROR_BUFFER_OVERFLOW);
-                    } else if (outage && !reported_recovery) {
+                    // 満杯で書けなかった分は捨てて受信を続ける。書けた分は配信済みとして残る。
+                    const bool accepted=stream_buf_->Write(output.data()+begin,written);
+                    overflow.Record(accepted,requested,written);
+                    if (accepted && outage && !reported_recovery) {
                         reported_recovery=true;recovering_=false;
                         msg_warn("PX-BCUD: auto recovery resumed count=%llu outage_ms=%llu possible_ts_loss=1\n",
                             static_cast<unsigned long long>(recovery_count_),
