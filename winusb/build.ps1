@@ -350,6 +350,21 @@ Copy-Item build/x64/Release-static/DriverHost_PX4.exe dist/BonDriver_PX-S1UR_64b
 Copy-Item pkg/DriverHost_PX4/DriverHost_PX4.ini dist/BonDriver_PX-S1UR_64bit/DriverHost_PX4.ini
 Copy-Item pkg/DriverHost_PX4/it930x-firmware.bin dist/BonDriver_PX-S1UR_64bit/it930x-firmware.bin
 
+# XIT-SQR100 は J.83B を ini で有効にできるよう、J.83B の ChSet も同梱する
+foreach ($sqr100_arch in @(@('x86', '32bit'), @('x64', '64bit'))) {
+    $sqr100_platform = $sqr100_arch[0]
+    $sqr100_folder = "dist/BonDriver_XIT-SQR100_$($sqr100_arch[1])"
+    New-Item -ItemType Directory -Path $sqr100_folder | Out-Null
+    Copy-Item "build/$sqr100_platform/Release-static/BonDriver_PX4.dll" "$sqr100_folder/BonDriver_XIT-SQR100.dll"
+    Copy-Item 'pkg/BonDriver_PX4/BonDriver_XIT-SQR100.ini' $sqr100_folder
+    Copy-Item 'pkg/BonDriver_PX4/BonDriver_PX4-T.ChSet.txt' $sqr100_folder
+    Copy-Item 'pkg/BonDriver_PX4/BonDriver_PX4-S.ChSet.txt' $sqr100_folder
+    Copy-Item 'pkg/BonDriver_PX4/BonDriver_PX4-J83B.ChSet.txt' $sqr100_folder
+    Copy-Item "build/$sqr100_platform/Release-static/DriverHost_PX4.exe" $sqr100_folder
+    Copy-Item 'pkg/DriverHost_PX4/DriverHost_PX4.ini' $sqr100_folder
+    Copy-Item 'pkg/DriverHost_PX4/it930x-firmware.bin' $sqr100_folder
+}
+
 # PX-BCUD も通常配布へ含める。給電非対応と世代付き TS 配信の設定を同梱する。
 foreach ($bcud_arch in @(@('x86', '32bit'), @('x64', '64bit'))) {
     $bcud_platform = $bcud_arch[0]

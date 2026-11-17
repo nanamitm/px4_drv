@@ -15,6 +15,7 @@ public:
 	bool Call(card_command::Command &command) noexcept;
 
 private:
+	bool ConnectHost() noexcept;
 	bool StartDriverHost() noexcept;
 
 	std::unique_ptr<PipeClient> pipe_;

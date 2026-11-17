@@ -67,8 +67,10 @@
     <ClCompile><RuntimeLibrary>MultiThreaded</RuntimeLibrary></ClCompile>
   </ItemDefinitionGroup>
   <ItemGroup>
+    <ClCompile Include="..\common\msg.c" />
     <ClCompile Include="..\common\pipe.cpp" />
     <ClCompile Include="..\BonDriver_PX4\pipe_client.cpp" />
+    <ClCompile Include="call_log.cpp" />
     <ClCompile Include="card_client.cpp" />
     <ClCompile Include="native_winscard.cpp" />
     <ClCompile Include="management.cpp" />
@@ -76,6 +78,8 @@
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="..\common\card_command.hpp" />
+    <ClInclude Include="..\common\msg.h" />
+    <ClInclude Include="call_log.hpp" />
     <ClInclude Include="..\common\pipe.hpp" />
     <ClInclude Include="..\common\version.h" />
     <ClInclude Include="..\BonDriver_PX4\pipe_client.hpp" />

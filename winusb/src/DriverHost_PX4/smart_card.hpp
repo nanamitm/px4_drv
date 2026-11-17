@@ -14,6 +14,28 @@ constexpr int SMART_CARD_NO_MEDIUM = -10001;
 
 class SmartCard final {
 public:
+	/*
+	 * 診断ログ用の累積回数。プロトコル処理はログ出力を持たず回数だけを数え、
+	 * 呼び出し側が要求の前後の差分から再送や WTX の発生を記録する。
+	 */
+	struct Diagnostics final {
+		std::uint64_t resets = 0;
+		std::uint64_t reset_failures = 0;
+		/* 形式不正の ATR を受けて ResetCard() からやり直した回数 */
+		std::uint64_t atr_retries = 0;
+		/* 応答の期限切れまたは検査値不一致で同じブロックを再送した回数 */
+		std::uint64_t block_retries = 0;
+		std::uint64_t wtx_requests = 0;
+		/* カードが R ブロックで同じ I ブロックの再送を要求した回数 */
+		std::uint64_t i_block_resends = 0;
+		/* 取りこぼしたカードの I ブロックを R ブロックで再要求した回数 */
+		std::uint64_t response_recoveries = 0;
+		std::uint32_t baudrate = 0;
+		std::uint8_t ifsc = 0;
+		bool use_crc = false;
+		unsigned int block_timeout_ms = 0;
+	};
+
 	explicit SmartCard(std::shared_ptr<CardDevice> device) noexcept;
 	~SmartCard();
 
@@ -40,6 +62,8 @@ public:
 		std::size_t send_len, std::uint8_t *recv_buf, std::size_t &recv_len);
 	int Transmit(const std::uint8_t *send_buf, std::size_t send_len,
 		     std::uint8_t *recv_buf, std::size_t &recv_len);
+	/* 呼び出し元がカード I/O の排他を保持する。 */
+	const Diagnostics& GetDiagnostics() const noexcept { return diagnostics_; }
 
 private:
 	using Deadline = std::chrono::steady_clock::time_point;
@@ -84,6 +108,7 @@ private:
 	std::uint64_t generation_ = 1;
 	bool presence_known_ = false;
 	bool observed_present_ = false;
+	Diagnostics diagnostics_;
 };
 
 } // namespace px4

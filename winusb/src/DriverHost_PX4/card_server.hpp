@@ -1,8 +1,10 @@
 #pragma once
 
 #include <atomic>
+#include <chrono>
 #include <memory>
 #include <mutex>
+#include <string>
 #include <unordered_map>
 
 #include "card_command.hpp"
@@ -35,9 +37,31 @@ private:
 		CardConnection(CardServer &parent, std::unique_ptr<PipeServer> &pipe) noexcept;
 
 	private:
+		/* 診断ログの集計窓。長時間受信でログが肥大しないよう、成功した APDU は窓ごとにまとめる */
+		struct TransmitStats final {
+			std::uint64_t count = 0;
+			std::uint64_t failures = 0;
+			std::uint64_t slow = 0;
+			std::uint64_t total_us = 0;
+			std::uint64_t max_us = 0;
+			std::uint64_t max_wait_us = 0;
+			SmartCard::Diagnostics baseline;
+			SmartCard::Diagnostics latest;
+			bool has_baseline = false;
+			std::chrono::steady_clock::time_point window_start;
+		};
+
 		void Worker() noexcept override;
 		void SetError(card_command::Command &command, int error) const noexcept;
 		void ReleaseCard() noexcept;
+		void LogTransmit(int ret, const std::uint8_t header[4], std::size_t send_length,
+			const card_command::Command &command, std::size_t recv_length,
+			std::uint64_t io_us, std::uint64_t wait_us,
+			const SmartCard::Diagnostics &before,
+			const SmartCard::Diagnostics &after) noexcept;
+		void LogTransmitSummary(const char *reason) noexcept;
+		void LogStatus(const std::wstring &reader, int ret,
+			const card_command::Command &command) noexcept;
 
 		CardServer &card_parent_;
 		std::shared_ptr<SharedCard> card_;
@@ -45,6 +69,10 @@ private:
 		card_command::ShareMode share_mode_;
 		bool transaction_;
 		std::uint64_t generation_ = 0;
+		std::wstring reader_;
+		TransmitStats stats_;
+		/* 状態監視は短い周期で繰り返されるため、変化した時だけ記録する */
+		std::unordered_map<std::wstring, std::string> last_status_;
 	};
 
 	Connection* CreateConnection(std::unique_ptr<PipeServer> &pipe) override;

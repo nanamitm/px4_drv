@@ -1,4 +1,5 @@
 #include "card_client.hpp"
+#include "call_log.hpp"
 #include "ipc_names.hpp"
 
 #include <algorithm>
@@ -81,7 +82,7 @@ catch (...) {
 	return false;
 }
 
-bool CardClient::Connect() noexcept try
+bool CardClient::ConnectHost() noexcept try
 {
 	auto pipe = std::make_unique<PipeClient>();
 	PipeClient::PipeClientConfig config = {};
@@ -121,6 +122,14 @@ bool CardClient::Connect() noexcept try
 catch (...) {
 	pipe_.reset();
 	return false;
+}
+
+bool CardClient::Connect() noexcept
+{
+	const bool connected = ConnectHost();
+	/* 状態照会は接続を毎回作り直すため、成否が変わった時だけ記録される */
+	winscard::LogDriverHostConnect(connected);
+	return connected;
 }
 
 bool CardClient::Call(card_command::Command &command) noexcept

@@ -32,6 +32,7 @@
     <ClCompile Include="j83b_driver_test.c" />
     <ClCompile Include="..\..\driver\cxd2856er.c" />
     <ClCompile Include="..\..\driver\cxd2858er.c" />
+    <ClCompile Include="..\..\driver\cxd6866.c" />
     <ClCompile Include="..\src\common\msg.c" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />

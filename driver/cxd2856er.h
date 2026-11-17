@@ -21,6 +21,11 @@
 struct cxd2856er_config {
 	u32 xtal;
 	bool tuner_i2c;
+	/*
+	 * TS をシリアルの連続クロックで出力する (XIT-SQR100)
+	 * false は PX-MLT 系の従来の TS クロック (PLEX の CXD2856.c の設定)
+	 */
+	bool serial_ts_clock;
 };
 
 enum cxd2856er_state {

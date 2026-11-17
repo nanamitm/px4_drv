@@ -204,12 +204,14 @@ int SmartCard::Reset(std::vector<std::uint8_t> &atr)
 	if (!detected)
 		return SMART_CARD_NO_MEDIUM;
 
+	diagnostics_.resets++;
 	AtrParameters parameters;
 	for (unsigned int attempt = 0; attempt < 2; attempt++) {
 		/* 前回の不正 ATR を途中まで解析していても T=1 パラメータを次の試行へ残さない */
 		parameters = AtrParameters{};
 		ret = device_->ResetCard();
 		if (ret) {
+			diagnostics_.reset_failures++;
 			InvalidateSession(ret);
 			return ret;
 		}
@@ -219,14 +221,17 @@ int SmartCard::Reset(std::vector<std::uint8_t> &atr)
 			break;
 		/* 一部機種は連続リセット時に UART の残留バイトを ATR より先に返すため、形式不正だけ再初期化する */
 		if (ret != -EBADMSG || attempt != 0) {
+			diagnostics_.reset_failures++;
 			InvalidateSession(ret);
 			return ret;
 		}
+		diagnostics_.atr_retries++;
 	}
 
 	/* 特定モードのカードは PPS を行わず、TA1 が指定した速度へ直接切り替える */
 	ret = device_->SetCardBaudrate(parameters.baudrate);
 	if (ret) {
+		diagnostics_.reset_failures++;
 		InvalidateSession(ret);
 		return ret;
 	}
@@ -241,10 +246,15 @@ int SmartCard::Reset(std::vector<std::uint8_t> &atr)
 	const std::uint8_t ifsd = is_acas ? 254 : (use_crc_ ? 250 : 251);
 	ret = InitializeT1(!is_acas, ifsd);
 	if (ret) {
+		diagnostics_.reset_failures++;
 		InvalidateSession(ret);
 		return ret;
 	}
 	initialized_ = true;
+	diagnostics_.baudrate = parameters.baudrate;
+	diagnostics_.ifsc = parameters.ifsc;
+	diagnostics_.use_crc = parameters.use_crc;
+	diagnostics_.block_timeout_ms = parameters.block_timeout_ms;
 	return 0;
 }
 
@@ -677,6 +687,7 @@ int SmartCard::ExchangeBlock(std::uint8_t pcb, const std::uint8_t *send_data,
 			while (recv_pcb == (T1_S_BLOCK | T1_S_WTX)) {
 				if (recv_data.size() != 1 || recv_data[0] == 0)
 					return -EPROTO;
+				diagnostics_.wtx_requests++;
 				std::uint8_t multiplier = recv_data[0];
 				ret = SendBlock(T1_S_BLOCK | T1_S_RESPONSE | T1_S_WTX,
 						&multiplier, 1);
@@ -691,6 +702,8 @@ int SmartCard::ExchangeBlock(std::uint8_t pcb, const std::uint8_t *send_data,
 		}
 		if (ret != -ETIMEDOUT && ret != -EBADMSG)
 			return ret;
+		if (retry + 1 < max_retries)
+			diagnostics_.block_retries++;
 	}
 
 	return -ETIMEDOUT;
@@ -781,8 +794,10 @@ int SmartCard::TransmitInitialized(const std::uint8_t *send_buf,
 				bool current_sequence = send_sequence_ != 0;
 
 				/* 現在の N(S) を要求された場合だけ同じ I ブロックを再送する */
-				if (requested_sequence == current_sequence)
+				if (requested_sequence == current_sequence) {
+					diagnostics_.i_block_resends++;
 					continue;
+				}
 
 				/* 次の N(S) はカードが I ブロックを受理済みであることを示す */
 				accepted = true;
@@ -808,6 +823,7 @@ int SmartCard::TransmitInitialized(const std::uint8_t *send_buf,
 			for (unsigned int retry = 0; retry < MAX_RETRIES; retry++) {
 				std::uint8_t r_pcb = T1_R_BLOCK |
 					(receive_sequence_ ? T1_R_SEQUENCE : 0);
+				diagnostics_.response_recoveries++;
 				int ret = ExchangeBlock(r_pcb, nullptr, 0, last_pcb, last_data,
 					deadline);
 				if (ret)
