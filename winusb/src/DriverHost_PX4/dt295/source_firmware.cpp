@@ -627,9 +627,11 @@ bool SourceFirmware::IsLocked()
 
 int SourceFirmware::Tune(bool satellite, uint32_t khz, uint32_t tsid)
 {
+    // 地デジはUHF 13〜62chの中心周波数を受け付ける。上限の770 MHzと700 MHz以上のRF設定はpix-userlandの
+    // frequency()と同じで、51ch以上を使う中継局があるため700 MHz未満へ限らない。
     if (!ready_ || ring_running_ ||
         (satellite ? khz < 950000 || khz > 2150000 || tsid > 0xffff
-                   : khz < 473000 || khz >= 700000))
+                   : khz < 473000 || khz > 770000))
         return -EINVAL;
     tuned_ = false;
     try {
