@@ -834,9 +834,14 @@ void SourceFirmware::Restore()
     if (clock_changed_)
         Checked(Clock, clock_);
     int sleep_error = 0;
-    if (satellite_ && ready_) {
+    // 最後に選局した側のRFと出力を止める。地デジ側の値はpix-userlandが初期化の最後に地デジを
+    // 休止させる手順と同じで、Tuneが衛星へ切り替える前に使うTerrestrialSleepと共通にする。
+    if (ready_) {
         try {
-            SatelliteSleep();
+            if (satellite_)
+                SatelliteSleep();
+            else
+                TerrestrialSleep();
         } catch (int error) {
             // RFの停止要求が失敗してもI²C設定とブート領域の復元を試みる。
             sleep_error = error;
