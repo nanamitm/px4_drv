@@ -98,8 +98,10 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);locked=false;
         if(!open_ || !parent_.available_ || failed_ || worker_error_)return -ECANCELED;
         if(!tuned_)return 0;
-        std::lock_guard<std::mutex> command(command_mutex_);
-        transport_.Begin(2000);int value=0;
+        // Locked()はTuneで検証した状態を返すだけでUSB転送を行わない。その状態を変えるTuneとCloseは
+        // mutex_の下で動くため、制御ロックを取らずに読む。制御ロックを待つと、受信中に待機なしで
+        // 連続するSERVICEの後ろで数秒待たされ、選局完了の判定がTuneTimeoutを超える場合がある。
+        int value=0;
         const int rc=source_->Locked(value);locked=value!=0;
         return rc;
     }
