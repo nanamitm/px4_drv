@@ -73,6 +73,40 @@ class PackageTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "framed TS"):
             check(self.dist)
 
+    def test_missing_helper(self):
+        (self.folder / "msi2500/msi2500_frontend.exe").unlink()
+        with self.assertRaises(FileNotFoundError):
+            check(self.dist)
+
+    def test_helper_license_required(self):
+        (self.folder / "msi2500/COPYING.frontend").write_text("incomplete")
+        with self.assertRaisesRegex(ValueError, "frontend license"):
+            check(self.dist)
+
+    def test_helper_sources_required(self):
+        source = self.folder / "Sources/winusb/tools/msi2500_frontend/src/s1ud.rs"
+        source.write_bytes(source.read_bytes() + b"\n// modified\n")
+        with self.assertRaisesRegex(ValueError, "Frontend source mismatch"):
+            check(self.dist)
+
+    def test_missing_j83b_chset(self):
+        (self.folder / "BonDriver_PX4-J83B.ChSet.txt").unlink()
+        with self.assertRaisesRegex(ValueError, "Missing PX-S1UD file"):
+            check(self.dist)
+
+    def test_j83b_enabled_in_bondriver(self):
+        p = self.folder / "BonDriver_PX-S1UD.ini"
+        # 最初の System は [BonDriver] の行
+        p.write_bytes(p.read_bytes().replace(b'System="ISDB-T,J.83B"', b'System="ISDB-T"', 1))
+        with self.assertRaisesRegex(ValueError, "must enable J.83B"):
+            check(self.dist)
+
+    def test_j83b_enabled_in_host(self):
+        p = self.folder / "DriverHost_PX4.ini"
+        p.write_bytes(p.read_bytes().replace(b'\nJ83BFirmwarePath=', b'\n;J83BFirmwarePath='))
+        with self.assertRaisesRegex(ValueError, "J83BFirmwarePath"):
+            check(self.dist)
+
     def test_other_host_requires_firmware(self):
         other = self.dist / "BonDriver_Other_64bit"
         shutil.copytree(self.folder, other)

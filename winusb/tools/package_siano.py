@@ -32,11 +32,24 @@ def stage(dist):
             (binaries / "WinSCard.dll", "WinSCard.dll"),
             (WINUSB / "pkg/BonDriver_PX4/BonDriver_PX-S1UD.ini", "BonDriver_PX-S1UD.ini"),
             (WINUSB / "pkg/BonDriver_PX4/BonDriver_PX4-T.ChSet.txt", "BonDriver_PX4-T.ChSet.txt"),
+            (WINUSB / "pkg/BonDriver_PX4/BonDriver_PX4-J83B.ChSet.txt", "BonDriver_PX4-J83B.ChSet.txt"),
             (WINUSB / "pkg/DriverHost_PX4/DriverHost_PX4.ini", "DriverHost_PX4.ini"),
             (WINUSB / "docs/px-s1ud.md", "README.md"),
             (WINUSB.parent / "LICENSE", "LICENSE"),
         ):
             shutil.copy2(source, folder / name)
+        # J.83B を既定で有効にするため、MSi2500 と同じ復調用の helper を同梱する。helper は GPL-3.0 のため、
+        # MSi2500 の配布物と同じ対応ソース (Sources) も一緒に置く。build.ps1 は MSi2500 を先に作る
+        msi2500 = dist / f"BonDriver_MSI2500_{bits}bit"
+        helper = msi2500 / "msi2500/msi2500_frontend.exe"
+        if not helper.is_file() or not (msi2500 / "Sources").is_dir():
+            raise FileNotFoundError(f"Stage the MSi2500 package first: {msi2500}")
+        (folder / "msi2500").mkdir(exist_ok=True)
+        for name in ("msi2500_frontend.exe", "COPYING.frontend"):
+            shutil.copy2(msi2500 / "msi2500" / name, folder / "msi2500" / name)
+        if (folder / "Sources").exists():
+            shutil.rmtree(folder / "Sources")
+        shutil.copytree(msi2500 / "Sources", folder / "Sources")
     # どの機種のフォルダーから起動しても同じホストが PX-S1UD を管理する。
     # firmware と出典・再配布条件をそのホストと一緒に配置する。
     for folder in [dist, *(p for p in dist.glob("BonDriver_*") if p.is_dir())]:
@@ -54,4 +67,4 @@ if __name__ == "__main__":
     parser.add_argument("--dist", type=Path, default=WINUSB / "dist")
     args = parser.parse_args()
     stage(args.dist.resolve())
-    print("PASS: PX-S1UD packages, pinned firmware and license notices")
+    print("PASS: PX-S1UD packages, pinned firmware, J.83B helper and license notices")

@@ -3,6 +3,7 @@
 from pathlib import Path
 import argparse
 import hashlib
+from check_msi2500_package import check_helper, check_sources
 from check_pxbcud_package import configuration
 from check_rtlsdr_package import check_pe
 from package_siano import check_j83b_firmware
@@ -14,7 +15,8 @@ def check(dist):
     for bits in (32, 64):
         folder = dist / f"BonDriver_PX-S1UD_{bits}bit"
         for name in ("BonDriver_PX-S1UD.dll", "BonDriver_PX-S1UD.ini", "BonDriver_PX4-T.ChSet.txt",
-                     "DriverHost_PX4.exe", "DriverHost_PX4.ini", "WinSCard.dll", "README.md", "LICENSE"):
+                     "BonDriver_PX4-J83B.ChSet.txt", "DriverHost_PX4.exe", "DriverHost_PX4.ini", "WinSCard.dll",
+                     "README.md", "LICENSE"):
             if not (folder / name).is_file():
                 raise ValueError(f"Missing PX-S1UD file: {folder / name}")
         ini = (folder / "BonDriver_PX-S1UD.ini").read_bytes()
@@ -31,10 +33,25 @@ def check(dist):
         if host[device]["GUID"] != bon["ReceiverDefinition0"]["DeviceGUID"]:
             raise ValueError("PX-S1UD BonDriver/host GUID mismatch")
         receiver = host[device + ".Receiver0"]
-        if receiver["System"].strip('"') != "ISDB-T" or receiver.getint("Index") != 0:
-            raise ValueError("PX-S1UD must expose one ISDB-T receiver")
+        # J.83B は既定で有効。BonDriver と DriverHost の System、ChSet、firmware、helper がそろって初めて受信できる
+        if receiver["System"].strip('"') != "ISDB-T,J.83B" or receiver.getint("Index") != 0:
+            raise ValueError("PX-S1UD must expose one ISDB-T and J.83B receiver")
+        for section in ("BonDriver", "ReceiverDefinition0"):
+            if bon[section]["System"].strip('"') != "ISDB-T,J.83B":
+                raise ValueError(f"PX-S1UD BonDriver {section} must enable J.83B")
+        if bon["BonDriver.J.83B"]["ChSetPath"].strip('"') != "BonDriver_PX4-J83B.ChSet.txt":
+            raise ValueError("Incorrect PX-S1UD J.83B ChSet path")
+        if (folder / "BonDriver_PX4-J83B.ChSet.txt").read_bytes() != (WINUSB / "pkg/BonDriver_PX4/BonDriver_PX4-J83B.ChSet.txt").read_bytes():
+            raise ValueError("PX-S1UD J.83B ChSet differs from the source")
+        config = host[device + ".Config"]
+        for key, expected in (("J83BFirmwarePath", r"firmware\s1ud_j83b.inp"), ("HelperPath", r"msi2500\msi2500_frontend.exe")):
+            if config.get(key, "").strip('"') != expected:
+                raise ValueError(f"PX-S1UD {key} must be {expected}")
+        machine = 0x14C if bits == 32 else 0x8664
         for name in ("BonDriver_PX-S1UD.dll", "DriverHost_PX4.exe", "WinSCard.dll"):
-            check_pe(folder / name, 0x14C if bits == 32 else 0x8664)
+            check_pe(folder / name, machine)
+        check_helper(folder / "msi2500", machine)
+        check_sources(folder / "Sources")
     for folder in dist.glob("BonDriver_*"):
         if not folder.is_dir():
             continue
@@ -59,4 +76,4 @@ if __name__ == "__main__":
     parser.add_argument("--dist", type=Path, default=WINUSB / "dist")
     args = parser.parse_args()
     check(args.dist.resolve())
-    print("PASS: PX-S1UD firmware, licenses, package files and device identity")
+    print("PASS: PX-S1UD firmware, J.83B helper and sources, licenses, package files and device identity")

@@ -23,14 +23,9 @@ def same_tree(original, copy, label):
 
 def check_package(folder, bits):
     machine = 0x14C if bits == 32 else 0x8664
-    for name in ("BonDriver_MSI2500.dll", "DriverHost_PX4.exe", "WinSCard.dll", "msi2500/msi2500_frontend.exe"):
+    for name in ("BonDriver_MSI2500.dll", "DriverHost_PX4.exe", "WinSCard.dll"):
         check_pe(folder / name, machine)
-    runtime = folder / "msi2500"
-    actual = {p.name for p in runtime.iterdir() if p.suffix.lower() in (".exe", ".dll")}
-    require(actual == {"msi2500_frontend.exe"}, f"Unexpected or missing helper binaries: {folder}: {actual}")
-    for dll in imported_dlls(runtime / "msi2500_frontend.exe"):
-        require(dll in SYSTEM_DLLS or dll.startswith(("api-ms-win-", "ext-ms-win-")), f"Unbundled helper dependency: {dll}")
-    require((runtime / "COPYING.frontend").read_bytes() == (FRONTEND / "LICENSE").read_bytes(), "Incorrect frontend license")
+    check_helper(folder / "msi2500", machine)
     require((folder / "LICENSE").read_bytes() == (WINUSB.parent / "LICENSE").read_bytes(), "Incorrect driver license")
     for name in ("README.md", "TECHNICAL.md", "TECHNICAL-J83B.md", "BonDriver_MSI2500.ChSet.txt", "BonDriver_PX4-J83B.ChSet.txt", "it930x-firmware.bin",
                  "Install-Driver.ps1", "Driver/MSI2500.inf", "Driver/px4_drv_winusb.cat", "Driver/px4_drv_winusb.cer",
@@ -65,8 +60,21 @@ def check_package(folder, bits):
     require(host[device + ".Config"]["helperpath"].strip('"') == r"msi2500\msi2500_frontend.exe", "Incorrect helper path")
     require(0 <= int(host[device + ".Config"]["gaindbj83b"]) <= 102, "Incorrect MSi2500 J.83B gain")
     require(host[device + ".Receiver0"]["system"].strip('"') == "ISDB-T,J.83B", "Incorrect MSi2500 DriverHost receiver systems")
+    check_sources(folder / "Sources")
 
-    sources = folder / "Sources"
+
+def check_helper(runtime, machine):
+    """Verify the packaged helper folder: one static helper binary and its license."""
+    check_pe(runtime / "msi2500_frontend.exe", machine)
+    actual = {p.name for p in runtime.iterdir() if p.suffix.lower() in (".exe", ".dll")}
+    require(actual == {"msi2500_frontend.exe"}, f"Unexpected or missing helper binaries: {runtime}: {actual}")
+    for dll in imported_dlls(runtime / "msi2500_frontend.exe"):
+        require(dll in SYSTEM_DLLS or dll.startswith(("api-ms-win-", "ext-ms-win-")), f"Unbundled helper dependency: {dll}")
+    require((runtime / "COPYING.frontend").read_bytes() == (FRONTEND / "LICENSE").read_bytes(), "Incorrect frontend license")
+
+
+def check_sources(sources):
+    """Verify the offline corresponding source of the GPL-3.0 helper."""
     frontend = sources / "winusb/tools/msi2500_frontend"
     for name in ("Cargo.toml", "Cargo.lock", "cargo-config.toml", "build.rs", "frontend.rc", "LICENSE"):
         require((frontend / name).read_bytes() == (FRONTEND / name).read_bytes(), f"Frontend source differs from build source: {name}")
