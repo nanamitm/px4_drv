@@ -539,14 +539,21 @@ cold entry is at offset 0, the warm entry address at 0x10, and the
 staging address 0xe00000 at 0x14. The probe handles the warm reload
 requests that DriverHost sends, in this order:
 
-- 702 stops any stream and replies 703.
+- 702 requests a stream stop and replies 703 at once. The stream task
+  stops after its current block and waits up to 100 ms for USB
+  completions, so the host waits before writing the image (DriverHost
+  waits 400 ms).
 - 660 writes data at 0xe00000-based addresses into 0xe20000. RAM at
   0xe00000 is only 64 KB, mirrored at 0xe10000, so it cannot hold
-  a whole image.
-- 662 returns the word sum of that staging area. 662 for other
-  addresses is left to the ROM.
+  a whole image. The staging area overlaps the send slots, so 660
+  replies 661 with 1 until the stream task has stopped.
+- 662 returns the word sum of the staging area 0xe00000–0xe19d9f.
+  662 for other addresses, including the rest of the 0xe10000 mirror,
+  is left to the ROM. A length that runs past the staging area
+  returns a sum of 0.
 - 704 checks the staged warm entry (0x4025d–0x59fff) and the staging
-  word, as the ROM does. A routine in the first 0xa0 bytes then saves
+  word, as the ROM does. It replies 705 with 1 while the stream task
+  is still running. A routine in the first 0xa0 bytes then saves
   the ROM work area 0x40240–0x4025f to 0xe50000, writes the warm entry
   to 0x40200, and copies the image body to 0x40300. It then calls the
   ROM soft reset at 0x123c.
@@ -653,8 +660,14 @@ A host that receives two-block messages must split the payload into
 Argument 100 followed by an address and a value writes one register.
 It replies with 894: address, value, and readback. Read registers
 with the ROM request 662 over a four-byte range. The reply is the word
-itself. Avoid sending requests other than stop during a stream. A burst
-of about 20 pokes during streaming stopped the probe from responding.
+itself. A burst of about 20 pokes during streaming once stopped the
+probe from responding. The probe now ignores 890 arguments between 1
+and 89,999,999 while the stream task runs and replies with the 891
+status frame instead, so set `slot_config` and the AGC limits before
+the first frequency request. At stream start the probe checks that
+`slot_config` has at least one slot, a slot spacing that holds one
+send, and header and descriptor tables that do not overlap. Otherwise
+it counts an error and does not stream.
 
 Argument 2 returns the batch trace in 893. The first twelve
 (address, value) pairs contain the initial timer value, the number

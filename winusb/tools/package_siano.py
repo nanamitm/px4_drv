@@ -8,7 +8,7 @@ import shutil
 
 WINUSB = Path(__file__).resolve().parents[1]
 FIRMWARE_SHA256 = "054520642d5d09cb7ab7d08dbd6fd9ba9365de56adf2e7d7d06927f9845ff818"
-J83B_FIRMWARE_SHA256 = "dddd326e7a69e48aa3d825bb77a02e167292ca0658986d0810fd4b5d5da016eb"
+J83B_FIRMWARE_SHA256 = "f4bb6b499fe96d6aa8061618f6377241bf66d5afd6830a34c1d20664e4e4b8ce"
 
 
 def check_j83b_firmware(firmware):
