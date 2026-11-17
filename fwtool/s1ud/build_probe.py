@@ -10,6 +10,9 @@ import subprocess
 import tempfile
 
 LOAD_ADDRESS = 0x40260
+# ROM の 704 と capture_probe.S の読み込み直しは、warm 入口を 0x5a000 未満に限り、
+# 本体を 0x40300 から 0x5a000 までだけ写す。読み込み先 (STAGING_SIZE) も同じ長さに当たる
+LOAD_END = 0x5A000
 MARKER_OFFSET = 0x40
 
 
@@ -36,6 +39,8 @@ def main():
 
     if not payload or len(payload) % 4:
         raise RuntimeError("Expected a nonempty, word-aligned payload")
+    if LOAD_ADDRESS + len(payload) > LOAD_END:
+        raise RuntimeError(f"Payload of {len(payload)} bytes exceeds the {LOAD_END - LOAD_ADDRESS:#x}-byte load window")
     if args.probe == "boot" and (len(payload) != MARKER_OFFSET + 4 or payload[MARKER_OFFSET:] != bytes(4)):
         raise RuntimeError("Unexpected boot probe layout")
     header = struct.pack("<III", 0xAD, len(payload), LOAD_ADDRESS)
