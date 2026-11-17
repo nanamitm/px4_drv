@@ -155,8 +155,9 @@ bool ReceiverBase::TuneIsdbC(std::uint32_t timeout)
 		return false;
 
 	// Sony の sony_integ_isdbc_WaitTSLock() と sony_integ_j83b_WaitTSLock() は、復調器のロックを1秒で打ち切る
-	// 信号のない搬送波を TuneTimeout まで待つと、行の多い ChSet のスキャンが長引くため、ロックまでの待ちだけこの上限にする
-	const std::uint32_t lock_timeout = (std::min<std::uint32_t>)(timeout, 1000);
+	// 信号のない搬送波を TuneTimeout まで待つと、行の多い ChSet のスキャンが長引くため、ロックまでの待ちだけ上限を設ける。
+	// 上限は受信機ごとの IsdbCLockWaitLimit() (既定 1 秒)
+	const std::uint32_t lock_timeout = (std::min<std::uint32_t>)(timeout, IsdbCLockWaitLimit());
 	auto begin = std::chrono::steady_clock::now();
 	bool lock_seen = false;
 
