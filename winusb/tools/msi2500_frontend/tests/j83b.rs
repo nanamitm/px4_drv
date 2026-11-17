@@ -282,6 +282,49 @@ fn check_qam_sample_rate(fs: f64, periodic_gaps: bool) {
     assert_eq!(st.checksum_errors, 0, "{st:?}");
 }
 
+/// PX-S1UD の欠落を埋めた値 (消失) に NaN が入っても、復調器が NaN の状態に留まらないことを確かめる。
+/// 補間の重みが NaN になったとき (s1ud.rs の自己相関の推定)、NaN が等化器と PLL へ入り、MER が約 347 dB に見えたまま
+/// 同期を失って戻らなかった
+#[test]
+fn qam_demodulator_survives_non_finite_erased_samples() {
+    let fs = 12e6;
+    let mut rng = Rng(0x0dd_ba11);
+    let ts = make_ts(3000, &mut rng);
+    let mut tx = J83bTx::new(0b0101);
+    let mut levels = Vec::new();
+    tx.push_packets(&ts, &mut levels);
+    let syms: Vec<Complex32> = levels.iter().map(|&z| z / LEVEL_SCALE).collect();
+    let x = synthesize(&syms, fs, -25.0, 1500.0, 31.0, &mut rng);
+    let mut demod = QamDemod::new(fs, 1.0);
+    let mut dec = J83bDecoder::new();
+    let (mut s, mut out) = (Vec::new(), Vec::new());
+    let mut poisoned = 0;
+    for (k, chunk) in x.chunks(7366).enumerate() {
+        s.clear();
+        if demod.stats.dd && demod.stats.output_symbols > 0 && poisoned < 4 && k % 20 == 0 {
+            // ブロックの先頭のサンプルの直後の 6 サンプルを、NaN の消失として渡す
+            let mut c = chunk.to_vec();
+            c[1..7].fill(Complex32::new(f32::NAN, f32::NAN));
+            demod.push_erased(&c, 1..7, &mut s);
+            poisoned += 1;
+        } else {
+            demod.push(chunk, &mut s);
+        }
+        assert!(s.iter().all(|z| z.re.is_finite() && z.im.is_finite()), "non-finite symbol after block {k}: {:?}", demod.stats);
+        dec.push(&s, &mut out);
+    }
+    let q = &demod.stats;
+    let st = &dec.stats;
+    eprintln!("{q:?}
+{st:?}");
+    assert_eq!(poisoned, 4);
+    assert!(q.carrier_hz.is_finite() && q.dd && q.restarts == 0, "{q:?}");
+    assert!(q.mer_db > 28.0 && q.mer_db < 60.0, "{q:?}");
+    assert_eq!(st.frame_sync_losses, 0, "{st:?}");
+    let n = check_output(&ts, &out);
+    assert!(n > 2000, "only {n} packets");
+}
+
 /// Blackman 窓の FIR による低域通過 (遅延を補正し、出力の長さは入力から taps - 1 を引いた値)
 fn lowpass(x: &[Complex32], cut_hz: f64, fs: f64, taps: usize) -> Vec<Complex32> {
     use std::f64::consts::PI;

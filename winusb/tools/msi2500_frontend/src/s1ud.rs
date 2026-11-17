@@ -104,6 +104,8 @@ pub struct S1udStats {
     pub lost_blocks: u64,
     pub bridged: u64,
     pub resets: u64,
+    /// 共分散が正定値にならず捨てた自己相関の推定の数
+    pub acf_rejects: u64,
 }
 
 /// 直流と、I と Q の利得と位相のずれの適応補正。
@@ -216,6 +218,8 @@ struct Likelihood {
     interp: Vec<Vec<Complex32>>,
     /// 作りかけの分解と重み
     build: Option<Build>,
+    /// 共分散が正定値にならず捨てた推定の数
+    rejected: u64,
     /// 自己相関の推定に使う長さ ACF_SAMPLES の FFT
     fft: Arc<dyn Fft<f64>>,
     ifft: Arc<dyn Fft<f64>>,
@@ -235,6 +239,8 @@ struct Build {
     weights: Vec<Complex32>,
     chol: Vec<(Vec<Complex64>, f64)>,
     interp: Vec<Vec<Complex32>>,
+    /// 分解の対角が LIK_REG の分を下回った (推定した共分散が半正定値でない)
+    failed: bool,
 }
 
 impl Build {
@@ -253,10 +259,11 @@ impl Build {
             weights: Vec::new(),
             chol: Vec::new(),
             interp: Vec::new(),
+            failed: false,
         }
     }
 
-    /// 積和の回数が budget を超えるまで進め、すべての候補を作り終えたら true を返す
+    /// 積和の回数が budget を超えるまで進め、すべての候補を作り終えたか、分解に失敗したら true を返す
     fn step(&mut self, mut budget: usize) -> bool {
         let n = 2 * LIK_SIDE;
         while self.g <= GAP_MAX {
@@ -264,6 +271,17 @@ impl Build {
                 // コレスキー分解の 1 列
                 let j = self.col;
                 self.logdet += cholesky_column(&self.c, &mut self.l, n, j);
+                // 遅延ごとに同じ個数の積を平均する自己相関の推定 (observe) は半正定値を保証しない。
+                // チューナーの通過帯域の外で信号の電力が int8 の量子化の雑音程度 (0 遅延の約 1e-4) まで下がると、
+                // 推定の誤差で共分散に負の固有値が現れ、対角が負になる。対角を下限 (1e-30) で置き換えて続けると
+                // 後の列が発散して補間の重みが NaN になり、欠落を埋めた値から QamDemod へ NaN が入った
+                // (574.250 MHz の受信で、自己相関の推定し直しの後に同期を失ったまま戻らなかった)。
+                // 半正定値の行列に LIK_REG の分を加えた行列の対角は LIK_REG の分を下回らないため、下回ったら推定を捨てる
+                let d = self.l[j * n + j].re;
+                if d * d < self.acf[0].re * LIK_REG {
+                    self.failed = true;
+                    return true;
+                }
                 self.col += 1;
                 budget = budget.saturating_sub((j + 1) * (n - j));
             } else if self.row < self.g {
@@ -304,6 +322,7 @@ impl Likelihood {
             chol: Vec::new(),
             interp: Vec::new(),
             build: None,
+            rejected: 0,
             fft: FftPlanner::new().plan_fft_forward(ACF_SAMPLES),
             ifft: FftPlanner::new().plan_fft_inverse(ACF_SAMPLES),
         }
@@ -346,13 +365,21 @@ impl Likelihood {
         }
     }
 
-    /// 作りかけの分解を budget の量だけ進め、作り終えたら判定に使う分解と入れ替える
+    /// 作りかけの分解を budget の量だけ進め、作り終えたら判定に使う分解と入れ替える。
+    /// 分解に失敗したら、前の分解を使い続けて推定をやり直す (始めの分解では、復調の開始を次の推定まで待つ)。
+    /// 推定の誤差は ACF_BLOCKS ブロックごとに独立に変わるため、推定し直す間隔の ACF_REFRESH を待たずにすぐやり直し、
+    /// 始めの分解の失敗で復調の開始を長く遅らせないようにする
     fn advance(&mut self, budget: usize) {
         let Some(b) = self.build.as_mut() else {
             return;
         };
         if b.step(budget) {
             let b = self.build.take().unwrap();
+            if b.failed {
+                self.rejected += 1;
+                self.restart_estimate();
+                return;
+            }
             self.chol = b.chol;
             self.interp = b.interp;
             self.mean = b.mean;
@@ -533,6 +560,7 @@ impl S1udFrontend {
         }
         // 始めの分解は復調を始める前のため、一度に作る
         self.lik.advance(if self.lik.ready() { BUILD_BUDGET } else { usize::MAX });
+        self.stats.acf_rejects = self.lik.rejected;
         let mut reset = false;
         if !self.lik.ready() {
             // 欠落の長さを判定できるまで復調を始めない。6 で固定して始めると、判定帰還の前に
@@ -705,4 +733,100 @@ fn with_gap(x: &[Complex32], fill: &[Complex32], end: usize) -> Vec<Complex32> {
     s.extend_from_slice(fill);
     s.extend_from_slice(&x[1..end]);
     s
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct Rng(u64);
+
+    impl Rng {
+        fn next(&mut self) -> u64 {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            self.0
+        }
+        fn gauss(&mut self) -> f64 {
+            let u1 = ((self.next() >> 11) as f64 + 0.5) / (1u64 << 53) as f64;
+            let u2 = ((self.next() >> 11) as f64 + 0.5) / (1u64 << 53) as f64;
+            (-2.0 * u1.ln()).sqrt() * (2.0 * std::f64::consts::PI * u2).cos()
+        }
+        fn complex(&mut self) -> Complex64 {
+            Complex64::new(self.gauss(), self.gauss())
+        }
+    }
+
+    /// 12 MS/s の複素雑音を ±cut_hz に帯域制限し、相対電力 floor の白色雑音を加えて、ブロックの長さで切り出す
+    fn band_limited_blocks(rng: &mut Rng, blocks: usize, cut_hz: f64, floor: f64) -> Vec<Vec<Complex32>> {
+        use std::f64::consts::PI;
+        const FIR: usize = 255;
+        let m = (FIR - 1) as f64 / 2.0;
+        let h: Vec<f64> = (0..FIR)
+            .map(|n| {
+                let t = n as f64 - m;
+                let s = if t == 0.0 { 2.0 * cut_hz / 12e6 } else { (2.0 * PI * cut_hz / 12e6 * t).sin() / (PI * t) };
+                let a = 2.0 * PI * n as f64 / (FIR - 1) as f64;
+                s * (0.42 - 0.5 * a.cos() + 0.08 * (2.0 * a).cos())
+            })
+            .collect();
+        let gain = h.iter().map(|c| c * c).sum::<f64>().sqrt();
+        let w: Vec<Complex64> = (0..blocks * BLOCK_SAMPLES + FIR - 1).map(|_| rng.complex()).collect();
+        let x: Vec<Complex32> = w
+            .windows(FIR)
+            .map(|v| {
+                let s = v.iter().zip(&h).map(|(a, c)| a * c).sum::<Complex64>() / gain + rng.complex() * floor.sqrt();
+                Complex32::new((s.re * 0.2) as f32, (s.im * 0.2) as f32)
+            })
+            .collect();
+        x.chunks_exact(BLOCK_SAMPLES).map(|c| c.to_vec()).collect()
+    }
+
+    /// 1 回分 (ACF_BLOCKS ブロック) の自己相関を推定し、分解を作り終える
+    fn estimate(lik: &mut Likelihood, rng: &mut Rng, floor: f64) {
+        lik.restart_estimate();
+        for b in band_limited_blocks(rng, ACF_BLOCKS as usize, 2.85e6, floor) {
+            lik.observe(&b);
+        }
+        lik.advance(usize::MAX);
+    }
+
+    /// 判定と補間に使う分解の重みが有限で、帯域制限された信号の補間として妥当な大きさに収まる
+    /// (通過帯域の外の雑音が 0 遅延の 1e-3 のとき、最大で約 6)
+    fn assert_usable(lik: &Likelihood, what: &str) {
+        assert!(lik.ready(), "{what}: no decomposition");
+        for (g, w) in (GAP_MIN..).zip(&lik.interp) {
+            let max = w.iter().map(|v| v.norm()).fold(0f32, |a, b| if b.is_finite() { a.max(b) } else { f32::NAN });
+            assert!(max < 100.0, "{what}: gap {g} interpolation weight {max}");
+        }
+        assert!(lik.chol.iter().all(|(_, logdet)| logdet.is_finite()), "{what}: non-finite log determinant");
+    }
+
+    /// PX-S1UD のチューナーの通過帯域 (約 ±2.85 MHz) の外で、信号の電力が int8 の量子化の雑音程度
+    /// (0 遅延の 1e-4 以下) まで下がると、自己相関の推定から作る共分散が正定値にならないことがある。
+    /// そのとき分解の対角が負になって補間の重みが NaN になり、欠落を埋めた値から復調器へ NaN が入った。
+    /// 推定し直しでは前の分解を使い続け、始めの推定では正定値の推定が得られるまで分解を作り直すことを確かめる
+    #[test]
+    fn likelihood_rejects_indefinite_covariance_estimates() {
+        let mut rng = Rng(0x5eed_1234);
+        let mut lik = Likelihood::new();
+        estimate(&mut lik, &mut rng, 1e-3);
+        assert_usable(&lik, "initial estimate");
+        assert_eq!(lik.rejected, 0);
+        for k in 0..8 {
+            estimate(&mut lik, &mut rng, 0.0);
+            assert_usable(&lik, &format!("refresh {k}"));
+        }
+        assert!(lik.rejected > 0, "the refreshes did not produce an indefinite estimate");
+
+        let mut lik = Likelihood::new();
+        for _ in 0..16 {
+            estimate(&mut lik, &mut rng, 0.0);
+            if lik.ready() {
+                break;
+            }
+        }
+        assert_usable(&lik, "first estimate without out-of-band noise");
+    }
 }

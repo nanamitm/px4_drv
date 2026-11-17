@@ -384,7 +384,7 @@ impl QamDemod {
         self.stats.samples += x.len() as u64;
         if !self.dc_init {
             let n = x.len() as f32;
-            self.dc = x.iter().fold(Complex32::default(), |a, &v| a + v) / n;
+            self.dc = x.iter().filter(|v| v.re.is_finite() && v.im.is_finite()).fold(Complex32::default(), |a, &v| a + v) / n;
             self.dc_init = true;
         }
         if erased.start < erased.end {
@@ -395,6 +395,10 @@ impl QamDemod {
         const DC_K: f32 = 1e-5;
         self.buf.reserve(2 * x.len());
         for (i, &v) in x.iter().enumerate() {
+            // 有限でない入力は 0 に置き換える。NaN が 1 つでも整合フィルターへ入ると、等化器の係数、PLL の周波数、
+            // 直流と AGC の推定が NaN のまま戻らない。判定の誤差も NaN になり、MER の計算では誤差の下限 1e-30 へ
+            // 置き換わって約 347 dB に見えるため、MER の低下によるやり直しも働かなかった
+            let v = if v.re.is_finite() && v.im.is_finite() { v } else { Complex32::default() };
             if !erased.contains(&i) {
                 self.dc += (v - self.dc) * DC_K;
             }
