@@ -46,6 +46,34 @@ with request 660 in chunks of at most 240 bytes, verify its little-endian
 
 These probes do not tune or capture RF.
 
+## Release firmware
+
+The WinUSB release includes the source-built capture firmware as
+`firmware/s1ud_j83b.inp` beside every DriverHost. It is GPL-2.0-only;
+the source release includes this directory and the repository LICENSE.
+The normal ISDB-T firmware has separate Siano redistribution terms.
+
+Before running `winusb/build.ps1` locally, build the image from the
+repository root with Python 3 and ARC binutils 2.42 (Ubuntu 24.04 or WSL):
+
+```sh
+sudo apt-get install binutils-arc-linux-gnu
+mkdir -p winusb/build/s1ud
+python3 fwtool/s1ud/build_probe.py --probe capture winusb/build/s1ud/s1ud_j83b.inp
+```
+
+The builder creates a new output file exclusively; move an existing image
+aside before rebuilding. CI builds the same source in a Linux job and
+passes the image to the Windows packaging job. Packaging checks its SHA-256
+in `winusb/tools/package_siano.py`; update that pin after rebuilding any
+intentional firmware change. The release uses this source-built image,
+not an external J.83B firmware.
+
+This firmware remains experimental. The DriverHost test below received
+138.750 MHz for 60 seconds with continuity errors. The standalone USB
+capture test ran for 30 minutes; it does not verify long-duration TS
+reception, other channels, or BonDriver/TVTest playback with this image.
+
 ## RF comparison on PX-S1UD
 
 A RAM-only diagnostic of the reference firmware read 23 registers while

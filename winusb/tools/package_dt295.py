@@ -31,6 +31,7 @@ for bits, platform in ((32, 'x86'), (64, 'x64')):
     # 共通ホストの全配置先で既存PX-S1UDファームウェアを保つ契約にも合わせる。
     (folder / 'firmware').mkdir(exist_ok=True)
     shutil.copy2(root / 'pkg/DriverHost_PX4/firmware/isdbt_rio.inp', folder / 'firmware/isdbt_rio.inp')
+    shutil.copy2(root / 'build/s1ud/s1ud_j83b.inp', folder / 'firmware/s1ud_j83b.inp')
     shutil.copytree(root / 'pkg/licenses/siano', folder / 'licenses/siano', dirs_exist_ok=True)
 target = dist / 'licenses/magicvision'
 target.mkdir(parents=True, exist_ok=True)

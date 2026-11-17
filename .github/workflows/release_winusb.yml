@@ -10,7 +10,10 @@ permissions:
   contents: read
 
 jobs:
+  s1ud-firmware:
+    uses: ./.github/workflows/build_s1ud_firmware.yml
   build:
+    needs: s1ud-firmware
     runs-on: windows-2022
     timeout-minutes: 30
     defaults:
@@ -22,6 +25,10 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
+      - uses: actions/download-artifact@v7
+        with:
+          name: s1ud-j83b-firmware
+          path: winusb/build/s1ud
       - uses: microsoft/setup-msbuild@v3
       - name: Setup Rust for RTL-SDR helper
         shell: pwsh

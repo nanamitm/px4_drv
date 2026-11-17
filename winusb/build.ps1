@@ -1,6 +1,11 @@
 ﻿param([string]$SigningPfxPath='', [string]$SigningPasswordEnvironment='', [string]$SigningPasswordFile='', [switch]$RequireSignedApplications, [switch]$UseDriverPublisher)
 
 
+# CI は Linux で生成した ARC ファームウェアを受け取る。ローカルでも先に生成する。
+if (-not (Test-Path -LiteralPath (Join-Path $PSScriptRoot 'build/s1ud/s1ud_j83b.inp') -PathType Leaf)) {
+    throw 'Build the PX-S1UD J.83B firmware first; see fwtool/s1ud/README.md.'
+}
+
 if ($UseDriverPublisher -and ($SigningPfxPath -or $SigningPasswordEnvironment -or $SigningPasswordFile)) { throw 'UseDriverPublisher cannot be combined with external signing credentials.' }
 
 # helper は通常配布に必須のため、C++ ビルドより前に開発環境の不足を通知する。

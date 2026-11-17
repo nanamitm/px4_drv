@@ -8,9 +8,18 @@ import shutil
 
 WINUSB = Path(__file__).resolve().parents[1]
 FIRMWARE_SHA256 = "054520642d5d09cb7ab7d08dbd6fd9ba9365de56adf2e7d7d06927f9845ff818"
+J83B_FIRMWARE_SHA256 = "dddd326e7a69e48aa3d825bb77a02e167292ca0658986d0810fd4b5d5da016eb"
+
+
+def check_j83b_firmware(firmware):
+    # 別の外部ファームウェアや古い生成物を配布しないよう、ソースビルドの結果を固定する。
+    if hashlib.sha256(firmware.read_bytes()).hexdigest() != J83B_FIRMWARE_SHA256:
+        raise ValueError(f"PX-S1UD J.83B firmware hash mismatch: {firmware}")
 
 def stage(dist):
     firmware = WINUSB / "pkg/DriverHost_PX4/firmware/isdbt_rio.inp"
+    j83b_firmware = WINUSB / "build/s1ud/s1ud_j83b.inp"
+    check_j83b_firmware(j83b_firmware)
     if hashlib.sha256(firmware.read_bytes()).hexdigest() != FIRMWARE_SHA256:
         raise ValueError("PX-S1UD firmware hash mismatch")
     for bits, platform in ((32, "x86"), (64, "x64")):
@@ -38,6 +47,7 @@ def stage(dist):
         if folder != dist:
             (folder / "firmware").mkdir(exist_ok=True)
             shutil.copy2(firmware, folder / "firmware/isdbt_rio.inp")
+            shutil.copy2(j83b_firmware, folder / "firmware/s1ud_j83b.inp")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()

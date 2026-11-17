@@ -112,7 +112,12 @@ firmware が誤り訂正できなかったパケットを TS から除いた可�
 PX-S1UD のチューナーは、スカパー！プレミアムサービス光の J.83 Annex B（256QAM、5.6 Msps）の
 周波数帯も受信できます。復調前の IQ（12 MS/s）を USB で送出する J.83B 用の firmware を読み込むと、
 ホスト側で復調して TS を得られます。J.83B 用の firmware は Siano の通常の firmware とは別のファイルで、
-出所と再配布の条件を確認できていないため配布物に含まれず、利用者が用意したファイルを指定します。
+配布物には、このリポジトリの `fwtool/s1ud/capture_probe.S` からビルドした自作版を
+`firmware/s1ud_j83b.inp` として同梱しています。ライセンスは GPL-2.0-only です。
+外部由来の J.83B 用 firmware は同梱していません。
+自作版では 138.750 MHz の短時間受信を確認していますが、CC エラーが残っており、
+長時間録画と BonDriver／TVTest 経由の利用は未検証です。詳細はソース配布物の
+`fwtool/s1ud/README.md` を参照してください。
 
 ### 構成
 
@@ -155,7 +160,7 @@ DriverHost と helper の間のキューがあふれた場合も、捨てたブ�
 
 ### 設定
 
-`DriverHost_PX4.ini` の `[DeviceDefinition18.Config]` に J.83B 用の firmware と helper を指定し、
+`DriverHost_PX4.ini` の `[DeviceDefinition18.Config]` に同梱の J.83B 用 firmware と helper を指定し、
 `[DeviceDefinition18.Receiver0]` の `System` を `"ISDB-T,J.83B"` にします。
 相対パスは `DriverHost_PX4.exe` の配置先が基準です。helper は MSi2500 の配布物の
 `msi2500` フォルダーにあり、PX-S1UD の配布物には含まれていません。

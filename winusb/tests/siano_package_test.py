@@ -39,6 +39,28 @@ class PackageTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "license mismatch"):
             check(self.dist)
 
+    def test_missing_j83b_firmware(self):
+        for bits in (32, 64):
+            with self.subTest(bits=bits):
+                p = self.dist / f"BonDriver_PX-S1UD_{bits}bit/firmware/s1ud_j83b.inp"
+                original = p.read_bytes()
+                p.unlink()
+                with self.assertRaises(FileNotFoundError):
+                    check(self.dist)
+                p.write_bytes(original)
+
+    def test_external_j83b_firmware_rejected(self):
+        (self.folder / "firmware/s1ud_j83b.inp").write_bytes(b"external firmware")
+        with self.assertRaisesRegex(ValueError, "J.83B firmware hash mismatch"):
+            check(self.dist)
+
+    def test_other_host_requires_j83b_firmware(self):
+        other = self.dist / "BonDriver_Other_64bit"
+        shutil.copytree(self.folder, other)
+        (other / "firmware/s1ud_j83b.inp").unlink()
+        with self.assertRaises(FileNotFoundError):
+            check(self.dist)
+
     def test_wrong_device(self):
         p = self.dist / "Driver/PX-S1UD.inf"
         p.write_bytes(p.read_bytes().replace(b"PID_0080", b"PID_0085"))

@@ -7,6 +7,8 @@ on:
     paths:
       - '.github/workflows/build_winusb.yml'
       - 'driver/**'
+      - 'fwtool/s1ud/**'
+      - '.github/workflows/build_s1ud_firmware.yml'
       - 'winusb/**'
   push:
     branches:
@@ -14,11 +16,18 @@ on:
     paths:
       - '.github/workflows/build_winusb.yml'
       - 'driver/**'
+      - 'fwtool/s1ud/**'
+      - '.github/workflows/build_s1ud_firmware.yml'
       - 'winusb/**'
   workflow_dispatch:
 
 jobs:
+  s1ud-firmware:
+    uses: ./.github/workflows/build_s1ud_firmware.yml
+    permissions:
+      contents: read
   build:
+    needs: s1ud-firmware
     name: Build and Check WinUSB Package
     runs-on: windows-2022
     permissions:
@@ -29,6 +38,11 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
+
+      - uses: actions/download-artifact@v7
+        with:
+          name: s1ud-j83b-firmware
+          path: winusb/build/s1ud
 
       - name: Setup MSBuild
         uses: microsoft/setup-msbuild@v3

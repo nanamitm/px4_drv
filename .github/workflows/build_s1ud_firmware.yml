@@ -1,0 +1,24 @@
+name: Build PX-S1UD J.83B firmware
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  firmware:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install ARC binutils
+        run: sudo apt-get update && sudo apt-get install -y binutils-arc-linux-gnu
+      - name: Build source firmware
+        run: |
+          mkdir -p winusb/build/s1ud
+          python3 fwtool/s1ud/build_probe.py --probe capture winusb/build/s1ud/s1ud_j83b.inp
+      - uses: actions/upload-artifact@v7
+        with:
+          name: s1ud-j83b-firmware
+          path: winusb/build/s1ud/s1ud_j83b.inp
+          if-no-files-found: error

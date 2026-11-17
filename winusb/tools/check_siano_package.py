@@ -5,6 +5,7 @@ import argparse
 import hashlib
 from check_pxbcud_package import configuration
 from check_rtlsdr_package import check_pe
+from package_siano import check_j83b_firmware
 
 WINUSB = Path(__file__).resolve().parents[1]
 FIRMWARE_SHA256 = "054520642d5d09cb7ab7d08dbd6fd9ba9365de56adf2e7d7d06927f9845ff818"
@@ -38,6 +39,7 @@ def check(dist):
         if not folder.is_dir():
             continue
         fw = folder / "firmware/isdbt_rio.inp"
+        check_j83b_firmware(folder / "firmware/s1ud_j83b.inp")
         if hashlib.sha256(fw.read_bytes()).hexdigest() != FIRMWARE_SHA256:
             raise ValueError(f"PX-S1UD firmware hash mismatch: {fw}")
         for name in ("COPYING", "LICENCE.siano", "NOTICE.md"):
