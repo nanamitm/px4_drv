@@ -212,6 +212,9 @@ pub struct CaptureStats {
     pub unwritten_blocks: u64,
     /// 最後に失敗した転送の Win32 エラー (完了待ちの期限切れは 0x1_0000_0102 = WAIT_TIMEOUT を上位に印を付けて記録)
     pub last_error: u64,
+    /// 取り込み開始後の再投入の間隔の最大値 (マイクロ秒)。通常は 1 転送分の約 8 ms で、
+    /// 投入済みの転送の先行分 (約 512 ms) に近づくと、helper 側の遅れで転送が間に合わなくなる
+    pub max_submit_gap_us: u64,
 }
 
 pub struct CaptureLimits {
@@ -281,6 +284,9 @@ pub fn capture(
     let mut result: Result<(), UsbError> = Ok(());
     // ドライバーへ投入し、まだ完了を受け取っていない転送
     let mut inflight = [false; TRANSFERS];
+    // 転送の失敗が helper の投入遅れか、ドライバーより下の層の遅れかを切り分けるため、
+    // 各転送を投入した時刻と、直前の再投入の時刻を記録する
+    let mut submitted_at = [Instant::now(); TRANSFERS];
     buf.fill(UNWRITTEN);
     for k in 0..TRANSFERS {
         if let Err(e) = submit(k, k > 0, &mut desc[k], &mut ov[k]) {
@@ -288,9 +294,18 @@ pub fn capture(
             break;
         }
         inflight[k] = true;
+        submitted_at[k] = Instant::now();
     }
     if result.is_ok() {
         result = dev.apply(&[Op::Start]);
+    }
+    let mut last_submit = Instant::now();
+    fn note_submit(at: &mut Instant, last: &mut Instant, stats: &mut CaptureStats) {
+        let now = Instant::now();
+        let gap = now.duration_since(*last).as_micros() as u64;
+        stats.max_submit_gap_us = stats.max_submit_gap_us.max(gap);
+        *last = now;
+        *at = now;
     }
     let mut last_data = Instant::now();
     let mut consecutive_errors = 0u32;
@@ -309,8 +324,14 @@ pub fn capture(
             // 連続する失敗の最初の数回だけ記録する (投入し直した後も失敗するかを見分ける)
             if consecutive_errors < 3 {
                 let bad = desc[k].iter().filter(|d| d.Status != 0).count();
-                eprintln!("[usb] transfer {k} failed: error=0x{:x} bad_packets_in_transfer={bad} first_status=0x{:x}",
-                    stats.last_error, desc[k].iter().map(|d| d.Status).find(|&s| s != 0).unwrap_or(0));
+                // pending: この転送以外でドライバーへ投入済みの転送数 (TRANSFERS - 1 に近ければ先行分は残っていた)。
+                // since_last_submit: 直前の再投入からの経過。age: この転送を投入してからの経過 (通常は約 512 ms)。
+                // 先行分が残り、再投入も途切れていないのに失敗した場合は、helper ではなくドライバーより下の層の遅れを示す
+                let pending = inflight.iter().filter(|&&f| f).count();
+                eprintln!("[usb] transfer {k} failed: error=0x{:x} bad_packets_in_transfer={bad} first_status=0x{:x} pending={pending}/{} since_last_submit_ms={:.1} age_ms={:.1} max_submit_gap_ms={:.1}",
+                    stats.last_error, desc[k].iter().map(|d| d.Status).find(|&s| s != 0).unwrap_or(0),
+                    TRANSFERS - 1, last_submit.elapsed().as_secs_f64() * 1e3, submitted_at[k].elapsed().as_secs_f64() * 1e3,
+                    stats.max_submit_gap_us as f64 / 1e3);
             }
             stats.transfer_errors += 1;
             consecutive_errors += 1;
@@ -326,21 +347,13 @@ pub fn capture(
                 // 完了していない転送のバッファーはドライバーが使っているため、投入し直さずに完了を待ち続ける
                 continue 'run;
             }
-            // 完了した転送の失敗 (検証環境では USBD_STATUS_ISO_NOT_ACCESSED_LATE、投入が間に合わなかった) の後は
-            // 連続性が切れるため、この転送だけを新しいストリームとして投入し直す。
-            // パイプを止めて全転送を投入し直す方法は、以後の転送がすべて ERROR_BUSY で失敗し続けたため採用しなかった
-            buf[k * xlen..(k + 1) * xlen].fill(UNWRITTEN);
-            match submit(k, false, &mut desc[k], &mut ov[k]) {
-                Ok(()) => inflight[k] = true,
-                Err(e) => {
-                    result = Err(UsbError::DeviceGone(e));
-                    break 'run;
-                }
-            }
-            k = (k + 1) % TRANSFERS;
-            continue 'run;
         } else {
             consecutive_errors = 0;
+        }
+        // 失敗した転送でも、状態が 0 のパケットはデータを受け取っている。USBD_STATUS_ISO_TD_ERROR では
+        // 64 パケット (8 ms) のうち 1 パケットだけが失敗した例があり、転送ごと捨てると欠落が 64 倍に広がる。
+        // 失敗したパケットと、触れられなかったパケット (投入前に長さを 0 にしている) と、印が残るブロックは下で除く
+        {
             for d in desc[k].iter() {
                 stats.packets += 1;
                 if d.Status != 0 {
@@ -382,7 +395,14 @@ pub fn capture(
             break;
         }
         buf[k * xlen..(k + 1) * xlen].fill(UNWRITTEN);
-        if submit(k, true, &mut desc[k], &mut ov[k]).is_err() {
+        // 投入が間に合わなかった失敗 (USBD_STATUS_ISO_NOT_ACCESSED_LATE など) の後はストリームの時刻が切れているため、
+        // この転送だけを新しいストリームとして投入し直す。パイプを止めて全転送を投入し直す方法は、以後の転送が
+        // すべて ERROR_BUSY で失敗し続けたため採用しなかった。
+        // 一部のパケットの通信エラー (USBD_STATUS_ISO_TD_ERROR) では後続の転送の時刻は保たれているため、
+        // 続きとして投入する。新しいストリームとして投入していたときは、約 0.5 秒後 (先行分の約 512 ms に相当) に
+        // 数 ms の 2 回目の欠落があり、先行分の後に空きを挟んで予約されたためと推定している
+        let cont = ok || (consecutive_errors == 1 && desc[k].iter().all(|d| !is_late_status(d.Status)));
+        if !cont || submit(k, true, &mut desc[k], &mut ov[k]).is_err() {
             // 続きとして投入できなければ新しいストリームとして投入する。抜去などでそれも失敗すると DeviceGone で終わる
             if let Err(e) = submit(k, false, &mut desc[k], &mut ov[k]) {
                 result = Err(UsbError::DeviceGone(e));
@@ -390,6 +410,7 @@ pub fn capture(
             }
         }
         inflight[k] = true;
+        note_submit(&mut submitted_at[k], &mut last_submit, stats);
         k = (k + 1) % TRANSFERS;
     }
 
@@ -423,6 +444,27 @@ pub fn capture(
         }
     }
     result
+}
+
+/// 投入が間に合わずに等時転送のパケットが送受信されなかったことを示す状態 (usb.h)。
+/// USBD_STATUS_ISO_NOT_ACCESSED_BY_HW、USBD_STATUS_ISO_NA_LATE_USBPORT、USBD_STATUS_ISO_NOT_ACCESSED_LATE
+fn is_late_status(status: i32) -> bool {
+    matches!(status as u32, 0xC002_0000 | 0xC004_0000 | 0xC005_0000)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_late_status;
+
+    #[test]
+    fn only_late_statuses_restart_the_stream() {
+        // USBD_STATUS_ISO_TD_ERROR (パケットの通信エラー) は時刻が保たれるため続きとして投入する
+        assert!(!is_late_status(0xC003_0000u32 as i32));
+        assert!(!is_late_status(0));
+        assert!(is_late_status(0xC002_0000u32 as i32));
+        assert!(is_late_status(0xC004_0000u32 as i32));
+        assert!(is_late_status(0xC005_0000u32 as i32));
+    }
 }
 
 /// 取り込みの転送方式

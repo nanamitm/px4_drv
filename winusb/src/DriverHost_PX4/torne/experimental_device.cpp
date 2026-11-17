@@ -244,14 +244,14 @@ int ExperimentalDevice::ResetCard()
 
 int ExperimentalDevice::SetCardBaudrate(std::uint32_t baudrate)
 {
-	// この試験段階は実機でATRを確認したB-CAS/LRCだけを対象にする。
-	if (baudrate != 19200) return -ENOTSUP;
+	// ATRで指定されるB-CASの19200bpsとA-CASの38400bpsを受け付ける。
+	if (baudrate != 19200 && baudrate != 38400) return -ENOTSUP;
 	std::lock_guard<std::mutex> lock(card_mutex_);
 	if (!card_ || !available_) return -ENODEV;
 	std::lock_guard<std::mutex> control_lock(card_->session->control_mutex);
 	card_->session->control.Begin(Clock::now() + std::chrono::seconds(1));
 	CardUart uart(card_->session->memory, card_->session->control);
-	return uart.SetBaudrate(19200) ? 0 : -EIO;
+	return uart.SetBaudrate(baudrate) ? 0 : -EIO;
 }
 
 int ExperimentalDevice::IsCardDataReady(bool &ready) try

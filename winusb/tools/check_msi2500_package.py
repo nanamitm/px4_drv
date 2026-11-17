@@ -32,8 +32,15 @@ def check_package(folder, bits):
         require(dll in SYSTEM_DLLS or dll.startswith(("api-ms-win-", "ext-ms-win-")), f"Unbundled helper dependency: {dll}")
     require((runtime / "COPYING.frontend").read_bytes() == (FRONTEND / "LICENSE").read_bytes(), "Incorrect frontend license")
     require((folder / "LICENSE").read_bytes() == (WINUSB.parent / "LICENSE").read_bytes(), "Incorrect driver license")
-    for name in ("README.md", "TECHNICAL.md", "TECHNICAL-J83B.md", "BonDriver_MSI2500.ChSet.txt", "BonDriver_PX4-J83B.ChSet.txt", "it930x-firmware.bin"):
+    for name in ("README.md", "TECHNICAL.md", "TECHNICAL-J83B.md", "BonDriver_MSI2500.ChSet.txt", "BonDriver_PX4-J83B.ChSet.txt", "it930x-firmware.bin",
+                 "Install-Driver.ps1", "Driver/MSI2500.inf", "Driver/px4_drv_winusb.cat", "Driver/px4_drv_winusb.cer",
+                 "Driver/cert-install.jse", "Driver/verify.ps1", "Driver/trustedpub.cer"):
         require((folder / name).is_file(), f"Missing MSi2500 package file: {folder / name}")
+    for name in ("MSI2500.inf", "px4_drv_winusb.cat"):
+        require((folder / "Driver" / name).read_bytes() == (WINUSB / "pkg/inf" / name).read_bytes(), f"Driver file differs from the source: {name}")
+    inf = (folder / "Driver/MSI2500.inf").read_text(encoding="ascii")
+    # SDRplay のドライバーと同じインターフェース GUID を登録し、どちらのドライバーでも DriverHost の定義を共通にする
+    require("{2D93E8F2-BC67-4F7D-8891-574830AA637D}" in inf and r"USB\VID_1DF7&PID_2500" in inf, "Unexpected MSi2500 INF identity")
     require("(TECHNICAL-J83B.md)" in (folder / "README.md").read_text(encoding="utf-8"), "Broken packaged J.83B design link")
     require("(TECHNICAL.md)" in (folder / "TECHNICAL-J83B.md").read_text(encoding="utf-8"), "Broken packaged full-seg design link")
     require((folder / "BonDriver_PX4-J83B.ChSet.txt").read_bytes() == (WINUSB / "pkg/BonDriver_PX4/BonDriver_PX4-J83B.ChSet.txt").read_bytes(),
@@ -52,7 +59,7 @@ def check_package(folder, bits):
     require(len(devices) == 1, "Expected one MSi2500 device definition")
     device = devices[0]
     require(host[device]["guid"] == bon["ReceiverDefinition0"]["deviceguid"], "MSi2500 device GUID mismatch")
-    # SDRplay のドライバーが登録するインターフェース GUID。独自の INF は同梱しない
+    # SDRplay のドライバーと同梱の MSI2500.inf が共通で登録するインターフェース GUID
     require(host[device]["deviceinterfaceguid"].strip('"').lower() == "{2d93e8f2-bc67-4f7d-8891-574830aa637d}",
             "Unexpected MSi2500 interface GUID")
     require(host[device + ".Config"]["helperpath"].strip('"') == r"msi2500\msi2500_frontend.exe", "Incorrect helper path")

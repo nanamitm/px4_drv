@@ -586,11 +586,11 @@ int Device::ResetCard(){
 }
 
 int Device::SetCardBaudrate(std::uint32_t baudrate){
-    // 実機でATRを確認したB-CASが要求する速度だけを受け付ける。torneの内蔵リーダーと同じ範囲。
-    if(baudrate!=19200)return -ENOTSUP;
+    // ATRで指定されるB-CASの19200bpsとA-CASの38400bpsを受け付ける。
+    if(baudrate!=19200 && baudrate!=38400)return -ENOTSUP;
     std::lock_guard<std::mutex> lock(card_mutex_);
     if(!card_open_ || !available_ || !receiver_)return -ENODEV;
-    return receiver_->Card([](CardUart &uart){return uart.SetBaudrate(19200);});
+    return receiver_->Card([baudrate](CardUart &uart){return uart.SetBaudrate(baudrate);});
 }
 
 int Device::IsCardDataReady(bool &ready) try {
