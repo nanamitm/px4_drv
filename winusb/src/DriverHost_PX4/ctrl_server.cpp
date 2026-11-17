@@ -82,6 +82,9 @@ bool CtrlServer::CtrlConnection::CheckCommandLength(const std::uint8_t *buf,
 				      sizeof(px4::command::Stat),
 				      offsetof(px4::command::CtrlStatsCmd, stat_set.num));
 
+	case px4::command::CtrlCmdCode::PURGE_STREAM:
+		return length >= sizeof(px4::command::CtrlPurgeStreamCmd);
+
 	default:
 		/* ヘッダーだけで完結するコマンドは冒頭の検査で足りる */
 		return true;
@@ -270,6 +273,27 @@ void CtrlServer::CtrlConnection::Worker() noexcept
 				stats->status = px4::command::CtrlStatusCode::SUCCEEDED;
 			else
 				stats->status = px4::command::CtrlStatusCode::FAILED;
+
+			break;
+		}
+
+		case px4::command::CtrlCmdCode::PURGE_STREAM:
+		{
+			/*
+			 * データのパイプの PURGE は世代を変えないため、BonDriver はパージより前に送られて
+			 * パイプや受信中のバッファーに残った TS を区別できず、パージ後の TS の前に渡していた。
+			 * 世代を進めて返し、BonDriver がそれより前の世代を捨てられるようにする
+			 */
+			px4::command::CtrlPurgeStreamCmd *purge = reinterpret_cast<px4::command::CtrlPurgeStreamCmd *>(buf.get());
+			std::uint32_t epoch = 0;
+
+			if (receiver && receiver->GetStreamBuffer()->AdvanceEpoch(&epoch)) {
+				purge->epoch = epoch;
+				purge->status = px4::command::CtrlStatusCode::SUCCEEDED;
+			} else {
+				purge->epoch = 0;
+				purge->status = px4::command::CtrlStatusCode::FAILED;
+			}
 
 			break;
 		}

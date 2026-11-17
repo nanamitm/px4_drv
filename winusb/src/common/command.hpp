@@ -29,6 +29,9 @@ namespace command {
 		CHECK_LOCK,
 		SET_LNB_VOLTAGE = 24,
 		READ_STATS = 32,
+		// 受信機の TS バッファーを空にして世代を進め、進めた後の世代を返す。
+		// このコマンドを知らない DriverHost は FAILED を返し、BonDriver はデータのパイプの PURGE に戻す
+		PURGE_STREAM = 40,
 	};
 
 	enum class CtrlStatusCode : std::uint32_t {
@@ -130,6 +133,10 @@ namespace command {
 
 	struct CtrlStatsCmd : CtrlCmdHeader {
 		StatSet stat_set;
+	};
+
+	struct CtrlPurgeStreamCmd : CtrlCmdHeader {
+		std::uint32_t epoch;	// response: パージ後の世代 (0 以外)
 	};
 
 	enum class DataCmdCode : std::uint32_t {

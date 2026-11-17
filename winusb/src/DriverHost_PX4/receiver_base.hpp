@@ -57,7 +57,8 @@ public:
 		void NotifyWrite() noexcept;
 		void HandleRead(std::size_t buf_size, std::function<bool(const void *buf, std::size_t size)> handler);
 		void HandleReadWithEpoch(std::size_t buf_size, std::function<bool(const void *, std::size_t, std::uint32_t)> handler);
-		bool AdvanceEpoch() noexcept;
+		// リングを空にして世代を進める。new_epoch を渡すと、進めた後の世代を返す
+		bool AdvanceEpoch(std::uint32_t *new_epoch = nullptr) noexcept;
 		bool Purge() noexcept;
 		// J.83B を除く ISDB-C の選局から次の選局までの間だけ、TSMF の指定した TS を選び、ヘッダーのない搬送波は TS0 の指定でそのまま出力する
 		bool StartTsmf(std::uint32_t stream_index, bool discard_null_packets, unsigned int stale_packets) noexcept;

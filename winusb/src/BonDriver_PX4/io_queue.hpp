@@ -52,7 +52,8 @@ public:
 	std::size_t GetDataBufferCount() const;
 	std::size_t GetFreeBufferCount() const;
 	bool WaitDataBuffer(std::chrono::milliseconds ms);
-	void PurgeDataBuffer();
+	// min_epoch が 0 以外なら、それより前の世代のデータを、受信中のバッファーとこの後に届く分も含めて捨てる
+	void PurgeDataBuffer(std::uint32_t min_epoch = 0);
 	void SetReadFlushInterval(std::chrono::milliseconds interval) noexcept;
 
 	bool Read(void *buf, std::size_t &size, std::size_t &remain_count, bool blocking);
@@ -71,6 +72,7 @@ private:
 	void ReadWorker();
 	void WriteWorker();
 	void ChangeEpoch(std::uint32_t epoch);
+	bool StaleEpoch(std::uint32_t epoch) const noexcept;
 
 	IoOperation io_op_;
 	IoProvider &iop_;
@@ -87,6 +89,8 @@ private:
 	std::condition_variable free_cond_;
 	std::unique_ptr<IoBuffer> current_buf_;
 	std::atomic_uint32_t stream_epoch_{0};
+	// 最後のパージで DriverHost が返した世代 (0 は指定なし)。これより前の世代のデータは渡さない
+	std::atomic_uint32_t min_epoch_{0};
 	std::size_t current_ofs_;
 	int data_ignore_count_;
 	int data_ignore_remain_;

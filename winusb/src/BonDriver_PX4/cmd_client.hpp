@@ -39,6 +39,8 @@ public:
 	bool CheckLock(bool &locked) noexcept;
 	bool SetLnbVoltage(std::int32_t voltage) noexcept;
 	bool ReadStats(px4::command::StatSet &stat_set) noexcept;
+	// 受信機の TS バッファーを空にして世代を進め、進めた後の世代を受け取る。古い DriverHost では false
+	bool PurgeStream(std::uint32_t &epoch) noexcept;
 
 private:
 	template <typename T> bool Call(T &cmd) noexcept;
