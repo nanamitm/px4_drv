@@ -489,6 +489,11 @@ int SourceFirmware::Start(dt295_io io)
         msg_info("PIX-DT295: %s ready\n", direct_ ? "direct-fr PIF1" : "source-fr PIF1 raw TS");
         return 0;
     } catch (int error) {
+        // ブート領域やシステム設定が電源投入直後の値と異なる。前回のDriverHost_PX4が強制終了などで
+        // 復元を終えずにPIF1を残した場合に起きる。保存済み前像がないため、本体の再接続でしか戻せない。
+        if (error == -EPROTO && stage == std::string("boot validation"))
+            msg_err("PIX-DT295 %s: device is not in its power-on state, possibly because a previous DriverHost_PX4 "
+                "ended without restoring it; reconnect the USB cable and try again\n", direct_ ? "direct-fr" : "source-fr");
         return Failure(stage, error);
     } catch (const std::bad_alloc &) {
         return Failure(stage, -ENOMEM);
