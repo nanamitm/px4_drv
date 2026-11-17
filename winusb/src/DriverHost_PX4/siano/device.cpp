@@ -212,6 +212,15 @@ protected:
         return 0;
     }
     int SetStreamId() override { return 0; }
+    // J.83B は helper がブロック間の欠落の長さを推定できるまで復調を始めず、その後に等化器を収束させるため、
+    // ロックまでの時間が既定の 1 秒を超えることがある。138.75 MHz と 132.25 MHz を交互に選局した 25 回
+    // (firmware を読み込み済みの選局) では SetChannel が 141〜1,125 ms で、うち 3 回は SetFrequency の後に約 1 秒を
+    // 要し、1 秒の上限では選局に失敗した。最長の約 2 倍を上限にする。搬送波のない行は、チャンネルスキャンで
+    // この時間だけ待ってから失敗する
+    std::uint32_t IsdbCLockWaitLimit() const override
+    {
+        return params_.system==SystemType::J83B ? 2000 : ReceiverBase::IsdbCLockWaitLimit();
+    }
 private:
     bool Removed() const { return WaitForSingleObject(removed_,0)==WAIT_OBJECT_0; }
     // J.83B 用の firmware から通常の firmware へ読み込み直す

@@ -120,6 +120,10 @@ protected:
 	/* ソフト復調では選局要求の受付とTSロックを分けられる。
 	 * 既存機種は従来どおりCheckLockの結果を選局完了条件にする。 */
 	virtual int CheckTuneComplete(bool &complete) { return CheckLock(complete); }
+	/* ISDB-C と J.83B の選局で、SetFrequency の後にロックを待つ上限 (ミリ秒)。TuneTimeout より短い方を使う。
+	 * 既定の 1 秒は Sony の sony_integ_isdbc_WaitTSLock() / sony_integ_j83b_WaitTSLock() に合わせた値で、
+	 * 復調をホストで行い、ロックまでの時間が信号の取り込みと収束で変わる受信機だけが長くする */
+	virtual std::uint32_t IsdbCLockWaitLimit() const { return 1000; }
 	virtual int SetFrequency() = 0;
 	virtual int SetStreamId() = 0;
 
