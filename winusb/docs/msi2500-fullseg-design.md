@@ -538,7 +538,13 @@ RTL-SDR helper と同じとする。
 
 ドライバーは、SDRplay のドライバーが導入済みの環境ではそのデバイスインターフェース GUID を
 `DeviceDefinition` の `DeviceInterfaceGUID` に指定して使える。
-独自の INF を同梱する場合は、SDRplay のソフトウェアとドライバーを取り合うことになる (12 節)。
+SDRplay の INF (`USB_Install` 節) は `winusb.inf` の `WINUSB.NT` を取り込み、`DeviceInterfaceGUIDs` を登録するだけで、
+フィルタードライバーや独自のカーネルドライバーを持たない。受信のデータ経路は Windows 標準の `winusb.sys` である。
+
+SDRplay のドライバーがない環境向けに、同じ構成の `pkg/inf/MSI2500.inf` を配布物の `Driver` フォルダーへ同梱する。
+この INF は SDRplay の INF と同じデバイスインターフェース GUID を登録するため、`DriverHost_PX4.ini` の定義と helper は
+どちらのドライバーでも変更なしで機器を見つける。両方が導入された環境では、Windows のドライバーの順位付けで
+Microsoft の署名がある SDRplay のパッケージが自己署名のパッケージより優先されるため、SDRplay のソフトウェアから機器を取り上げない (12 節)。
 
 ## 10. 試験
 
@@ -658,8 +664,9 @@ CPU 側の xHCI (AMD `DEV_149C`、PX-MLT5PE がハブ経由で接続) のルー�
 
 決定事項 (2026-11-05):
 
-- ドライバー: SDRplay のドライバーを前提とし、`DeviceDefinition` の `DeviceInterfaceGUID` に
-  SDRplay の GUID を設定する。独自の INF は同梱しない
+- ドライバー: `DeviceDefinition` の `DeviceInterfaceGUID` に SDRplay の GUID を設定する。
+  当初は独自の INF を同梱しなかったが、SDRplay のドライバーがない PC で検証できるよう、
+  2026-11-17 に同じ GUID を登録する `pkg/inf/MSI2500.inf` (Windows 標準の WinUSB) を同梱する方針へ改めた (9 節)
 - TS: A・B 階層を ARIB STD-B31 の多重フレーム位置に従って再多重した1本の TS を返す
 - 対象アーキテクチャ: x64 と x86 の両方。x86 版も実機でリアルタイム受信を確認してから配布物に含める
 - 実装は develop から分けたブランチで行う

@@ -6,7 +6,8 @@
 )
 # RSP1 互換機 (MSi2500) の BonDriver 配布物を作る。
 # helper (msi2500_frontend.exe) は外部の DLL を使わない静的リンクの単一実行ファイルで、
-# USB ドライバーは SDRplay のものを使う前提のため INF は同梱しない。
+# USB ドライバーは、SDRplay のドライバーがない環境向けに pkg/inf/MSI2500.inf (Windows 標準の winusb.sys) を
+# Driver フォルダーへ同梱する。SDRplay のドライバーと同じインターフェース GUID を登録するため、どちらでも同じ設定で動く。
 $ErrorActionPreference='Stop'
 if (-not (Get-Command cargo -ErrorAction SilentlyContinue)) { throw 'Install Rust/Cargo, then run rustup target add i686-pc-windows-msvc x86_64-pc-windows-msvc.' }
 function Invoke-Cargo([string[]]$CargoArguments) {
@@ -88,6 +89,17 @@ foreach($arch in $Architecture){
         $technicalJ83b=Get-Content -LiteralPath (Join-Path $winusbRoot 'docs\msi2500-j83b-design.md') -Raw -Encoding UTF8
         [IO.File]::WriteAllText((Join-Path $destination 'TECHNICAL-J83B.md'),$technicalJ83b.Replace('(msi2500-fullseg-design.md)','(TECHNICAL.md)'),[Text.UTF8Encoding]::new($false))
         Copy-Item -LiteralPath (Join-Path $winusbRoot '..\LICENSE') -Destination (Join-Path $destination 'LICENSE') -Force
+        Copy-Item -LiteralPath (Join-Path $winusbRoot 'pkg\msi2500\Install-Driver.ps1') -Destination $destination -Force
+        $driver=Join-Path $destination 'Driver'
+        New-Item -ItemType Directory -Force -Path $driver | Out-Null
+        foreach($file in @('MSI2500.inf','px4_drv_winusb.cat','px4_drv_winusb.cer','cert-install.jse','cert-uninstall.jse')){
+            Copy-Item -LiteralPath (Join-Path $winusbRoot "pkg\inf\$file") -Destination $driver -Force
+        }
+        foreach($file in @('verify.ps1','trustedpub.cer')){
+            Copy-Item -LiteralPath (Join-Path $winusbRoot "pkg\signing-tools\$file") -Destination $driver -Force
+        }
+        # コピー後の INF がカタログファイルの署名対象と同じバイト列かを配布物の位置で確かめる
+        & (Join-Path $driver 'verify.ps1') -DriverPath $driver
         # GPL の helper を再ビルドできるよう、helper と isdbt-dsp のソースと Cargo の依存をオフライン用に同梱する。
         # isdbt-dsp は Cargo.toml の相対パス (../rtlsdr_frontend/vendor/isdbt-dsp) と同じ位置へ置く。
         $sources=Join-Path $destination 'Sources'

@@ -1,0 +1,36 @@
+; SDRplay RSP1 compatible receivers (Mirics MSi2500 + MSi001).
+; Binds Windows in-box winusb.sys to the whole device, which has a single interface.
+; DeviceInterfaceGUIDs repeats the GUID registered by the SDRplay WinUSB INF so that
+; DriverHost_PX4.ini and msi2500_frontend find the device with either driver package.
+; Where the WHQL-signed SDRplay package is installed, Windows ranks it above this package.
+[Version]
+Signature="$Windows NT$"
+Class=USBDevice
+ClassGuid={88BAE032-5A81-49f0-BC3D-A4FF138216D6}
+Provider=%ProviderName%
+DriverVer=11/17/2026,26.11.17.0
+CatalogFile=px4_drv_winusb.cat
+
+[Manufacturer]
+%ProviderName%=MSI2500,NTx86,NTamd64,NTarm64
+[MSI2500.NTx86]
+%DeviceDesc%=MSI2500.Install,USB\VID_1DF7&PID_2500
+[MSI2500.NTamd64]
+%DeviceDesc%=MSI2500.Install,USB\VID_1DF7&PID_2500
+[MSI2500.NTarm64]
+%DeviceDesc%=MSI2500.Install,USB\VID_1DF7&PID_2500
+
+[MSI2500.Install]
+Include=winusb.inf
+Needs=WINUSB.NT
+[MSI2500.Install.Services]
+Include=winusb.inf
+Needs=WINUSB.NT.Services
+[MSI2500.Install.HW]
+AddReg=MSI2500.Interface
+[MSI2500.Interface]
+HKR,,DeviceInterfaceGUIDs,0x00010000,"{2D93E8F2-BC67-4F7D-8891-574830AA637D}"
+
+[Strings]
+ProviderName="px4_drv contributors"
+DeviceDesc="MSi2500 RSP1 compatible receiver (WinUSB)"
