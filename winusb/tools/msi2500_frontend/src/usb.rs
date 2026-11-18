@@ -153,6 +153,16 @@ impl Device {
     }
 }
 
+// 設定列の途中で失敗しても停止要求と ADC の休止を試す。
+struct CapturePower<'a>(&'a Device);
+
+impl Drop for CapturePower<'_> {
+    fn drop(&mut self) {
+        self.0.stop_streaming();
+        let _ = self.0.apply(&crate::regs::adc_stop());
+    }
+}
+
 impl Drop for Device {
     fn drop(&mut self) {
         unsafe {
@@ -253,6 +263,7 @@ pub fn capture(
     stats: &mut CaptureStats,
     mut on_block: impl FnMut(&[u8], &CaptureStats) -> bool,
 ) -> Result<(), UsbError> {
+    let power = CapturePower(dev);
     dev.apply(setup)?;
     let alt = 1u8;
     if unsafe { WinUsb_SetCurrentAlternateSetting(dev.wh, alt) } == 0 {
@@ -448,8 +459,7 @@ pub fn capture(
     }
     // 転送の停止から停止要求まで、Linux ドライバーと同じく 20 ms あける
     std::thread::sleep(Duration::from_millis(20));
-    dev.stop_streaming();
-    let _ = dev.apply(&crate::regs::adc_stop());
+    drop(power);
     if pending > 0 {
         // 完了しない転送が後からバッファーとイベントへ書き込む可能性があるため、解放せずに残す
         eprintln!("[usb] {pending} transfers did not complete after abort; leaking their buffers");
@@ -525,6 +535,7 @@ pub fn capture_bulk(
     stats: &mut CaptureStats,
     mut on_block: impl FnMut(&[u8], &CaptureStats) -> bool,
 ) -> Result<(), UsbError> {
+    let power = CapturePower(dev);
     dev.apply(setup)?;
     let alt = 3u8;
     if unsafe { WinUsb_SetCurrentAlternateSetting(dev.wh, alt) } == 0 {
@@ -687,8 +698,7 @@ pub fn capture_bulk(
         }
     }
     std::thread::sleep(Duration::from_millis(20));
-    dev.stop_streaming();
-    let _ = dev.apply(&crate::regs::adc_stop());
+    drop(power);
     if pending > 0 {
         eprintln!("[usb] {pending} bulk reads did not complete after abort; leaking their buffers");
         std::mem::forget(buf);
