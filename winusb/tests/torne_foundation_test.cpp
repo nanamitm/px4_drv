@@ -8,6 +8,7 @@
 #include "../src/DriverHost_PX4/torne/tune_result.hpp"
 #include "../src/DriverHost_PX4/torne/reception_policy.hpp"
 #include "../src/DriverHost_PX4/torne/frontend_wait.hpp"
+#include "../src/DriverHost_PX4/dt295/card_response.hpp"
 
 #include <algorithm>
 #include <cstdlib>
@@ -385,6 +386,25 @@ static void CardTests()
 	Require(!card.ReadBytes(bytes.data(), bytes.size(), count) && count == 0, "short FIFO status cannot expose bytes");
 }
 
+static void CardResponseTests()
+{
+	px4::dt295::CardResponse response;
+	const std::uint8_t crc_atr[]{0x3b, 0x90, 0x12, 0x81, 0x41, 1, 0x43};
+	const std::uint8_t lrc_atr[]{0x3b, 0x90, 0x12, 0x81, 0x41, 0, 0x42};
+	const std::uint8_t frame[]{0, 0xe1, 1, 0xfe, 0x12, 0x34};
+	std::uint8_t out[32]{};
+	Require(!response.Append(crc_atr, sizeof(crc_atr)) && response.Ready(), "CRC ATR is complete");
+	Require(response.Read(out, sizeof(out)) == sizeof(crc_atr), "read CRC ATR");
+	Require(!response.Append(frame, 5) && !response.Ready(), "first CRC byte is not the end of the response");
+	Require(!response.Append(frame + 5, 1) && response.Read(out, sizeof(out)) == sizeof(frame) &&
+		std::equal(frame, frame + sizeof(frame), out), "read both CRC bytes after fragmented receive");
+	Require(!response.Append(frame, 3) && !response.Ready(), "stage an incomplete response before reset");
+	response.Reset();
+	Require(!response.Append(lrc_atr, sizeof(lrc_atr)) && response.Read(out, sizeof(out)) == sizeof(lrc_atr),
+		"new ATR does not inherit the previous CRC session");
+	Require(!response.Append(frame, 5) && response.Read(out, sizeof(out)) == 5, "LRC frame is one byte shorter");
+}
+
 int main()
 {
 	const std::uint8_t failed[]{1}, unknown[]{2}, extended[]{1,0};
@@ -397,6 +417,7 @@ int main()
 	IdentityTests();
 	QualityTests();
 	CardTests();
+	CardResponseTests();
 	std::cout << "PASS: torne foundation (mock USB, framing; no hardware access)\n";
 	return 0;
 }
