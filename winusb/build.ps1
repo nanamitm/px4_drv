@@ -136,6 +136,17 @@ foreach ($build_platform in $build_platforms) {
     & "build/$build_platform/Release-static/card_status_lock_test.exe"
     if ($LASTEXITCODE -ne 0) { throw "Card status lock test failed. platform: $build_platform" }
 
+    # USB の抜き差しでカードと受信機の接続が挿し直した機器へ移ることを、分離した IPC 名の名前付きパイプと模擬の機器で検証
+    msbuild tests/card_server_reconnect_test.vcxproj /p:"Configuration=Release-static;Platform=$build_platform;PlatformToolset=v143"
+    if ($LASTEXITCODE -ne 0) { throw "Card server reconnect test build failed. platform: $build_platform" }
+    & "build/$build_platform/Release-static/card_server_reconnect_test.exe"
+    if ($LASTEXITCODE -ne 0) { throw "Card server reconnect test failed. platform: $build_platform" }
+
+    msbuild tests/bondriver_reconnect_test.vcxproj /p:"Configuration=Release-static;Platform=$build_platform;PlatformToolset=v143"
+    if ($LASTEXITCODE -ne 0) { throw "BonDriver reconnect test build failed. platform: $build_platform" }
+    & "build/$build_platform/Release-static/bondriver_reconnect_test.exe"
+    if ($LASTEXITCODE -ne 0) { throw "BonDriver reconnect test failed. platform: $build_platform" }
+
     # GV-MVP/XZ3 のカード電源手順と操作14の一括転送の使い方は、実機接続なしで検証する。
     msbuild tests/xz3_card_test.vcxproj /p:"Configuration=Release-static;Platform=$build_platform;PlatformToolset=v143"
     if ($LASTEXITCODE -ne 0) { throw "GV-MVP/XZ3 card test build failed. platform: $build_platform" }
