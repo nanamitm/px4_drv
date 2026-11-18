@@ -2,6 +2,7 @@
 #pragma once
 #include <chrono>
 #include <cstddef>
+#include <optional>
 
 namespace px4::pxbcud {
 // USB のタイミング調整値ではなく、復旧が実らない状態を終了させる運用上の上限。
@@ -46,6 +47,13 @@ public:
         return wait<BackoffMax?wait:BackoffMax;
     }
     std::size_t Consecutive() const noexcept {return consecutive_;}
+    // 無入力で待った受信の直後だけ、制御転送を消費した連続失敗として数えない。
+    std::optional<std::chrono::milliseconds> RestartDelay(bool waited_for_input) noexcept
+    {
+        if (waited_for_input) return std::chrono::milliseconds::zero();
+        if (!Take()) return std::nullopt;
+        return Backoff();
+    }
 private:
     std::size_t consecutive_=0;
 };

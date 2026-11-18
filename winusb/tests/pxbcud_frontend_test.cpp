@@ -216,6 +216,17 @@ void TestRecoveryBudget()
     boundary.NoteStream(Budget::HealthyRun-std::chrono::milliseconds(1));
     CHECK(boundary.Take());CHECK(boundary.Consecutive()==2);
 
+    // 無入力からの最初の再開だけが無料。再開の制御転送が失敗したら通常の予算を使う。
+    Budget restart;
+    CHECK(restart.RestartDelay(true)==std::chrono::milliseconds::zero());
+    CHECK(restart.Consecutive()==0);
+    for (std::size_t i=0;i<Budget::Limit;++i) {
+        const auto delay=restart.RestartDelay(false);
+        CHECK(delay && restart.Consecutive()==i+1);
+        CHECK(*delay==(i?Budget::BackoffStep*static_cast<int>(i):std::chrono::milliseconds::zero()));
+    }
+    CHECK(!restart.RestartDelay(false));
+
     std::puts("Recovery budget: consecutive limit, backoff growth and healthy-run reset passed");
 }
 int main() {TestFrontend();TestFramer();TestPatGate();TestRecoveryBudget();return 0;}

@@ -309,47 +309,8 @@ private:
              * 選局し直すまで録画が止まるため、データが1度も届かなかった受信の失敗は回数に数えず、
              * 再試行を続ける。
              */
-            const bool no_data=!received_any_ && (error==ERROR_TIMEOUT || error==ERROR_SEM_TIMEOUT);
-            if (!no_data && !budget.Take()) {
-                msg_err("PX-BCUD: auto recovery exhausted limit=%u healthy_run_seconds=%lld last_win32=%lu recovery_count=%llu\n",
-                    static_cast<unsigned>(RecoveryBudget::Limit),
-                    static_cast<long long>(RecoveryBudget::HealthyRun.count()),
-                    error,static_cast<unsigned long long>(recovery_count_));
-                break;
-            }
-            // 実らない再試行を詰めて繰り返すと、同じブリッジの制御転送を占有し続ける。
-            // ロックを取る前に待ち、停止要求と抜去の監視を止めない。
-            const auto backoff=no_data?std::chrono::milliseconds::zero():budget.Backoff();
-            if (backoff.count()) {
-                if (WaitForSingleObject(removed_,static_cast<DWORD>(backoff.count()))==WAIT_OBJECT_0) break;
-                if (stop_) break;
-            }
-            recovering_=true;
-            // Stop は mutex_ を持って join する。ここで無条件に lock すると
-            // 相互待機になるため、競合中も stop_ を監視して終了要求を優先する。
-            std::unique_lock<std::mutex> lock(mutex_,std::defer_lock);
-            while (!lock.try_lock() && !stop_ && WaitForSingleObject(removed_,10)==WAIT_TIMEOUT) {}
-            if (!lock.owns_lock() || stop_ || WaitForSingleObject(removed_,0)==WAIT_OBJECT_0) break;
-            ++recovery_count_;
-            msg_warn("PX-BCUD: auto recovery begin count=%llu win32=%lu consecutive=%u backoff_ms=%lld no_data=%u possible_ts_loss=1\n",
-                static_cast<unsigned long long>(recovery_count_),error,
-                static_cast<unsigned>(budget.Consecutive()),static_cast<long long>(backoff.count()),no_data?1u:0u);
-            // RunStream の終了時点で全 isoch I/O と登録バッファを回収済み。
-            // 選局は変えず、配信リングと epoch/CC を維持して欠落を隠さない。
-            io_.Begin(1000);
-            int ret=frontend_.Capture(false);
-            if (!WinUsb_SetCurrentAlternateSetting(usb_,0) && !ret) ret=-EIO;
-            if (!ret && !stop_ && WaitForSingleObject(removed_,0)==WAIT_TIMEOUT) {
-                if (!WinUsb_SetCurrentAlternateSetting(usb_,1)) ret=-EIO;
-                else {io_.Begin(1000);ret=frontend_.Capture(true);}
-            } else if (!ret) ret=-ECANCELED;
-            if (ret) {
-                msg_err("PX-BCUD: auto recovery restart failed ret=%d original_win32=%lu count=%llu\n",
-                    ret,error,static_cast<unsigned long long>(recovery_count_));
-                io_.Begin(1000);frontend_.Capture(false);
-                WinUsb_SetCurrentAlternateSetting(usb_,0);
-                break;
-            }
+            const bool no_data=!received_any_ && input_timeout_;
+            if (!RestartCapture(budget,error,no_data)) break;
             worker_error_=0;
         }
         recovering_=false;
@@ -362,6 +323,65 @@ private:
         }
         // 調査ツールは診断出力とI/O回収が終わった後にだけ停止処理へ進む。
         terminal_error_=worker_error_.load();
+    }
+    bool Stopping() const
+    {
+        return stop_ || WaitForSingleObject(removed_,0)!=WAIT_TIMEOUT;
+    }
+
+    int StopIsochronousCapture()
+    {
+        io_.Begin(1000);
+        const int capture=frontend_.Capture(false);
+        const bool idle=WinUsb_SetCurrentAlternateSetting(usb_,0)!=FALSE;
+        return capture?capture:idle?0:-EIO;
+    }
+
+    bool RestartCapture(RecoveryBudget &budget,DWORD error,bool waited_for_input)
+    {
+        recovering_=true;
+        while (!Stopping()) {
+            const auto delay=budget.RestartDelay(waited_for_input);
+            if (!delay) {
+                msg_err("PX-BCUD: auto recovery exhausted limit=%u last_win32=%lu recovery_count=%llu\n",
+                    static_cast<unsigned>(RecoveryBudget::Limit),error,
+                    static_cast<unsigned long long>(recovery_count_));
+                return false;
+            }
+            if (delay->count() && WaitForSingleObject(removed_,static_cast<DWORD>(delay->count()))!=WAIT_TIMEOUT)
+                return false;
+
+            // Stopはmutex_を保持したままjoinするため、ロック待ちでも停止を優先する。
+            std::unique_lock<std::mutex> lock(mutex_,std::defer_lock);
+            while (!Stopping() && !lock.try_lock())
+                WaitForSingleObject(removed_,10);
+            if (!lock.owns_lock() || Stopping()) return false;
+            ++recovery_count_;
+            msg_warn("PX-BCUD: auto recovery begin count=%llu win32=%lu consecutive=%u backoff_ms=%lld no_data=%u possible_ts_loss=1\n",
+                static_cast<unsigned long long>(recovery_count_),error,static_cast<unsigned>(budget.Consecutive()),
+                static_cast<long long>(delay->count()),waited_for_input?1u:0u);
+
+            // 全isoch I/Oと登録バッファは回収済み。配信リングと選局は維持する。
+            int ret=StopIsochronousCapture();
+            if (!ret && !Stopping()) {
+                if (!WinUsb_SetCurrentAlternateSetting(usb_,1)) ret=-EIO;
+                else {io_.Begin(1000);ret=frontend_.Capture(true);}
+                if (!ret) return true;
+            }
+            if (Stopping()) return false;
+
+            msg_err("PX-BCUD: auto recovery restart failed ret=%d original_win32=%lu count=%llu\n",
+                ret,error,static_cast<unsigned long long>(recovery_count_));
+            // 途中で失敗しても停止と帯域解放を両方確認できれば再試行できる。
+            if (const int cleanup=StopIsochronousCapture()) {
+                msg_err("PX-BCUD: auto recovery could not confirm capture stopped ret=%d\n",cleanup);
+                return false;
+            }
+            if (ret!=-EIO && ret!=-ETIMEDOUT) return false;
+            // USB再開が失敗しただけの試行は無入力として扱わず、残り回数と待機を適用する。
+            waited_for_input=false;
+        }
+        return false;
     }
     void Snapshot()
     {
@@ -401,7 +421,7 @@ private:
         // 要求数は実測で決める。5要求 (40ms) では、優先度引き上げと書込みまとめの後も
         // 完了待ちの最大が40msへ張り付いて isoch が枯れたため、設定で増やせるようにする。
         // Run が復旧の回数を数えるときに使う、この受信でデータが届いていた区間。
-        received_any_=false;received_span_=Clock::duration::zero();
+        received_any_=false;input_timeout_=false;received_span_=Clock::duration::zero();
         Clock::time_point first_data{};
         const std::size_t request_count=requests_;
         const auto reads_storage=std::make_unique<Read[]>(request_count);
@@ -510,8 +530,12 @@ private:
         }
         std::size_t next=0;
         auto last_data=Clock::now();
+        const auto fail_input_timeout=[&] {
+            input_timeout_=true;
+            fail("no_data",next,ERROR_TIMEOUT);
+        };
         while (!stop_ && !worker_error_) {
-            if (Clock::now()-last_data>std::chrono::seconds(5)) {fail("no_data",next,ERROR_TIMEOUT);break;}
+            if (Clock::now()-last_data>std::chrono::seconds(5)) {fail_input_timeout();break;}
             if (!gate.Ready() && Clock::now()-started>std::chrono::seconds(5)) {
                 fail("pat_timeout",next,ERROR_INVALID_DATA);
                 msg_err("PX-BCUD: selected TSID PAT was not received tsid=0x%04x\n",frontend_.SelectedStream());
@@ -527,7 +551,7 @@ private:
             max_wait_us=(std::max)(max_wait_us,entry.wake_us-entry.wait_begin_us);
             if (wait==WAIT_OBJECT_0) {fail("device_removed",next,ERROR_DEVICE_NOT_CONNECTED);break;}
             if (wait==WAIT_TIMEOUT) {
-                if (Clock::now()-last_data>std::chrono::seconds(5)) fail("no_data",next,ERROR_TIMEOUT);
+                if (Clock::now()-last_data>std::chrono::seconds(5)) fail_input_timeout();
                 continue;
             }
             if (wait!=WAIT_OBJECT_0+1) {fail("wait",next,wait_error);break;}
@@ -622,7 +646,7 @@ private:
     std::uint64_t recovery_count_=0;
     Clock::time_point failure_time_{};
     // 受信スレッドだけが読み書きする。
-    bool received_any_=false;
+    bool received_any_=false,input_timeout_=false;
     Clock::duration received_span_{};
     std::atomic_bool recovering_{false};
     std::mutex mutex_; std::condition_variable closed_;
