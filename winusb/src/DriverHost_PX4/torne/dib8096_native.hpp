@@ -18,7 +18,11 @@ public:
 private:
     bool Execute(std::uint8_t kind,const std::vector<std::uint8_t>& body,std::vector<std::uint8_t>& response);
     struct State;
+    dibnative::Bus& bus_;
     std::unique_ptr<State> state_;
+    // 初期化のたびに作り直すStateへ、構築後に設定された値を引き継ぐ。
+    bool bulk_timing_=false;
+    std::function<dibnative::Time()> now_;
     std::string error_;
     bool initialized_=false;
 };

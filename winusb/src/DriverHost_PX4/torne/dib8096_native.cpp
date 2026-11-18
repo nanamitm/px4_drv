@@ -101,20 +101,30 @@ struct NativeFrontend::State {
         demod.v_tunerFrequency=[this](){return m_tuner_getFrequency(&tuner);};
     }
 };
-NativeFrontend::NativeFrontend(Bus& bus):state_(std::make_unique<State>(bus)){}
+NativeFrontend::NativeFrontend(Bus& bus):bus_(bus),state_(std::make_unique<State>(bus)){}
 NativeFrontend::~NativeFrontend()=default;
-void NativeFrontend::SetBulkTiming(bool enabled) noexcept {state_->demod.v_settleBeforeFFT=enabled;}
-void NativeFrontend::SetClock(std::function<Time()> now){state_->demod.v_now=std::move(now);}
+void NativeFrontend::SetBulkTiming(bool enabled) noexcept {bulk_timing_=enabled;state_->demod.v_settleBeforeFFT=enabled;}
+void NativeFrontend::SetClock(std::function<Time()> now){now_=now;state_->demod.v_now=std::move(now);}
 bool NativeFrontend::Command(std::uint8_t kind,const std::vector<std::uint8_t>& body,std::vector<std::uint8_t>& response){
     try{return Execute(kind,body,response);}
     catch(const std::exception& e){error_=e.what();response.clear();initialized_=false;return false;}
 }
 bool NativeFrontend::Execute(std::uint8_t kind,const std::vector<std::uint8_t>& body,std::vector<std::uint8_t>& response){
-    response.clear();error_.clear();auto* board=&state_->board;dibnative::Error err;
+    response.clear();error_.clear();dibnative::Error err;
     if(!initialized_&&kind!=0x10){error_="frontend is not initialized";return false;}
+    if(kind==0x10){
+        if(!body.empty()){error_="invalid initialize command";return false;}
+        // 初期化の前に復調器をresetするため、I2Cゲートの選択や探索の状態のようにStateが保持する値は
+        // 機器の状態と合わなくなる。内蔵カードが共有セッションを保持したまま受信機だけを開き直すと、
+        // 前回のStateのまま初期化して選局が検索失敗になったため、新しいセッションと同じ初期状態から始める。
+        initialized_=false;
+        state_=std::make_unique<State>(bus_);
+        state_->demod.v_settleBeforeFFT=bulk_timing_;
+        if(now_)state_->demod.v_now=now_;
+    }
+    auto* board=&state_->board;
     switch(kind){
     case 0x10:
-        if(!body.empty()){error_="invalid initialize command";return false;}
         err=m_Demod_Initialize(board);if(!err)err=m_Demod_SetGPIO(board,1,true);initialized_=!err;break;
     case 0x11:{
         if(body.size()!=4){error_="invalid tune command";return false;}
