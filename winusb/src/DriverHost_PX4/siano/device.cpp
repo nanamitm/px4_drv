@@ -205,6 +205,11 @@ protected:
         // メッセージ途中の USB パケットを残し、再開後に TS の端数をヘッダーとして
         // 読むことがある。受信要求を継続し、Gate の世代で選局前とロック前の TS を除く。
         if (!ret && !stream_buf_->AdvanceEpoch()) return -EIO;
+        // helperの起動失敗はUSB通信の異常ではない。ファームウェアを切り替える前に起動し、
+        // 失敗時も同じ接続で次の選局を受け付ける。
+        if (!ret && j83b) {
+            if (const int helper_error=StartIqHelper()) return helper_error;
+        }
         if (!ret) ret=j83b ? TuneJ83b() : TuneIsdbt();
         if (ret) {
             msg_err("PX-S1UD: tune failed system=%s frequency_khz=%u ret=%d\n",j83b ? "J.83B" : "ISDB-T",params_.freq,ret);
@@ -248,18 +253,8 @@ private:
         }
         return frontend_.Tune(params_.freq);
     }
-    int TuneJ83b()
+    int StartIqHelper()
     {
-        if (loaded_!=Loaded::J83b) {
-            // J.83B 用の firmware は配布物に含めず、利用者が J83BFirmwarePath で指定する
-            std::vector<std::uint8_t> firmware;
-            int ret=ReadFirmware(j83b_.firmware,firmware);
-            if (ret) {msg_err("PX-S1UD: J.83B firmware read failed ret=%d firmware=%ls\n",ret,j83b_.firmware.c_str());return ret;}
-            ret=frontend_.Initialize(firmware,true,false);
-            if (ret) {msg_err("PX-S1UD: J.83B firmware load failed ret=%d\n",ret);return ret;}
-            loaded_=Loaded::J83b;
-            msg_info("PX-S1UD: J.83B firmware loaded firmware=%u.%u\n",frontend_.Version()>>8,frontend_.Version()&255);
-        }
         // helper を先に起動し、IQ の送出の始めのブロックから渡す
         // helper の読み取りスレッドだけが呼ぶため、記録はこの起動の間だけ callback が持つ。
         auto overflow=std::make_shared<px4::StreamOverflowLog>("PX-S1UD J.83B");
@@ -275,9 +270,23 @@ private:
             // 読み取りのスレッドから呼ばれるため、mutex_ を取らずに配信の停止だけを要求する
             [this] {stream_buf_->StopRequest();});
         if (ret) {msg_err("PX-S1UD: J.83B helper start failed ret=%d helper=%ls\n",ret,j83b_.helper.c_str());return ret;}
+        return 0;
+    }
+    int TuneJ83b()
+    {
+        if (loaded_!=Loaded::J83b) {
+            // J.83B 用の firmware は配布物に含めず、利用者が J83BFirmwarePath で指定する
+            std::vector<std::uint8_t> firmware;
+            int ret=ReadFirmware(j83b_.firmware,firmware);
+            if (ret) {msg_err("PX-S1UD: J.83B firmware read failed ret=%d firmware=%ls\n",ret,j83b_.firmware.c_str());return ret;}
+            ret=frontend_.Initialize(firmware,true,false);
+            if (ret) {msg_err("PX-S1UD: J.83B firmware load failed ret=%d\n",ret);return ret;}
+            loaded_=Loaded::J83b;
+            msg_info("PX-S1UD: J.83B firmware loaded firmware=%u.%u\n",frontend_.Version()>>8,frontend_.Version()&255);
+        }
         iq_min_pending_=static_cast<unsigned>(TransferCount); iq_max_resubmit_us_=0;
         iq_feed_=true;
-        ret=frontend_.SetIqStream(params_.freq*1000);
+        const int ret=frontend_.SetIqStream(params_.freq*1000);
         if (ret) {
             if (ret==-ETIMEDOUT) msg_err("PX-S1UD: the firmware does not answer the IQ stream request\n");
             return ret;
