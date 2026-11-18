@@ -8,7 +8,6 @@
 #include "../resource.h"
 #include "../tc90522_cnr.hpp"
 #include "../torne/winusb_control.hpp"
-#include "../atr_length.hpp"
 #include "../stream_overflow.hpp"
 #include "msg.h"
 
@@ -1059,9 +1058,7 @@ void Device::Term()
 
 void Device::ResetCardBuffer()
 {
-    card_received_.clear();
-    card_remaining_ = 0;
-    card_atr_ = true;
+    card_response_.Reset();
     card_polled_empty_ = false;
 }
 
@@ -1128,7 +1125,7 @@ int Device::IsCardDataReady(bool& ready) try
     ready = false;
     if (!card_open_ || !available_ || !receiver_)
         return -ENODEV;
-    if (card_remaining_) {
+    if (card_response_.Ready()) {
         ready = true;
         return 0;
     }
@@ -1150,26 +1147,9 @@ int Device::IsCardDataReady(bool& ready) try
         return rc;
     card_polled_ = now;
     card_polled_empty_ = count == 0;
-    if (card_received_.size() + count > 518)
-        return -EMSGSIZE;
-    card_received_.insert(card_received_.end(), bytes, bytes + count);
-    if (card_atr_) {
-        // ATRの構造から全体の長さを求め、B-CAS以外の形式の正しいATRも受信を終えた時点で渡す。
-        // 長さを超えて溜まった場合はATRの前後に残留バイトがあるため、形式不正として再リセットさせる。
-        std::size_t atr_length = 0;
-        const int atr_rc = px4::GetAtrLength(card_received_.data(), card_received_.size(), atr_length);
-        if (atr_rc == -EBADMSG)
-            return atr_rc;
-        if (!atr_rc && card_received_.size() > atr_length)
-            return -EBADMSG;
-        if (!atr_rc && card_received_.size() == atr_length)
-            card_remaining_ = atr_length;
-    } else if (card_received_.size() >= 3) {
-        const auto length = std::size_t(4) + card_received_[2];
-        if (card_received_.size() >= length)
-            card_remaining_ = length;
-    }
-    ready = card_remaining_ != 0;
+    if (const int appended = card_response_.Append(bytes, count))
+        return appended;
+    ready = card_response_.Ready();
     return 0;
 } catch (...) {
     return -ENOMEM;
@@ -1182,13 +1162,7 @@ int Device::ReadCardData(std::uint8_t* buf, std::uint8_t& len)
         return -ENODEV;
     if (!buf || !len)
         return -EINVAL;
-    const auto count = (std::min)(std::size_t(len), card_remaining_);
-    std::copy_n(card_received_.begin(), count, buf);
-    card_received_.erase(card_received_.begin(), card_received_.begin() + static_cast<std::ptrdiff_t>(count));
-    card_remaining_ -= count;
-    if (count && card_atr_ && !card_remaining_)
-        card_atr_ = false;
-    len = static_cast<std::uint8_t>(count);
+    len = static_cast<std::uint8_t>(card_response_.Read(buf, len));
     return 0;
 }
 

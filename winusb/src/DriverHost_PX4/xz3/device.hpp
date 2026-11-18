@@ -2,13 +2,13 @@
 #pragma once
 
 #include "../device_base.hpp"
+#include "../dt295/card_response.hpp"
 #include <atomic>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <mutex>
-#include <vector>
 
 namespace px4::xz3 {
 
@@ -38,9 +38,8 @@ private:
     std::unique_ptr<Receiver> receiver_;
     // ATRとT=1ブロックの受信途中の状態。抜去・リセット・Closeで一括して破棄する。
     std::mutex card_mutex_;
-    bool card_reader_ = false, card_open_ = false, card_atr_ = true;
-    std::vector<std::uint8_t> card_received_;
-    std::size_t card_remaining_ = 0;
+    bool card_reader_ = false, card_open_ = false;
+    px4::dt295::CardResponse card_response_;
     // 直前の受信FIFOの読み出しの時刻と、それが空だったか。
     std::chrono::steady_clock::time_point card_polled_{};
     bool card_polled_empty_ = false;

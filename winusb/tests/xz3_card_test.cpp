@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 // GV-MVP/XZ3 内蔵カードUARTの電源手順と、操作14の一括転送の使い方を模擬I/Oで確認する。USBは開かない。
 #include "../src/DriverHost_PX4/xz3/card_uart.hpp"
+#include "../src/DriverHost_PX4/dt295/card_response.hpp"
 #include <cerrno>
 #include <cstdio>
 #include <vector>
@@ -147,6 +148,38 @@ void TestBulkQueueSendsEverything()
     CHECK(bus.tx == command);
     CHECK(uart.Queue(command.data(), 0) == -EINVAL);
 }
+
+void TestFragmentedCrcResponse()
+{
+    MockBus bus(true);
+    CardUart uart(bus);
+    px4::dt295::CardResponse response;
+    std::uint8_t bytes[CardUart::FifoChunk]{};
+    const auto receive = [&] {
+        std::size_t count = 0;
+        CHECK(uart.ReadBytes(bytes, sizeof(bytes), count) == 0);
+        CHECK(response.Append(bytes, count) == 0);
+    };
+
+    bus.rx = {0x3b, 0x90, 0x12, 0x81, 0x41, 0x01, 0x43};
+    receive();
+    CHECK(response.Read(bytes, sizeof(bytes)) == 7);
+
+    bus.rx = {0, 0xe1, 1, 0xfe, 0x12};
+    receive();
+    CHECK(!response.Ready());
+    bus.rx = {0x34};
+    receive();
+    CHECK(response.Ready() && response.Read(bytes, sizeof(bytes)) == 6 && bytes[5] == 0x34);
+
+    response.Reset();
+    bus.rx = {0x3b, 0x90, 0x12, 0x81, 0x41, 0, 0x42};
+    receive();
+    CHECK(response.Read(bytes, sizeof(bytes)) == 7);
+    bus.rx = {0, 0xe1, 1, 0xfe, 0x1e};
+    receive();
+    CHECK(response.Ready() && response.Read(bytes, sizeof(bytes)) == 5);
+}
 }
 
 int main()
@@ -156,6 +189,7 @@ int main()
     TestBulkReadUsesOneFifoTransfer();
     TestDirectReadFallsBack();
     TestBulkQueueSendsEverything();
+    TestFragmentedCrcResponse();
     if (failures)
         std::printf("%d failure(s)\n", failures);
     else
