@@ -5,6 +5,7 @@
 // 受信機クラスは機種ごとに持つ。両機種を実機で確認した後に共通化を検討する。
 #include "device.hpp"
 #include "../rtlsdr/protocol.hpp"
+#include "../stream_overflow.hpp"
 #include "msg.h"
 #include "util.hpp"
 #include <array>
@@ -235,6 +236,7 @@ private:
     {
         try {
             Frames frames;std::array<std::uint8_t,65536> bytes{};
+            px4::StreamOverflowLog overflow("MSi2500");
             auto last_message=GetTickCount64();
             while(!stop_ && available_) {
                 DWORD available=0;
@@ -264,7 +266,9 @@ private:
                             quality_=frame.quality;last_ts_=GetTickCount64();
                             if(capture_ && !stop_ && !drain_only_){
                                 std::size_t size=frame.size;
-                                if(!stream_buf_->Write(data,size)||size!=frame.size){msg_err("MSi2500: TS ring overflow\n");return false;}
+                                // 引数の評価順は決まっていないため、Write が size を書き換えてから記録へ渡す。
+                                const bool written=stream_buf_->Write(data,size);
+                                overflow.Record(written,frame.size,size);
                                 stream_buf_->NotifyWrite();
                             }
                         }

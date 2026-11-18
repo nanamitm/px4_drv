@@ -5,6 +5,7 @@
 #include "firmware_path.hpp"
 #include "iq_helper.hpp"
 #include "ts_diagnostic_log.hpp"
+#include "../stream_overflow.hpp"
 #include "msg.h"
 #include <array>
 #include <chrono>
@@ -256,14 +257,14 @@ private:
             msg_info("PX-S1UD: J.83B firmware loaded firmware=%u.%u\n",frontend_.Version()>>8,frontend_.Version()&255);
         }
         // helper を先に起動し、IQ の送出の始めのブロックから渡す
+        // helper の読み取りスレッドだけが呼ぶため、記録はこの起動の間だけ callback が持つ。
+        auto overflow=std::make_shared<px4::StreamOverflowLog>("PX-S1UD J.83B");
         int ret=iq_helper_.Start(j83b_.helper.wstring(),j83b_.log.wstring(),
-            [this](const std::uint8_t* data,std::size_t size) {
+            [this,overflow](const std::uint8_t* data,std::size_t size) {
                 if (!iq_output_) return true;
                 std::size_t bytes=size;
-                if (!stream_buf_->Write(data,bytes) || bytes!=size) {
-                    msg_err("PX-S1UD: TS buffer overflow bytes=%zu accepted=%zu\n",size,bytes);
-                    return false;
-                }
+                const bool written=stream_buf_->Write(data,bytes);
+                overflow->Record(written,size,bytes);
                 stream_buf_->NotifyWrite();
                 return true;
             },
@@ -470,6 +471,7 @@ private:
             }
         } cleanup{*this,*reads};
         TsDiagnosticLog diagnostics("siano_usb_input");
+        px4::StreamOverflowLog overflow("PX-S1UD");
         const bool diagnostic_enabled=(msg_get_mode() & (MSG_MODE_LOG_FILE | MSG_MODE_CONSOLE))!=0;
         diagnostics.Enable(diagnostic_enabled);
         diagnostics.SetReadyProbe([](void* context) noexcept {
@@ -590,7 +592,7 @@ private:
                         }
                     }
                 } else if (frame.type==MSG_SMS_DVBT_BDA_DATA) {
-                    if (!gate_.Feed(r.generation,p,frame.payload_length,[this,&diagnostics,&r,&last_submit,&last_gap_us,diagnostic_enabled,trace](const std::uint8_t* data,std::size_t size) {
+                    if (!gate_.Feed(r.generation,p,frame.payload_length,[this,&diagnostics,&overflow,&r,&last_submit,&last_gap_us,diagnostic_enabled,trace](const std::uint8_t* data,std::size_t size) {
                         // 異常検出とメタデータだけを記録し、TS 本体と転送条件には触れない。
                         if (diagnostic_enabled) {
                             const auto elapsed=static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(Clock::now()-last_submit).count());
@@ -608,11 +610,7 @@ private:
                         std::size_t bytes=size;
                         const bool written=stream_buf_->Write(data,bytes);
                         stream_buf_->NotifyWrite();
-                        // Purge 中は true と短い長さで意図した破棄を返す。満杯の false と区別する。
-                        if (!written) {
-                            msg_err("PX-S1UD: TS buffer overflow bytes=%zu accepted=%zu\n",size,bytes);
-                            return false;
-                        }
+                        overflow.Record(written,size,bytes);
                         return true;
                     })) error_=-ENOBUFS;
                 } else {

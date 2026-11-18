@@ -429,7 +429,9 @@ ReceiverBase::StreamBuffer::WriteDiagnostics ReceiverBase::StreamBuffer::GetWrit
 bool ReceiverBase::StreamBuffer::WriteRingBuffer(const void *buf, std::size_t &size) noexcept
 {
 	const auto requested = size;
-	const bool ret = ringbuf_.Write(buf, size);
+	/* 満杯のときはパケットの途中で切らず、入りきるパケットだけを書く。
+	 * 呼び出し側は満杯でも受信を続けるため、境界がずれると以降の TS がすべて壊れる。 */
+	const bool ret = ringbuf_.Write(buf, size, 188);
 
 	/* RingBuffer は満杯・非稼働で false、パージ待機中は true のまま長さを
 	 * 縮めて返すため、両者を分けて残す。書き込みの成否と長さは変えない。 */

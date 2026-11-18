@@ -346,6 +346,7 @@
 	<ClInclude Include="atr_length.hpp" />
 	<ClInclude Include="card_device.hpp" />
     <ClInclude Include="tc90522_cnr.hpp" />
+    <ClInclude Include="stream_overflow.hpp" />
     <ClInclude Include="xz3\device.hpp" />
     <ClInclude Include="xz3\frontend.hpp" />
     <ClInclude Include="xz3\card_uart.hpp" />

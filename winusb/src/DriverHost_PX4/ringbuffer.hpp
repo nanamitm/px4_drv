@@ -22,7 +22,8 @@ public:
 	void Stop() noexcept;
 	bool IsActive() noexcept { return (state_.load()); }
 	bool Read(void *buf, std::size_t &size) noexcept;
-	bool Write(const void *buf, std::size_t &size) noexcept;
+	// 満杯で一部しか入らないとき、書き込む長さを unit の倍数へ切り下げる。
+	bool Write(const void *buf, std::size_t &size, std::size_t unit = 1) noexcept;
 	bool Purge() noexcept;
 	std::size_t GetReadableSize() const noexcept { return actual_size_; }
 	std::size_t GetWritableSize() const noexcept { return buf_size_ - actual_size_; }

@@ -7,6 +7,7 @@
 #include "../tc90522_cnr.hpp"
 #include "../torne/winusb_control.hpp"
 #include "../atr_length.hpp"
+#include "../stream_overflow.hpp"
 #include "msg.h"
 
 #include <algorithm>
@@ -768,6 +769,8 @@ private:
         Packet reply{};
         const unsigned cn_address = satellite ? 0x19 : 0x18;
         RingStats stats(satellite);
+        // 選局ごとに作り直し、前のチャンネルで満杯のまま捨てたバイト数を次のチャンネルの記録へ持ち越さない。
+        px4::StreamOverflowLog overflow("GV-MVP/XZ3");
         for (unsigned head = 0, count = 0; parent_.available_ && !stop_; head ^= 1, ++count) {
             auto& read = reads[head];
             // 待っているカード操作があれば、次の操作12の前に先に通す。
@@ -791,7 +794,7 @@ private:
                          read.Stage());
             if (stop_)
                 break;
-            if (const int result = Deliver(read.data, read.Size()))
+            if (const int result = Deliver(read.data, read.Size(), overflow))
                 return result;
             stage = NextStage(end - begin, read.Stage());
             // 未処理量がない状態の操作12の時間は、送出量を流量で割った値に近い。
@@ -927,7 +930,7 @@ private:
         return WaitForSingleObject(parent_.removed_, milliseconds) == WAIT_TIMEOUT ? 0 : -ENODEV;
     }
 
-    int Deliver(const std::vector<std::uint8_t>& bytes, std::size_t length)
+    int Deliver(const std::vector<std::uint8_t>& bytes, std::size_t length, px4::StreamOverflowLog& overflow)
     {
         // 1レコードは4バイトの接頭辞と188バイトのTS。1回の転送はレコード境界で終わる。
         for (std::size_t offset = 4; offset < length; offset += 192) {
@@ -935,8 +938,8 @@ private:
             if (packet[0] != 0x47)
                 return -EIO;
             std::size_t size = 188;
-            if (!stream_buf_->Write(packet, size))
-                return -ENOBUFS;
+            const bool written = stream_buf_->Write(packet, size);
+            overflow.Record(written, 188, size);
         }
         stream_buf_->NotifyWrite();
         return 0;
