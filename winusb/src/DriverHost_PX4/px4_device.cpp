@@ -1324,6 +1324,15 @@ int Px4Device::Px4Receiver::Open()
 	return ret;
 
 fail:
+	/*
+	 * 開いている受信機がなければ初期化済みの記録を全受信機から消す
+	 * 記録が残ると、電源を入れ直した次回の Open() で復調器とチューナーの初期化が省かれる
+	 */
+	if (!parent_.open_count_) {
+		for (int i = 0; i < 4; i++)
+			parent_.receivers_[i]->Term();
+	}
+
 	if (parent_.mldev_)
 		parent_.mldev_->SetPower(parent_, index_, false, nullptr);
 	else if (!parent_.open_count_ && !parent_.card_open_)
