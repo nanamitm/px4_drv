@@ -13,6 +13,7 @@ public:
     void SetBulkTiming() noexcept { frontend_.SetBulkTiming(true); }
     void SetBatchWrites(bool enabled) noexcept { batch_writes_ = enabled; }
     void SetStop(HANDLE stop) noexcept {stop_=stop;}
+    bool StoppedCleanly() const noexcept { return stopped_cleanly_ && !io_failed_; }
     const std::string& Error() const noexcept{return error_;}
 private:
     std::tuple<dibnative::Slice<std::uint8_t>,dibnative::Error> WriteRead(std::uint8_t address,
@@ -23,7 +24,7 @@ private:
     dibnative::Bus::MemoryResult TMCC(std::uint32_t kind,const std::vector<std::uint32_t>& parameters);
     std::tuple<std::int64_t,std::int64_t,bool,dibnative::Error> Captrim(std::uint8_t address,std::uint16_t lo4,
         std::uint32_t key,std::int64_t start,std::int64_t step,std::int64_t target,std::int64_t write,std::int64_t read) override;
-    dibnative::Error CheckState() const;
+    dibnative::Error CheckState();
     dibnative::Error FlushWrites();
     std::array<MailboxI2c::RegisterWrite, MailboxI2c::MaxRegisterWrites> pending_{};
     std::size_t pending_count_ = 0;
@@ -33,6 +34,7 @@ private:
     HANDLE stop_=nullptr;
     NativeFrontend frontend_;
     std::chrono::steady_clock::time_point deadline_{};
+    bool stopped_cleanly_ = false, io_failed_ = false;
     std::string error_;
 };
 }

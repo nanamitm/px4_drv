@@ -4,6 +4,7 @@
 #include "../src/DriverHost_PX4/torne/mb86h47_i2c.hpp"
 #include "../src/DriverHost_PX4/torne/dib8096_registers.hpp"
 #include "../src/DriverHost_PX4/torne/mb86h47_stream.hpp"
+#include "../src/DriverHost_PX4/torne/frontend_native_client.hpp"
 
 #include <cstdlib>
 #include <algorithm>
@@ -51,6 +52,8 @@ public:
 		if (calls == fail_call) { transferred = 0; return 1167; }
 		if (calls == short_call) { transferred = length - 1; return 0; }
 		if (request.type == 0xc0) {
+			if (address == 0x17a3f80)
+				++mailbox_reads;
 			if (address == 0x17a3e40 && answer_ring) {
 				for (;;) {
 					const auto word = Get(0x17a3e00 + (ring_next & 15) * 4);
@@ -96,6 +99,7 @@ public:
 					const std::uint16_t value = number == 896 ? (++vendor_reads == 1 ? 0xdead : vendor_id) : device_id;
 					Put(0x17a3f84, std::uint32_t(value) << 16);
 				}
+				if (stop_on_mailbox) SetEvent(stop_on_mailbox);
 			}
 		}
 		transferred = length;
@@ -121,6 +125,8 @@ public:
 	int pause_error = 0;
 	bool running = false, stuck = false;
 	bool answer_mailbox = false;
+	HANDLE stop_on_mailbox = nullptr;
+	unsigned mailbox_reads = 0;
 	std::uint8_t mailbox_error = 0;
 	std::vector<std::uint8_t> mailbox_sequences;
 	std::chrono::steady_clock::time_point now{};
@@ -374,8 +380,46 @@ static void I2cTests()
 	Check(registers.Identify(vendor, device, recognized, chip.Now() + std::chrono::seconds(1)) == I2cResult::ok && !recognized && device == 0, "wrong vendor cannot reuse old identity");
 }
 
+static void FrontendStopTests()
+{
+	Chip chip;
+	MemoryAccess memory(chip);
+	Bootstrap boot(memory, chip);
+	MailboxI2c bus(memory, chip);
+	Check(boot.Initialize(1) == BootstrapResult::ok && bus.BeginAfterBootstrap(boot), "frontend stop fixture");
+	chip.answer_mailbox = true;
+	const HANDLE removed = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+	const HANDLE stop = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+	Check(removed && stop, "frontend stop events");
+	NativeFrontendClient frontend(bus, removed);
+	frontend.SetStop(stop);
+	chip.stop_on_mailbox = stop;
+	std::vector<std::uint8_t> response;
+	const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+	const auto reads = chip.mailbox_reads;
+	Check(!frontend.Command(0x10, {}, response, deadline) && frontend.StoppedCleanly() &&
+		chip.mailbox_reads > reads, "stop during mailbox exchange drains the answer");
+	ResetEvent(stop);
+	chip.stop_on_mailbox = nullptr;
+	const std::uint8_t reg[]{0, 0};
+	std::uint8_t bytes[2]{};
+	Check(bus.Transfer(0x12, reg, sizeof(reg), bytes, sizeof(bytes), deadline) == I2cResult::ok,
+		"clean stop leaves the mailbox usable for the next command");
+
+	chip.stop_on_mailbox = stop;
+	chip.mailbox_error = 2;
+	Check(!frontend.Command(0x10, {}, response, deadline) && !frontend.StoppedCleanly(),
+		"stop does not hide a failed mailbox response");
+	SetEvent(removed);
+	Check(!frontend.Command(0x10, {}, response, deadline) && !frontend.StoppedCleanly(),
+		"USB removal takes precedence over receiver stop");
+	CloseHandle(stop);
+	CloseHandle(removed);
+}
+
 int main()
 {
+	FrontendStopTests();
 	JobTests();
 	RegisterWriteTests();
 	BulkTests();

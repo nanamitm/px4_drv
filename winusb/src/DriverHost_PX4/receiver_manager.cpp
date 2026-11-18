@@ -8,25 +8,28 @@
 namespace px4 {
 
 bool ReceiverManager::Register(px4::command::ReceiverInfo &info, px4::ReceiverBase *receiver,
-	const DeviceIdentity &identity)
+	const DeviceIdentity &identity, bool open_outside_lock)
 {
 	std::lock_guard<std::shared_mutex> lock(mtx_);
 
 	if (data_.count(receiver))
 		return false;
 
-	data_.emplace(receiver, ReceiverData{ info, false, identity });
+	data_.emplace(receiver, ReceiverData{ info, false, identity, open_outside_lock });
 	return true;
 }
 
 bool ReceiverManager::Unregister(px4::ReceiverBase *receiver)
 {
-	std::lock_guard<std::shared_mutex> lock(mtx_);
-
-	if (!data_.count(receiver))
+	std::unique_lock<std::shared_mutex> lock(mtx_);
+	const auto it = data_.find(receiver);
+	if (it == data_.end() || it->second.unregistering)
 		return false;
 
-	data_.erase(receiver);
+	// Openが参照している間は、登録解除の呼び出し元に受信機を破棄させない。
+	it->second.unregistering = true;
+	open_changed_.wait(lock, [&] { return !it->second.opening; });
+	data_.erase(it);
 	return true;
 }
 
@@ -34,18 +37,18 @@ static const GUID empty_guid = { 0 };
 
 px4::ReceiverBase* ReceiverManager::SearchAndOpen(px4::command::ReceiverInfo &key, px4::command::ReceiverInfo &info, std::uint32_t &data_id)
 {
-	std::lock_guard<std::shared_mutex> lock(mtx_);
+	std::unique_lock<std::shared_mutex> lock(mtx_);
 
 	if (!wmemchr(key.device_name, L'\0', sizeof(key.device_name) / sizeof(wchar_t)) ||
 		!wmemchr(key.receiver_name, L'\0', sizeof(key.receiver_name) / sizeof(wchar_t)))
 		return nullptr;
 	const std::wstring selector = key.device_name;
 	const bool explicit_device = IsDeviceSelector(selector);
+	std::wstring matched_path;
 	if (explicit_device) {
 		/* 空き受信機だけを調べると、片方が使用中の重複serialを見落とす。 */
-		std::wstring matched_path;
 		for (const auto &entry : data_) {
-			if (!MatchesDeviceSelector(selector, entry.second.identity)) continue;
+			if (entry.second.unregistering || !MatchesDeviceSelector(selector, entry.second.identity)) continue;
 			if (!matched_path.empty() && matched_path != entry.second.identity.path) {
 				msg_err("Ambiguous device selector: %ls; use @id:<path ID>\n", selector.c_str());
 				return nullptr;
@@ -58,13 +61,14 @@ px4::ReceiverBase* ReceiverManager::SearchAndOpen(px4::command::ReceiverInfo &ke
 		}
 	}
 
-	for (auto it = data_.cbegin(); it != data_.cend(); ++it) {
-		const px4::command::ReceiverInfo& k = it->second.info;
+	for (auto it = data_.begin(); it != data_.end(); ++it) {
+		auto &entry = it->second;
+		const auto &k = entry.info;
 
-		if (k.data_id)
+		if (k.data_id || entry.unregistering)
 			continue;
 
-		if (explicit_device && !MatchesDeviceSelector(selector, it->second.identity))
+		if (explicit_device && (entry.identity.path != matched_path || !MatchesDeviceSelector(selector, entry.identity)))
 			continue;
 		if (!explicit_device && key.device_name[0] && wcscmp(key.device_name, k.device_name))
 			continue;
@@ -88,6 +92,43 @@ px4::ReceiverBase* ReceiverManager::SearchAndOpen(px4::command::ReceiverInfo &ke
 
 		px4::ReceiverBase *r = it->first;
 
+		if (entry.open_outside_lock) {
+			// IDは予約だけ行い、Openが成功するまでストリーム接続に公開しない。
+			std::uint32_t reserved_id = 0;
+			if (!GenerateDataId(r, reserved_id))
+				continue;
+			entry.valid_data_id = false;
+			entry.opening = true;
+			lock.unlock();
+			bool opened = false;
+			try {
+				opened = r->Open() == 0;
+				lock.lock();
+				if (opened && entry.unregistering) {
+					lock.unlock();
+					r->Close();
+					lock.lock();
+					opened = false;
+				}
+			} catch (...) {
+				if (!lock.owns_lock())
+					lock.lock();
+				entry.opening = false;
+				entry.info.data_id = 0;
+				open_changed_.notify_all();
+				throw;
+			}
+			entry.opening = false;
+			open_changed_.notify_all();
+			if (!opened) {
+				entry.info.data_id = 0;
+				continue;
+			}
+			entry.valid_data_id = true;
+			info = k;
+			data_id = reserved_id;
+			return r;
+		}
 		if (r->Open())
 			continue;
 
@@ -109,7 +150,7 @@ px4::ReceiverBase* ReceiverManager::SearchByDataId(std::uint32_t data_id)
 	std::unique_lock<std::shared_mutex> lock(mtx_);
 
 	for (auto it = data_.begin(); it != data_.end(); ++it) {
-		if (it->second.info.data_id != data_id || !it->second.valid_data_id)
+		if (it->second.info.data_id != data_id || !it->second.valid_data_id || it->second.unregistering)
 			continue;
 
 		it->second.valid_data_id = false;

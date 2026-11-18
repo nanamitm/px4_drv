@@ -14,7 +14,7 @@
 #include "tune_result.hpp"
 #include "reception_policy.hpp"
 #include "mb86h47_card.hpp"
-#include "../atr_length.hpp"
+#include "../dt295/card_response.hpp"
 #include "../stream_overflow.hpp"
 #include "msg.h"
 #include "util.hpp"
@@ -132,12 +132,21 @@ struct ExperimentalSession {
 		std::vector<std::uint8_t> &response, Clock::time_point deadline, HANDLE stop)
 	{
 		if (!healthy || !frontend_started) return false;
-		control.Begin(deadline,stop);
-#ifndef PX4_TORNE_EXPERIMENTAL
-        frontend.SetStop(stop);
+		if (stop && WaitForSingleObject(stop, 0) == WAIT_OBJECT_0)
+			return false;
+#ifdef PX4_TORNE_EXPERIMENTAL
+		control.Begin(deadline, stop);
+		const bool ok = frontend.Command(command, body, response, deadline);
+		const bool stopped_cleanly = false;
+#else
+		// 選局の停止はI2C要求の間かフロントエンドの待機で扱う。発行済みのmailbox要求は
+		// 応答を回収し、完了不明の要求を次の選局へ残さない。USB抜去と期限は転送にも適用する。
+		control.Begin(deadline);
+		frontend.SetStop(stop);
+		const bool ok = frontend.Command(command, body, response, deadline);
+		const bool stopped_cleanly = frontend.StoppedCleanly();
 #endif
-        const bool ok = frontend.Command(command, body, response, deadline);
-		if (!ok) { healthy = false; bus.Invalidate(); }
+		if (!ok && !stopped_cleanly) { healthy = false; bus.Invalidate(); }
 		return ok;
 	}
 	bool InitializeBridge(bool bulk_i2c)
@@ -228,9 +237,7 @@ struct ExperimentalSession {
 struct ExperimentalDevice::CardState {
 	explicit CardState(std::shared_ptr<ExperimentalSession> owner) : session(std::move(owner)) {}
 	std::shared_ptr<ExperimentalSession> session;
-	std::vector<std::uint8_t> received;
-	std::size_t remaining = 0;
-	bool atr = true;
+	px4::dt295::CardResponse response;
 };
 
 int ExperimentalDevice::OpenCard() try
@@ -263,16 +270,16 @@ int ExperimentalDevice::DetectCard(bool &detected)
 	std::lock_guard<std::mutex> control_lock(card_->session->control_mutex);
 	card_->session->control.Begin(Clock::now() + std::chrono::seconds(1));
 	CardUart uart(card_->session->memory, card_->session->control);
-	if (!uart.Present(detected)) return -EIO;
-	if (!detected) { card_->received.clear(); card_->remaining = 0; }
-	return 0;
+	const bool ok = uart.Present(detected);
+	if (!ok || !detected) card_->response.Reset();
+	return ok ? 0 : -EIO;
 }
 
 int ExperimentalDevice::ResetCard()
 {
 	std::lock_guard<std::mutex> lock(card_mutex_);
 	if (!card_ || !available_) return -ENODEV;
-	card_->received.clear(); card_->remaining = 0; card_->atr = true;
+	card_->response.Reset();
 	std::lock_guard<std::mutex> control_lock(card_->session->control_mutex);
 	card_->session->control.Begin(Clock::now() + std::chrono::seconds(1));
 	CardUart uart(card_->session->memory, card_->session->control);
@@ -296,7 +303,7 @@ int ExperimentalDevice::IsCardDataReady(bool &ready) try
 	std::lock_guard<std::mutex> lock(card_mutex_);
 	ready = false;
 	if (!card_ || !available_) return -ENODEV;
-	if (card_->remaining) { ready = true; return 0; }
+	if (card_->response.Ready()) { ready = true; return 0; }
 	std::array<std::uint8_t,259> bytes{};
 	std::size_t count = 0;
 	{
@@ -305,21 +312,9 @@ int ExperimentalDevice::IsCardDataReady(bool &ready) try
 		CardUart uart(card_->session->memory, card_->session->control);
 		if (!uart.ReadBytes(bytes.data(), bytes.size(), count)) return -EIO;
 	}
-	if (card_->received.size() + count > 518) return -EMSGSIZE;
-	card_->received.insert(card_->received.end(), bytes.begin(), bytes.begin() + count);
-	if (card_->atr) {
-		// ATRの構造から全体の長さを求め、B-CAS以外の形式の正しいATRも受信を終えた時点で渡す。
-		// 長さを超えて溜まった場合はATRの前後に残留バイトがあるため、形式不正として再リセットさせる。
-		std::size_t atr_length = 0;
-		const int atr_rc = px4::GetAtrLength(card_->received.data(), card_->received.size(), atr_length);
-		if (atr_rc == -EBADMSG) return atr_rc;
-		if (!atr_rc && card_->received.size() > atr_length) return -EBADMSG;
-		if (!atr_rc && card_->received.size() == atr_length) card_->remaining = atr_length;
-	} else if (card_->received.size() >= 3) {
-		const auto length = std::size_t(4) + card_->received[2];
-		if (card_->received.size() >= length) card_->remaining = length;
-	}
-	ready = card_->remaining != 0;
+	if (const int result = card_->response.Append(bytes.data(), count))
+		return result;
+	ready = card_->response.Ready();
 	return 0;
 } catch (...) { return -ENOMEM; }
 
@@ -328,12 +323,7 @@ int ExperimentalDevice::ReadCardData(std::uint8_t *buf, std::uint8_t &len)
 	std::lock_guard<std::mutex> lock(card_mutex_);
 	if (!card_ || !available_) return -ENODEV;
 	if (!buf || !len) return -EINVAL;
-	const auto count = (std::min)(std::size_t(len), card_->remaining);
-	std::copy_n(card_->received.begin(), count, buf);
-	card_->received.erase(card_->received.begin(), card_->received.begin() + count);
-	card_->remaining -= count;
-	if (count && card_->atr && !card_->remaining) card_->atr = false;
-	len = static_cast<std::uint8_t>(count);
+	len = static_cast<std::uint8_t>(card_->response.Read(buf, len));
 	return 0;
 }
 
@@ -747,7 +737,7 @@ int ExperimentalDevice::Init()
 	info.receiver_guid = definition.guid;
 	info.systems = px4::SystemType::ISDB_T;
 	info.index = definition.index;
-	registered_ = receiver_manager_.Register(info, receiver_.get(), GetDeviceIdentity());
+	registered_ = receiver_manager_.Register(info, receiver_.get(), GetDeviceIdentity(), true);
 	return registered_ ? 0 : -EIO;
 }
 void ExperimentalDevice::Term()
