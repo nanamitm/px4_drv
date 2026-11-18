@@ -19,6 +19,7 @@ struct Mock final : Io {
     std::vector<std::uint16_t> responses;
     int mode=255, protocols=0, version=0x800, fail_type=0;
     bool short_version=false, old_mode_after_init=false;
+    bool short_iq=false; std::uint32_t iq_result=0;
     // reload_to_rom: SW_RELOAD_START で ROM へ戻る (J.83B 用の firmware の実機の挙動)。
     // boot_mode: 読み込んだ firmware が起動後に返すモード (J.83B 用の firmware は 7)
     bool reload_to_rom=false; int boot_mode=6; int reloading=0, reload_calls=0;
@@ -41,6 +42,10 @@ struct Mock final : Io {
         if (type==MSG_SMS_SWDOWNLOAD_TRIGGER_REQ || type==MSG_SW_RELOAD_EXEC_REQ) mode=boot_mode;
         if (type==MSG_SMS_INIT_DEVICE_REQ && !old_mode_after_init && boot_mode==6) mode=6;
         if (type==MSG_SMS_ISDBT_TUNE_REQ) p.resize(4);
+        if (type==MSG_IQ_STREAM_REQ && !short_iq) {
+            p.resize(28);
+            sms_put_le32(p.data(),iq_result);
+        }
         return 0;
     }
 };
@@ -211,6 +216,13 @@ void J83b()
     auto before=warm.messages.size();
     Require(f.SetIqStream(89999999)==-EINVAL && f.SetIqStream(775000001)==-EINVAL && warm.messages.size()==before,"J.83B range");
     Require(f.SetIqStream(0)==0 && sms_get_le32(warm.messages.back().data()+8)==0,"IQ stream stop");
+    warm.iq_result=1;
+    Require(f.SetIqStream(138750000)==-EIO,"IQ start rejected by firmware");
+    std::vector<std::uint8_t> rejected;
+    Require(f.SetIqStream(0,&rejected)==-EIO && rejected.size()==28 && sms_get_le32(rejected.data())==1,
+        "IQ stop rejection retains firmware diagnostics");
+    warm.short_iq=true;
+    Require(f.SetIqStream(138750000)==-EBADMSG,"missing IQ result word is malformed");
     Mock plain;plain.mode=6;plain.fail_type=MSG_IQ_STREAM_REQ;Frontend p(plain);
     Require(p.SetIqStream(138750000)==-ETIMEDOUT,"firmware without IQ support times out");
 }
