@@ -345,6 +345,7 @@
 	<ClInclude Include="card_status_lock.hpp" />
 	<ClInclude Include="atr_length.hpp" />
 	<ClInclude Include="card_device.hpp" />
+	<ClInclude Include="card_reader_directory.hpp" />
     <ClInclude Include="tc90522_cnr.hpp" />
     <ClInclude Include="stream_overflow.hpp" />
     <ClInclude Include="xz3\device.hpp" />
@@ -353,6 +354,7 @@
     <ClInclude Include="device_base.hpp" />
     <ClInclude Include="device_definition_set.hpp" />
     <ClInclude Include="device_manager.hpp" />
+    <ClInclude Include="device_manager_card_readers.hpp" />
     <ClInclude Include="pxbcud\device.hpp" />
     <ClInclude Include="rtlsdr\device.hpp" />
     <ClInclude Include="msi2500\device.hpp" />

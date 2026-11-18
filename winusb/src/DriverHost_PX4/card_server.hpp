@@ -8,7 +8,7 @@
 #include <unordered_map>
 
 #include "card_command.hpp"
-#include "device_manager.hpp"
+#include "card_reader_directory.hpp"
 #include "server_base.hpp"
 #include "smart_card.hpp"
 
@@ -16,14 +16,14 @@ namespace px4 {
 
 class CardServer final : public ServerBase {
 public:
-	CardServer(DeviceManager &device_manager, ReceiverManager &receiver_manager) noexcept;
+	CardServer(CardReaderDirectory &card_readers, ReceiverManager &receiver_manager) noexcept;
 
 private:
 	struct SharedCard final {
-		explicit SharedCard(std::shared_ptr<DeviceBase> source_device)
+		explicit SharedCard(std::shared_ptr<CardDevice> source_device)
 			: device(std::move(source_device)), card(device) {}
 
-		std::shared_ptr<DeviceBase> device;
+		std::shared_ptr<CardDevice> device;
 		SmartCard card;
 		std::recursive_mutex io_mutex;
 		/* io_mutex を保持中の処理が、短い I/O か接続をまたぐトランザクションかを STATUS が区別する */
@@ -85,7 +85,7 @@ private:
 		card_command::ShareMode current_mode,
 		card_command::ShareMode requested_mode) noexcept;
 
-	DeviceManager &device_manager_;
+	CardReaderDirectory &card_readers_;
 	std::mutex cards_mutex_;
 	std::unordered_map<std::wstring, std::weak_ptr<SharedCard>> cards_;
 };

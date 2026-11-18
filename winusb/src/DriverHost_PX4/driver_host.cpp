@@ -33,6 +33,7 @@ DriverHost::DriverHost()
 DriverHost::~DriverHost()
 {
 	card_server_.reset();
+	card_readers_.reset();
 	stream_server_.reset();
 	ctrl_server_.reset();
 	device_manager_.reset();
@@ -76,7 +77,8 @@ void DriverHost::Run()
 
 	ctrl_server_.reset(new px4::CtrlServer(receiver_manager_));
 	stream_server_.reset(new px4::StreamServer(receiver_manager_));
-	card_server_.reset(new px4::CardServer(*device_manager_, receiver_manager_));
+	card_readers_.reset(new px4::DeviceManagerCardReaders(*device_manager_));
+	card_server_.reset(new px4::CardServer(*card_readers_, receiver_manager_));
 
 	if (!ctrl_server_->Start())
 		throw DriverHostError("px4::DriverHost::Run: CtrlServer::Start() failed.");
@@ -103,6 +105,7 @@ void DriverHost::Run()
 	}
 
 	card_server_.reset();
+	card_readers_.reset();
 	stream_server_.reset();
 	ctrl_server_.reset();
 	device_manager_.reset();

@@ -331,6 +331,7 @@ Set-Location winusb
 ### 実機に依存しない試験
 
 - `smart_card_state_test`: 抜去、再挿入、ATR 解析、B-CAS と ACAS の初期化、APDU 分割、CRC、再送、WTX、期限切れ、セッション破棄を模擬デバイスで検証
+- `card_server_reconnect_test`: カードサーバーを分離した IPC 名の名前付きパイプで動かし、同じリーダー名の機器を差し替えて、挿し直した機器への `RECONNECT`、抜去中の `REMOVED`、トランザクションと共有数の解放を検証
 - `ts_sync_condition_test`: 通常 TS と受信機番号付き TS の同期判定を実行値で検証
 - `winscard_api_test`: 列挙、接続、状態、メモリ所有権、ANSI と Unicode の API を検証
 - エクスポート比較: System32 と SysWOW64 の `WinSCard.dll` に対して関数名と ordinal の双方を確認
