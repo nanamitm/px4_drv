@@ -819,16 +819,18 @@ int XitSqr100Device::XitSqr100Receiver::SetCapture(bool capture)
 		if (ret)
 			return ret;
 
-		ret = parent_.StartCapture();
-		if (ret)
-			return ret;
-
-		std::size_t size = 188 * parent_.config_.device.receiver_max_packets;
-
 		if (!streaming_) {
-			stream_buf_->Alloc(size);
+			const std::size_t size = 188 * parent_.config_.device.receiver_max_packets;
+			// StartCaptureの完了を待たずにUSBスレッドが書き込むため、先にバッファを用意する。
+			if (!stream_buf_->Alloc(size))
+				return -ENOMEM;
 			stream_buf_->SetThresholdSize(size / 10);
 			stream_buf_->Start();
+			ret = parent_.StartCapture();
+			if (ret) {
+				stream_buf_->Stop();
+				return ret;
+			}
 			streaming_ = true;
 		} else {
 			stream_buf_->Purge();
