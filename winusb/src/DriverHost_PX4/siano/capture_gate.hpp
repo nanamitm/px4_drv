@@ -5,6 +5,27 @@
 #include <mutex>
 
 namespace px4::siano {
+// helperのTSは整形済み。配信の停止は実行中の書き込みが終わるまで待つ。
+class IqOutputGate final {
+public:
+    void SetEnabled(bool enabled)
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        enabled_=enabled;
+    }
+
+    template<class Writer>
+    void Write(Writer write)
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (enabled_) write();
+    }
+
+private:
+    std::mutex mutex_;
+    bool enabled_=false;
+};
+
 // USB 要求投入時の世代を保持し、遅れて完了した旧要求を次の選局へ流さない。
 class CaptureGate final {
 public:

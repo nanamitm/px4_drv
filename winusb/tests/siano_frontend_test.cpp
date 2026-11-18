@@ -9,6 +9,7 @@
 #include <cstdlib>
 #include <chrono>
 #include <fstream>
+#include <future>
 #include <string>
 
 using namespace px4::siano;
@@ -147,6 +148,36 @@ void Generations()
     out.clear();current=gate.Ticket();gate.SetEnabled(false);
     Require(gate.Feed(current,packet.data(),packet.size(),write) && out.empty(),"stop prevents late output");
 }
+void IqOutputTransitions()
+{
+    using namespace std::chrono_literals;
+    IqOutputGate gate;
+    unsigned writes=0;
+    gate.Write([&]{++writes;});
+    Require(writes==0,"IQ output starts disabled");
+
+    gate.SetEnabled(true);
+    std::promise<void> inside,release,stopping;
+    auto release_wait=release.get_future();
+    auto writer=std::async(std::launch::async,[&] {
+        gate.Write([&]{inside.set_value();release_wait.wait();++writes;});
+    });
+    Require(inside.get_future().wait_for(2s)==std::future_status::ready,"IQ write entered");
+    auto stop=std::async(std::launch::async,[&] {
+        stopping.set_value();
+        gate.SetEnabled(false);
+    });
+    Require(stopping.get_future().wait_for(2s)==std::future_status::ready,"IQ stop entered");
+    const bool blocked=stop.wait_for(50ms)==std::future_status::timeout;
+    release.set_value();
+    writer.get();stop.get();
+    Require(blocked && writes==1,"IQ stop waits for the active write");
+    gate.Write([&]{++writes;});
+    Require(writes==1,"IQ callbacks cannot write after stop");
+    gate.SetEnabled(true);
+    gate.Write([&]{++writes;});
+    Require(writes==2,"IQ output resumes after reopening");
+}
 void FirmwarePaths()
 {
     namespace fs=std::filesystem;
@@ -227,4 +258,4 @@ void J83b()
     Require(p.SetIqStream(138750000)==-ETIMEDOUT,"firmware without IQ support times out");
 }
 }
-int main() {Download();TuneAndStats();Frames();Generations();FirmwarePaths();J83b();std::puts("PASS: Siano boot/reload, warm mode, tune, PID, errors, stats, split frames, capture generations, firmware paths and J.83B requests");}
+int main() {Download();TuneAndStats();Frames();Generations();IqOutputTransitions();FirmwarePaths();J83b();std::puts("PASS: Siano boot/reload, tune, stats, frames, capture generations, IQ output transitions and J.83B requests");}

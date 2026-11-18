@@ -130,10 +130,10 @@ public:
             stream_buf_->SetThresholdSize(188*32);
             stream_buf_->SetDiscardNullPacketsOnOutput(false);
             stream_buf_->Start(); capture_=true;
-            if (iq_) iq_output_=true;
+            if (iq_) iq_output_.SetEnabled(true);
             else if (tuned_ && locked_) EnableOutput();
         } else {
-            capture_=false; DisableOutput(); iq_output_=false; stream_buf_->Stop();
+            capture_=false; DisableOutput(); iq_output_.SetEnabled(false); stream_buf_->Stop();
         }
         return error_.load();
     }
@@ -261,11 +261,12 @@ private:
         auto overflow=std::make_shared<px4::StreamOverflowLog>("PX-S1UD J.83B");
         int ret=iq_helper_.Start(j83b_.helper.wstring(),j83b_.log.wstring(),
             [this,overflow](const std::uint8_t* data,std::size_t size) {
-                if (!iq_output_) return true;
-                std::size_t bytes=size;
-                const bool written=stream_buf_->Write(data,bytes);
-                overflow->Record(written,size,bytes);
-                stream_buf_->NotifyWrite();
+                iq_output_.Write([&] {
+                    std::size_t bytes=size;
+                    const bool written=stream_buf_->Write(data,bytes);
+                    overflow->Record(written,size,bytes);
+                    stream_buf_->NotifyWrite();
+                });
                 return true;
             });
         if (ret) {msg_err("PX-S1UD: J.83B helper start failed ret=%d helper=%ls\n",ret,j83b_.helper.c_str());return ret;}
@@ -290,7 +291,7 @@ private:
             if (ret==-ETIMEDOUT) msg_err("PX-S1UD: the firmware does not answer the IQ stream request\n");
             return ret;
         }
-        iq_=true; iq_output_=capture_;
+        iq_=true; iq_output_.SetEnabled(capture_);
         msg_info("PX-S1UD: J.83B started frequency_khz=%u\n",params_.freq);
         return 0;
     }
@@ -298,7 +299,7 @@ private:
     int StopIq()
     {
         int ret=0;
-        iq_output_=false;
+        iq_output_.SetEnabled(false);
         if (iq_) {
             iq_=false;
             std::vector<std::uint8_t> p;
@@ -662,7 +663,8 @@ private:
     // loaded_ の Unknown は、この DriverHost が読み込んでいない (open 前から稼働中の) firmware
     enum class Loaded {Unknown,Isdbt,J83b};
     J83bConfig j83b_; bool j83b_supported_=false,iq_=false; Loaded loaded_=Loaded::Unknown;
-    std::atomic_bool iq_feed_{false},iq_output_{false};
+    std::atomic_bool iq_feed_{false};
+    IqOutputGate iq_output_;
     // firmware の読み込み直しの間か (Io::Reloading) と、その間に回復させた受信の失敗の数
     std::atomic_bool reloading_{false}; std::atomic_uint reload_recoveries_{0};
     // IQ の送出中に観測した、未完了の受信要求の最小数と、完了から出し直すまでの最大時間 (受信のスレッドが書く)
