@@ -285,10 +285,12 @@ private:
         if (!SetThreadPriority(GetCurrentThread(),THREAD_PRIORITY_TIME_CRITICAL))
             msg_warn("PX-BCUD: TS worker priority raise failed win32=%lu\n",GetLastError());
         RecoveryBudget budget;
+        PatGate gate(frontend_.SelectedStream());
         Clock::time_point outage{};
         bool have_outage=false;
         while (!stop_) {
-            try { RunStream(have_outage?&outage:nullptr); }
+            gate.Restart();
+            try { RunStream(gate,have_outage?&outage:nullptr); }
             catch (...) { failure_time_=Clock::now();worker_error_=ERROR_NOT_ENOUGH_MEMORY; }
             const DWORD error=worker_error_.load();
             if (!error || stop_ || WaitForSingleObject(removed_,0)==WAIT_OBJECT_0) break;
@@ -372,7 +374,7 @@ private:
         msg_info("PX-BCUD: state ret=%d bridge[0c,0f,5f,80]=%02x,%02x,%02x,%02x demod[c3,e6,e7,1c,1f]=%02x,%02x,%02x,%02x,%02x\n",
             ret,values[0],values[1],values[2],values[3],values[4],values[5],values[6],values[7],values[8]);
     }
-    void RunStream(const Clock::time_point *outage)
+    void RunStream(PatGate &gate,const Clock::time_point *outage)
     {
         // Linux em28xx と同じ 5 URB x 64 microframe。WinUSB はフレーム境界の
         // 倍数を要求するため、interval1 の 8 microframe ごとに区切る。
@@ -405,10 +407,6 @@ private:
         const auto reads_storage=std::make_unique<Read[]>(request_count);
         Read *const reads=reads_storage.get();
         PlainFramer framer;
-        // 同じチャンネルの自動復旧では、USB FIFO に残る TS も選局中のチャンネルのもので、
-        // PAT で前の選局と区別する必要がない。復旧直後は信号の悪化で TEI が続くことがあり、
-        // PAT を待つと 5 秒の pat_timeout で受信が終わり、選局し直すまで録画が止まる。
-        PatGate gate(frontend_.SelectedStream(),outage!=nullptr);
         std::uint64_t startup_discarded=0;
         std::uint64_t iso_errors=0, empty_packets=0;
         std::vector<std::uint8_t> output;

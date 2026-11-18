@@ -148,8 +148,14 @@ void TestPatGate()
     PatGate missing(0x4010);CHECK(!missing.Accept(long_pat[0].data()));long_pat[1][3]=0x12;CHECK(!missing.Accept(long_pat[1].data()));
     PatGate invalid(0x4010);bad[0]=correct[0];bad[0][1]|=0x80;CHECK(!invalid.Accept(bad[0].data()));
     bad[0]=correct[0];bad[0][4]=184;CHECK(!invalid.Accept(bad[0].data()));
-    // 同じチャンネルの自動復旧で作るゲートは、PAT を待たず TEI 付きのパケットも通す。
-    PatGate recovered(0x4010,true);CHECK(recovered.Ready());
+    // PAT確認前の復旧では旧局や途切れたPATを受理せず、確認後の復旧ではTEI付きも通す。
+    PatGate recovered(0x4010);
+    CHECK(!recovered.Accept(long_pat[0].data()));
+    recovered.Restart();
+    CHECK(!recovered.Accept(long_pat[1].data()));
+    CHECK(!recovered.Accept(old[0].data()));
+    CHECK(recovered.Accept(correct[0].data()));
+    recovered.Restart();CHECK(recovered.Ready());
     bad[0]=old[0];bad[0][1]|=0x80;CHECK(recovered.Accept(bad[0].data()));CHECK(recovered.Accept(old[0].data()));
     std::puts("PAT gate: stale TSID, CRC failure, split sections, lost packets, invalid pointers and recovery bypass passed");
 }
