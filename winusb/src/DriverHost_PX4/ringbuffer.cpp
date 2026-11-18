@@ -150,7 +150,7 @@ bool RingBuffer::Read(void *buf, std::size_t &size) noexcept
 	return true;
 }
 
-bool RingBuffer::Write(const void *buf, std::size_t &size) noexcept
+bool RingBuffer::Write(const void *buf, std::size_t &size, std::size_t unit) noexcept
 {
 #if 0
 	if (state_ != 2)
@@ -175,6 +175,13 @@ bool RingBuffer::Write(const void *buf, std::size_t &size) noexcept
 	std::intptr_t tail = tail_;
 	std::size_t buf_size = buf_size_;
 	std::size_t write_size = (actual_size + size <= buf_size) ? size : (buf_size - actual_size);
+
+	/*
+	 * 空きに入りきらない残りは呼び出し側が捨てる。単位の途中まで書くと、
+	 * 読み出し側が受け取る TS のパケット境界がずれ、以降のすべてのパケットが壊れる。
+	 */
+	if (write_size < size && unit > 1)
+		write_size -= write_size % unit;
 
 	if (write_size) {
 		std::size_t tmp = (tail + write_size <= buf_size) ? write_size : (buf_size - tail);
