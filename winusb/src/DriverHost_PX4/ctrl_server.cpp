@@ -303,6 +303,13 @@ void CtrlServer::CtrlConnection::Worker() noexcept
 			break;
 		}
 
+		/*
+		 * 抜去済みの機器の受信機での失敗は、受信できない状態が接続を開き直すまで続くため、信号なしなどの失敗と区別して返す
+		 * OPEN と CLOSE は receiver を差し替えるか消すため、ここでは対象にならない
+		 */
+		if (receiver && hdr->status == px4::command::CtrlStatusCode::FAILED && receiver_manager_.IsRemoved(receiver))
+			hdr->status = px4::command::CtrlStatusCode::DEVICE_REMOVED;
+
 		if (!ret)
 			break;
 

@@ -297,6 +297,44 @@ const BOOL BonDriver::OpenTuner()
 		if (!ResetEvent(quit_event_))
 			throw BonDriverError("BonDriver::OpenTuner: ResetEvent() failed.");
 
+		ConnectReceiver(ctrl_client_, data_pipe_);
+
+		if (!ctrl_client_.SetCapture(true))
+			throw BonDriverError("BonDriver::OpenTuner: command failed.");
+
+		ioq_->Start();
+
+		open_ = TRUE;
+	} catch (const std::exception &e) {
+		ret = FALSE;
+		if (display_error_message_) MessageBoxA(nullptr, e.what(), "BonDriver_PX4 (BonDriver::OpenTuner)", MB_OK | MB_ICONERROR);
+	} catch (...) {
+		ret = FALSE;
+		if (display_error_message_) MessageBoxA(nullptr, "Fatal error!", "BonDriver_PX4 (BonDriver::OpenTuner)", MB_OK | MB_ICONERROR);
+	}
+
+	if (!open_) {
+		if (data_pipe_) {
+			SetEvent(quit_event_);
+			ioq_->Stop();
+			data_pipe_.reset();
+		}
+
+		ctrl_client_.Close();
+		ctrl_client_.ClearPipe();
+	}
+
+	return ret;
+}
+
+/*
+ * DriverHost を起動して受信機を開き、データのパイプを受信機へ結び付ける
+ * 受信の開始 (SET_CAPTURE) は呼び出し元が行う。失敗は BonDriverError で通知し、
+ * 開いた受信機とパイプの後始末は呼び出し元が ctrl_client と data_pipe から行う
+ */
+void BonDriver::ConnectReceiver(px4::CtrlCmdClient &ctrl_client, std::unique_ptr<px4::PipeClient> &data_pipe)
+{
+	{
 		HANDLE startup_event;
 		DWORD st;
 
@@ -340,10 +378,10 @@ const BOOL BonDriver::OpenTuner()
 		if (!ctrl_pipe->Connect(px4::ipc::Control, ctrl_pipe_config, nullptr))
 			throw BonDriverError("BonDriver::OpenTuner: control pipe: cannot connect.");
 
-		ctrl_client_.SetPipe(ctrl_pipe);
+		ctrl_client.SetPipe(ctrl_pipe);
 		if(framed_stream_){
 			std::uint32_t version=0;
-			if(!ctrl_client_.GetVersion(version) || (version>>16)!=(px4::command::VERSION>>16) || version<0x00040004){
+			if(!ctrl_client.GetVersion(version) || (version>>16)!=(px4::command::VERSION>>16) || version<0x00040004){
 				msg_err("OpenTuner: FramedStream requires DriverHost command protocol >= 0x00040004; actual=0x%08x\n",version);
 				throw BonDriverError("FramedStream requires an updated DriverHost_PX4.exe (protocol 0x00040004 or later).");
 			}
@@ -353,7 +391,7 @@ const BOOL BonDriver::OpenTuner()
 			for (std::size_t i = 0; ; i++) {
 				const px4::command::ReceiverInfo &ri = receivers_.Get(i);
 
-				if (ctrl_client_.Open(ri, systems_, &ri_res))
+				if (ctrl_client.Open(ri, systems_, &ri_res))
 					break;
 			}
 		} catch (const std::out_of_range &) {
@@ -365,9 +403,9 @@ const BOOL BonDriver::OpenTuner()
 		data_pipe_config.stream_read = true;
 		data_pipe_config.timeout = pipe_timeout_;
 
-		data_pipe_.reset(new px4::PipeClient());
+		data_pipe.reset(new px4::PipeClient());
 
-		if (!data_pipe_->Connect(px4::ipc::Data, data_pipe_config, nullptr))
+		if (!data_pipe->Connect(px4::ipc::Data, data_pipe_config, nullptr))
 			throw BonDriverError("BonDriver::OpenTuner: data pipe: cannot connect.");
 
 		px4::command::DataCmd data_cmd;
@@ -376,35 +414,9 @@ const BOOL BonDriver::OpenTuner()
 		data_cmd.cmd = framed_stream_?px4::command::DataCmdCode::SET_DATA_ID_FRAMED:px4::command::DataCmdCode::SET_DATA_ID;
 		data_cmd.data_id = ri_res.data_id;
 
-		if (!data_pipe_->Write(&data_cmd, sizeof(data_cmd), ret_size))
+		if (!data_pipe->Write(&data_cmd, sizeof(data_cmd), ret_size))
 			throw BonDriverError("BonDriver::OpenTuner: command failed.");
-
-		if (!ctrl_client_.SetCapture(true))
-			throw BonDriverError("BonDriver::OpenTuner: command failed.");
-
-		ioq_->Start();
-
-		open_ = TRUE;
-	} catch (const std::exception &e) {
-		ret = FALSE;
-		if (display_error_message_) MessageBoxA(nullptr, e.what(), "BonDriver_PX4 (BonDriver::OpenTuner)", MB_OK | MB_ICONERROR);
-	} catch (...) {
-		ret = FALSE;
-		if (display_error_message_) MessageBoxA(nullptr, "Fatal error!", "BonDriver_PX4 (BonDriver::OpenTuner)", MB_OK | MB_ICONERROR);
 	}
-
-	if (!open_) {
-		if (data_pipe_) {
-			SetEvent(quit_event_);
-			ioq_->Stop();
-			data_pipe_.reset();
-		}
-
-		ctrl_client_.Close();
-		ctrl_client_.ClearPipe();
-	}
-
-	return ret;
 }
 
 void BonDriver::CloseTuner()
@@ -434,6 +446,9 @@ void BonDriver::CloseTuner()
 	}
 	space_ = 0;
 	ch_ = 0;
+	tuned_ = false;
+	reconnect_needed_ = false;
+	next_reconnect_tick_ = 0;
 
 	open_ = FALSE;
 
@@ -447,21 +462,116 @@ const BOOL BonDriver::SetChannel(const BYTE bCh)
 
 const float BonDriver::GetSignalLevel(void)
 {
-	std::lock_guard<std::mutex> lock(mtx_);
+	std::uint32_t epoch = 0;
 
-	if (!open_)
-		return 0.0f;
+	{
+		std::lock_guard<std::mutex> lock(mtx_);
 
-	px4::command::StatSet stat_set;
+		if (!open_)
+			return 0.0f;
 
-	stat_set.num = 1;
-	stat_set.data[0].type = px4::command::StatType::CNR;
-	stat_set.data[0].value = 0;
+		if (!reconnect_needed_) {
+			px4::command::StatSet stat_set;
 
-	if (!ctrl_client_.ReadStats(stat_set))
-		return 0.0f;
+			stat_set.num = 1;
+			stat_set.data[0].type = px4::command::StatType::CNR;
+			stat_set.data[0].value = 0;
 
-	return static_cast<float>(stat_set.data[0].value) / 1000.0f;
+			if (ctrl_client_.ReadStats(stat_set))
+				return static_cast<float>(stat_set.data[0].value) / 1000.0f;
+
+			if (!ctrl_client_.LastDeviceRemoved())
+				return 0.0f;
+
+			reconnect_needed_ = true;
+		}
+
+		/*
+		 * 利用側は受信が止まってもチャンネルを変えない限り SetChannel() を呼ばないため、
+		 * 定期的に呼ばれる信号レベルの取得で抜去を検出し、挿し直した機器へつなぎ直して同じチャンネルを選局し直す
+		 * 機器がまだ戻っていない間は ReconnectLocked() が間隔を空けて失敗する
+		 */
+		if (!ReconnectLocked())
+			return 0.0f;
+
+		if (tuned_) {
+			std::unique_ptr<std::uint8_t[]> param_buf = MakeParameterSet(space_, ch_);
+			bool removed = false;
+
+			if (param_buf && !TuneLocked(*reinterpret_cast<px4::command::ParameterSet*>(param_buf.get()), removed) && removed)
+				reconnect_needed_ = true;
+		}
+
+		epoch = PurgeStreamLocked();
+	}
+
+	ioq_->PurgeDataBuffer(epoch);
+	if (ts_diagnostics_enabled_) {
+		std::lock_guard<std::mutex> diagnostic_lock(diagnostic_mtx_);
+		ts_diagnostics_.Reset();
+	}
+
+	return 0.0f;
+}
+
+/*
+ * 抜去済みの機器の受信機から、挿し直した機器の受信機へ接続を移す
+ * 新しい受信機で受信を開始できるまで古い接続を残し、失敗した場合は次の機会に再試行する
+ */
+bool BonDriver::ReconnectLocked() noexcept
+{
+	/*
+	 * 試行ごとに DriverHost への接続と受信機の検索を行うため、機器が戻るまでの間は試行の間隔を空ける
+	 * 抜き差しの実機の記録では、挿し直した直後に PX-W3U4 が約7秒の間に接続と切断を繰り返したため、
+	 * 1秒ごとの信号レベルの取得のたびではなく 2 秒おきに試し、つながった後に消えた機器は次の抜去として扱う
+	 */
+	static const ULONGLONG reconnect_interval_ms = 2000;
+	const ULONGLONG now = GetTickCount64();
+
+	if (now < next_reconnect_tick_)
+		return false;
+
+	next_reconnect_tick_ = now + reconnect_interval_ms;
+
+	px4::CtrlCmdClient ctrl_client;
+	std::unique_ptr<px4::PipeClient> data_pipe;
+
+	try {
+		ConnectReceiver(ctrl_client, data_pipe);
+
+		if (!ctrl_client.SetCapture(true))
+			throw BonDriverError("BonDriver::ReconnectLocked: command failed.");
+	} catch (const std::exception &e) {
+		msg_err("Reconnect after device removal failed: %s\n", e.what());
+		data_pipe.reset();
+		ctrl_client.Close();
+		ctrl_client.ClearPipe();
+		return false;
+	} catch (...) {
+		data_pipe.reset();
+		ctrl_client.Close();
+		ctrl_client.ClearPipe();
+		return false;
+	}
+
+	/* 古い受信機の読み出しを止めてから閉じ、新しい受信機のパイプへ差し替える */
+	SetEvent(quit_event_);
+	ioq_->Stop();
+	data_pipe_ = std::move(data_pipe);
+
+	ctrl_client_.Close();
+	std::unique_ptr<px4::PipeClient> ctrl_pipe = ctrl_client.TakePipe();
+	ctrl_client_.SetPipe(ctrl_pipe);
+
+	/* 古い受信機の LNB 給電は閉じた時点で解放されるため、選局し直すときに新しい受信機で入れ直す */
+	lnb_power_state_ = false;
+	reconnect_needed_ = false;
+
+	ResetEvent(quit_event_);
+	ioq_->Start();
+
+	msg_info("Reconnected to the receiver after device removal.\n");
+	return true;
 }
 
 const DWORD BonDriver::WaitTsStream(const DWORD dwTimeOut)
@@ -512,26 +622,35 @@ const BOOL BonDriver::GetTsStream(BYTE **ppDst, DWORD *pdwSize, DWORD *pdwRemain
 	return TRUE;
 }
 
+std::uint32_t BonDriver::PurgeStreamLocked()
+{
+	std::uint32_t epoch = 0;
+
+	/*
+	 * データのパイプの PURGE は世代を変えず、応答も待たないため、DriverHost がパージを処理する前に送った TS が
+	 * パイプと受信中のバッファーに残り、パージ後の TS の前に渡っていた (J.83B の選局直後の CC の飛び)。
+	 * 世代付きの接続では制御のパイプでパージを頼み、返った世代より前のデータを IoQueue で捨てる。
+	 * このコマンドを知らない古い DriverHost では、従来のデータのパイプの PURGE に戻す
+	 */
+	if (!framed_stream_ || !ctrl_client_.PurgeStream(epoch)) {
+		px4::command::DataCmd data_cmd;
+		std::size_t ret_size;
+
+		epoch = 0;
+		data_cmd.cmd = px4::command::DataCmdCode::PURGE;
+		data_pipe_->Write(&data_cmd, sizeof(data_cmd), ret_size);
+	}
+
+	return epoch;
+}
+
 void BonDriver::PurgeTsStream(void)
 {
 	std::uint32_t epoch = 0;
 	{
 		std::lock_guard<std::mutex> lock(mtx_);
 
-		/*
-		 * データのパイプの PURGE は世代を変えず、応答も待たないため、DriverHost がパージを処理する前に送った TS が
-		 * パイプと受信中のバッファーに残り、パージ後の TS の前に渡っていた (J.83B の選局直後の CC の飛び)。
-		 * 世代付きの接続では制御のパイプでパージを頼み、返った世代より前のデータを IoQueue で捨てる。
-		 * このコマンドを知らない古い DriverHost では、従来のデータのパイプの PURGE に戻す
-		 */
-		if (!framed_stream_ || !ctrl_client_.PurgeStream(epoch)) {
-			px4::command::DataCmd data_cmd;
-			std::size_t ret_size;
-
-			epoch = 0;
-			data_cmd.cmd = px4::command::DataCmdCode::PURGE;
-			data_pipe_->Write(&data_cmd, sizeof(data_cmd), ret_size);
-		}
+		epoch = PurgeStreamLocked();
 	}
 
 	ioq_->PurgeDataBuffer(epoch);
@@ -583,8 +702,65 @@ const BOOL BonDriver::SetChannel(const DWORD dwSpace, const DWORD dwChannel)
 	if (!chset_.ExistsChannel(dwSpace, dwChannel))
 		return FALSE;
 
-	const px4::ChannelSet::ChannelInfo &channel = chset_.GetChannel(dwSpace, dwChannel);
-	px4::SystemType system = chset_.GetSpaceSystem(dwSpace);
+	std::unique_ptr<std::uint8_t[]> param_buf = MakeParameterSet(dwSpace, dwChannel);
+
+	if (!param_buf)
+		return FALSE;
+
+	const px4::command::ParameterSet &param_set = *reinterpret_cast<px4::command::ParameterSet*>(param_buf.get());
+	px4::SystemType system = param_set.system;
+	bool ret = false;
+
+	try {
+		std::lock_guard<std::mutex> lock(mtx_);
+		bool removed = false;
+
+		ret = TuneLocked(param_set, removed);
+		if (!ret && removed)
+			reconnect_needed_ = true;
+
+		/*
+		 * 抜去済みの機器では選局が失敗し続けるため、挿し直した機器へつなぎ直して同じ要求を1回だけ選局し直す
+		 * 利用者の操作による選局なので、信号レベルの取得で空けている試行の間隔を待たない
+		 */
+		if (!ret && reconnect_needed_) {
+			next_reconnect_tick_ = 0;
+
+			if (ReconnectLocked()) {
+				ret = TuneLocked(param_set, removed);
+				if (!ret && removed)
+					reconnect_needed_ = true;
+			}
+		}
+	} catch (const std::exception &e) {
+		if (display_error_message_) MessageBoxA(nullptr, e.what(), "BonDriver_PX4 (BonDriver::SetChannel)", MB_OK | MB_ICONERROR);
+	} catch (...) {
+		if (display_error_message_) MessageBoxA(nullptr, "Fatal error!", "BonDriver_PX4 (BonDriver::SetChannel)", MB_OK | MB_ICONERROR);
+	}
+
+	// TSMF で選んだ TS は毎秒数十 KB のことがあり、バッファーが埋まるまで待つと最初のデータまで数秒かかるため、ISDB-C だけ 200ms で途中まででも渡す
+	// 地デジや BS/CS は 192KB を 0.1 秒前後で埋めるので、従来どおり埋まるまで待つ
+	ioq_->SetReadFlushInterval(std::chrono::milliseconds((system == px4::SystemType::ISDB_C) ? 200 : 0));
+	PurgeTsStream();
+
+	if (ret) {
+		// succeeded
+		space_ = dwSpace;
+		ch_ = dwChannel;
+		tuned_ = true;
+	}
+
+	return !!ret;
+}
+
+/*
+ * チャンネルを DriverHost へ渡す ParameterSet に変換する。周波数へ変換できないチャンネルは nullptr を返す
+ * つなぎ直した後に同じチャンネルを選局し直すため、SetChannel() から分けている
+ */
+std::unique_ptr<std::uint8_t[]> BonDriver::MakeParameterSet(DWORD space, DWORD ch)
+{
+	const px4::ChannelSet::ChannelInfo &channel = chset_.GetChannel(space, ch);
+	px4::SystemType system = chset_.GetSpaceSystem(space);
 	std::uint32_t real_freq, num_param = 0;
 
 	switch (system) {
@@ -600,7 +776,7 @@ const BOOL BonDriver::SetChannel(const DWORD dwSpace, const DWORD dwChannel)
 			real_freq = 95143 + (channel.ptx_ch * 6000);
 		} else {
 			// unknown channel
-			return FALSE;
+			return nullptr;
 		}
 
 		break;
@@ -614,7 +790,7 @@ const BOOL BonDriver::SetChannel(const DWORD dwSpace, const DWORD dwChannel)
 			real_freq = 1613000 + ((channel.ptx_ch - 12) * 40000);
 		} else {
 			// unknown channel
-			return FALSE;
+			return nullptr;
 		}
 
 		num_param = 1;
@@ -628,7 +804,7 @@ const BOOL BonDriver::SetChannel(const DWORD dwSpace, const DWORD dwChannel)
 
 		if (khz < 0) {
 			// unknown channel
-			return FALSE;
+			return nullptr;
 		}
 
 		real_freq = static_cast<std::uint32_t>(khz);
@@ -645,7 +821,7 @@ const BOOL BonDriver::SetChannel(const DWORD dwSpace, const DWORD dwChannel)
 
 	default:
 		// unknown system
-		return FALSE;
+		return nullptr;
 	}
 
 	/*
@@ -653,7 +829,8 @@ const BOOL BonDriver::SetChannel(const DWORD dwSpace, const DWORD dwChannel)
 	 * params を使わない地上波でも構造体1個分を確保しないと末尾を範囲外参照する
 	 * 使わない領域もそのまま送るので、確保した時点で0で埋めておく
 	 */
-	px4::command::ParameterSet *param_set = reinterpret_cast<px4::command::ParameterSet*>(new std::uint8_t[std::max<std::size_t>(sizeof(*param_set), sizeof(*param_set) - sizeof(param_set->params) + (sizeof(param_set->params[0]) * num_param))]());
+	std::unique_ptr<std::uint8_t[]> buf(new std::uint8_t[std::max<std::size_t>(sizeof(px4::command::ParameterSet), sizeof(px4::command::ParameterSet) - sizeof(px4::command::ParameterSet::params) + (sizeof(px4::command::ParameterSet::params[0]) * num_param))]());
+	px4::command::ParameterSet *param_set = reinterpret_cast<px4::command::ParameterSet*>(buf.get());
 
 	param_set->system = system;
 	param_set->freq = real_freq;
@@ -669,48 +846,41 @@ const BOOL BonDriver::SetChannel(const DWORD dwSpace, const DWORD dwChannel)
 		param_set->params[0].value = channel.tsmf_stream;
 	}
 
+	return buf;
+}
+
+/*
+ * mtx_ を保持した状態で選局する。失敗したときは、抜去済みの機器の受信機での失敗かを removed で返す
+ */
+bool BonDriver::TuneLocked(const px4::command::ParameterSet &param_set, bool &removed)
+{
+	const px4::SystemType system = param_set.system;
 	bool ret = true;
 
-	try {
-		std::lock_guard<std::mutex> lock(mtx_);
+	removed = false;
 
-		if (lnb_power_) {
-			if (system == px4::SystemType::ISDB_S) {
-				if (!lnb_power_state_) {
-					ret = ctrl_client_.SetLnbVoltage(15);
-					lnb_power_state_ = true;
-				}
-			} else if (lnb_power_state_) {
-				ret = ctrl_client_.SetLnbVoltage(0);
-				lnb_power_state_ = false;
+	if (lnb_power_) {
+		if (system == px4::SystemType::ISDB_S) {
+			if (!lnb_power_state_) {
+				ret = ctrl_client_.SetLnbVoltage(15);
+				lnb_power_state_ = true;
 			}
+		} else if (lnb_power_state_) {
+			ret = ctrl_client_.SetLnbVoltage(0);
+			lnb_power_state_ = false;
 		}
-
-		if (ret) {
-			ret = ctrl_client_.SetParams(*param_set);
-			if (ret)
-				ret = ctrl_client_.Tune(tune_timeout_);
-		}
-	} catch (const std::exception &e) {
-		if (display_error_message_) MessageBoxA(nullptr, e.what(), "BonDriver_PX4 (BonDriver::SetChannel)", MB_OK | MB_ICONERROR);
-	} catch (...) {
-		if (display_error_message_) MessageBoxA(nullptr, "Fatal error!", "BonDriver_PX4 (BonDriver::SetChannel)", MB_OK | MB_ICONERROR);
 	}
-
-	delete[] reinterpret_cast<std::uint8_t*>(param_set);
-
-	// TSMF で選んだ TS は毎秒数十 KB のことがあり、バッファーが埋まるまで待つと最初のデータまで数秒かかるため、ISDB-C だけ 200ms で途中まででも渡す
-	// 地デジや BS/CS は 192KB を 0.1 秒前後で埋めるので、従来どおり埋まるまで待つ
-	ioq_->SetReadFlushInterval(std::chrono::milliseconds((system == px4::SystemType::ISDB_C) ? 200 : 0));
-	PurgeTsStream();
 
 	if (ret) {
-		// succeeded
-		space_ = dwSpace;
-		ch_ = dwChannel;
+		ret = ctrl_client_.SetParams(param_set);
+		if (ret)
+			ret = ctrl_client_.Tune(tune_timeout_);
 	}
 
-	return !!ret;
+	if (!ret)
+		removed = ctrl_client_.LastDeviceRemoved();
+
+	return ret;
 }
 
 const DWORD BonDriver::GetCurSpace(void)

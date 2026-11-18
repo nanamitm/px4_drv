@@ -4,6 +4,7 @@
 
 #include <cstdint>
 #include <atomic>
+#include <future>
 #include <memory>
 #include <string>
 #include <mutex>
@@ -83,6 +84,8 @@ private:
 
 	mutable std::mutex mtx_;
 	std::unordered_map<std::wstring, std::shared_ptr<DeviceBase>> devices_;
+	// 抜去した機器の破棄。開いている受信機が閉じるまで終わらないため、通知のスレッドとは別に進める
+	std::vector<std::future<void>> removed_devices_;
 	std::uintptr_t index_;
 	std::atomic<std::uint64_t> card_reader_generation_;
 	NotifyHandler handler_;

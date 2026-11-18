@@ -182,10 +182,17 @@ bool CtrlCmdClient::ReadStats(px4::command::StatSet &stat_set) noexcept
 template <typename T>
 bool CtrlCmdClient::Call(T& cmd) noexcept
 {
+	/* パイプの失敗は応答の状態を持たないため、抜去の応答と区別できるよう FAILED として記録する */
+	last_status_ = px4::command::CtrlStatusCode::FAILED;
+
 	if (!pipe_)
 		return false;
 
-	return (pipe_->Call(&cmd, sizeof(cmd)) && cmd.status == px4::command::CtrlStatusCode::SUCCEEDED);
+	if (!pipe_->Call(&cmd, sizeof(cmd)))
+		return false;
+
+	last_status_ = cmd.status;
+	return cmd.status == px4::command::CtrlStatusCode::SUCCEEDED;
 }
 
 } // namespace px4

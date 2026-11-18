@@ -48,7 +48,7 @@ px4::ReceiverBase* ReceiverManager::SearchAndOpen(px4::command::ReceiverInfo &ke
 	if (explicit_device) {
 		/* 空き受信機だけを調べると、片方が使用中の重複serialを見落とす。 */
 		for (const auto &entry : data_) {
-			if (entry.second.unregistering || !MatchesDeviceSelector(selector, entry.second.identity)) continue;
+			if (entry.second.unregistering || entry.second.removed || !MatchesDeviceSelector(selector, entry.second.identity)) continue;
 			if (!matched_path.empty() && matched_path != entry.second.identity.path) {
 				msg_err("Ambiguous device selector: %ls; use @id:<path ID>\n", selector.c_str());
 				return nullptr;
@@ -65,7 +65,8 @@ px4::ReceiverBase* ReceiverManager::SearchAndOpen(px4::command::ReceiverInfo &ke
 		auto &entry = it->second;
 		const auto &k = entry.info;
 
-		if (k.data_id || entry.unregistering)
+		/* 抜去済みの機器は開けないため、挿し直した同じ機器の受信機を探す */
+		if (k.data_id || entry.unregistering || entry.removed)
 			continue;
 
 		if (explicit_device && (entry.identity.path != matched_path || !MatchesDeviceSelector(selector, entry.identity)))
@@ -205,6 +206,36 @@ void ReceiverManager::ClearDataId(px4::ReceiverBase *receiver)
 	data.valid_data_id = false;
 
 	return;
+}
+
+void ReceiverManager::MarkRemoved(const std::wstring &path)
+{
+	if (path.empty())
+		return;
+
+	std::lock_guard<std::shared_mutex> lock(mtx_);
+
+	/*
+	 * 挿し直した機器は同じパスで後から登録されるため、通知の時点で登録済みの受信機だけを記録する
+	 * 開いている接続が古い受信機を閉じるまで、Unregister() は呼ばれず登録が残る
+	 */
+	for (auto &entry : data_) {
+		if (entry.second.identity.path == path)
+			entry.second.removed = true;
+	}
+}
+
+bool ReceiverManager::IsRemoved(px4::ReceiverBase *receiver)
+{
+	std::shared_lock<std::shared_mutex> lock(mtx_);
+	const auto it = data_.find(receiver);
+
+	/*
+	 * 機器の Term() は、開いている受信機が閉じるのを待つ前に Unregister() で登録から外す
+	 * 開いている接続が持つ受信機が登録にない状態は機器の破棄の途中だけで起こるため、抜去と同じに扱う
+	 * (カードの接続が機器の参照を持たない XIT-SQR100 の実機のログで、抜去の直後に登録から外れることを確認)
+	 */
+	return it == data_.end() || it->second.removed;
 }
 
 } // namespace px4

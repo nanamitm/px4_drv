@@ -76,11 +76,71 @@ void TestConcurrentOpen()
 	other.Close();
 	manager.ClearDataId(&other);
 }
+
+// 抜去した機器の受信機が開いたまま残っても、同じパスで挿し直した機器の受信機だけが検索される
+void TestRemovedDevice()
+{
+	px4::ReceiverManager manager;
+	Receiver old_busy, old_free, new_first, new_second;
+	const px4::DeviceIdentity path{L"usb-path-replug", L"000002119006501"};
+	px4::command::ReceiverInfo info{}, key{}, result{};
+	std::uint32_t id = 0;
+	wcscpy_s(info.device_name, L"Model");
+	info.systems = px4::SystemType::ISDB_T;
+	key.systems = px4::SystemType::ISDB_T;
+	key.index = -1;
+
+	info.index = 0;
+	Require(manager.Register(info, &old_busy, path), "register old busy receiver");
+	info.index = 1;
+	Require(manager.Register(info, &old_free, path), "register old free receiver");
+	wcscpy_s(key.device_name, L"Model");
+	Require(manager.SearchAndOpen(key, result, id) != nullptr, "open receiver before removal");
+	px4::ReceiverBase *busy = old_busy.open ? static_cast<px4::ReceiverBase *>(&old_busy) : &old_free;
+	Receiver &free_old = old_busy.open ? old_free : old_busy;
+	const unsigned int free_opens = free_old.opens;
+
+	manager.MarkRemoved(L"");
+	Require(!manager.IsRemoved(busy), "empty path marked a receiver");
+	manager.MarkRemoved(path.path);
+	Require(manager.IsRemoved(busy) && manager.IsRemoved(&free_old), "receivers of the removed device were not marked");
+	Require(!manager.SearchAndOpen(key, result, id) && free_old.opens == free_opens,
+		"free receiver of the removed device was opened");
+
+	info.index = 0;
+	Require(manager.Register(info, &new_first, path), "register replugged first receiver");
+	info.index = 1;
+	Require(manager.Register(info, &new_second, path), "register replugged second receiver");
+	Require(!manager.IsRemoved(&new_first) && !manager.IsRemoved(&new_second), "replugged receivers inherited removal");
+
+	px4::ReceiverBase *selected = manager.SearchAndOpen(key, result, id);
+	Require((selected == &new_first || selected == &new_second) && free_old.opens == free_opens,
+		"model selection did not move to the replugged device");
+	static_cast<Receiver *>(selected)->Close();
+	manager.ClearDataId(selected);
+
+	wcscpy_s(key.device_name, (L"@id:" + path.PathId()).c_str());
+	selected = manager.SearchAndOpen(key, result, id);
+	Require((selected == &new_first || selected == &new_second) && free_old.opens == free_opens,
+		"path ID selection did not move to the replugged device");
+	static_cast<Receiver *>(selected)->Close();
+	manager.ClearDataId(selected);
+
+	// 開いていた接続が閉じた後は、従来どおり古い受信機を登録から外せる
+	static_cast<Receiver *>(busy)->Close();
+	manager.ClearDataId(busy);
+	Require(manager.Unregister(&old_busy) && manager.Unregister(&old_free), "unregister removed receivers");
+
+	// 機器の Term() は受信機が閉じる前に登録から外すため、登録にない受信機も抜去として扱う
+	Require(manager.IsRemoved(&old_busy), "receiver unregistered by device teardown was not reported as removed");
+	Require(!manager.IsRemoved(&new_first) && !manager.IsRemoved(&new_second), "registered receivers reported as removed");
+}
 }
 
 int main() try
 {
 	TestConcurrentOpen();
+	TestRemovedDevice();
 	px4::ReceiverManager manager;
 	Receiver first, sibling, second;
 	px4::DeviceIdentity a{L"usb-path-a", L"123456789012345"}, b{L"usb-path-b", a.serial};

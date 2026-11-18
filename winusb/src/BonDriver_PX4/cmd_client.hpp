@@ -26,6 +26,9 @@ public:
 	void SetPipe(px4::PipeClient *pipe) noexcept { pipe_.reset(pipe); }
 	void SetPipe(std::unique_ptr<px4::PipeClient> &pipe) noexcept { pipe_ = std::move(pipe); }
 	void ClearPipe() noexcept { pipe_.reset(); }
+	std::unique_ptr<px4::PipeClient> TakePipe() noexcept { return std::move(pipe_); }
+	// 直前のコマンドが、抜去済みの機器の受信機で失敗したか
+	bool LastDeviceRemoved() const noexcept { return last_status_ == px4::command::CtrlStatusCode::DEVICE_REMOVED; }
 
 	bool Open(const px4::command::ReceiverInfo &in, px4::SystemType systems, px4::command::ReceiverInfo *out) noexcept;
 	bool GetVersion(std::uint32_t &version) noexcept;
@@ -46,6 +49,7 @@ private:
 	template <typename T> bool Call(T &cmd) noexcept;
 
 	std::unique_ptr<px4::PipeClient> pipe_;
+	px4::command::CtrlStatusCode last_status_ = px4::command::CtrlStatusCode::NONE;
 };
 
 } // namespace px4
