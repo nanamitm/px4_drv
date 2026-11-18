@@ -19,13 +19,11 @@ class IqHelper final {
 public:
     // helper の TS を受け取る。false を返すと helper を失敗として止める
     using TsHandler=std::function<bool(const std::uint8_t*,std::size_t)>;
-    // helper が停止要求なしに終わったとき、または形式不正で止めたときに一度だけ呼ばれる (読み取りのスレッドから)
-    using FailHandler=std::function<void()>;
     IqHelper()=default;
     ~IqHelper() {Stop();}
     IqHelper(const IqHelper&)=delete;
     IqHelper& operator=(const IqHelper&)=delete;
-    int Start(const std::wstring& exe,const std::wstring& log,TsHandler ts,FailHandler fail);
+    int Start(const std::wstring& exe,const std::wstring& log,TsHandler ts);
     // 受信スレッドから呼ぶ。待たずに複製してキューへ積み、満杯なら捨てて数える。
     // 捨てたブロックは helper がブロック番号の欠落として検出する
     void Feed(const std::uint8_t* block,std::size_t size);
@@ -45,7 +43,6 @@ private:
     void Fail(const char* reason);
     HANDLE process_=nullptr,job_=nullptr,input_=nullptr,output_=nullptr;
     TsHandler ts_;
-    FailHandler fail_;
     std::thread writer_,reader_;
     std::mutex mutex_;std::condition_variable queued_;
     std::deque<std::vector<std::uint8_t>> queue_;

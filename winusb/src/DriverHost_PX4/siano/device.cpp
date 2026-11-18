@@ -130,10 +130,10 @@ public:
             stream_buf_->SetThresholdSize(188*32);
             stream_buf_->SetDiscardNullPacketsOnOutput(false);
             stream_buf_->Start(); capture_=true;
-            if (iq_) iq_output_=true;
+            if (iq_) iq_output_.SetEnabled(true);
             else if (tuned_ && locked_) EnableOutput();
         } else {
-            capture_=false; DisableOutput(); iq_output_=false; stream_buf_->Stop();
+            capture_=false; DisableOutput(); iq_output_.SetEnabled(false); stream_buf_->Stop();
         }
         return error_.load();
     }
@@ -151,6 +151,7 @@ public:
             // C/N には helper が報告する復調器の MER (dB) を ISDB-T の CNR と同じ dB×1000 で返す。
             // RS の成功割合は正常受信中にほぼ 100% で変わらず、C/N の目安にならないため。
             // MER をまだ報告していない間 (起動直後と MER を送らない古い helper) は、従来どおり RS の成功割合を返す
+            // helperだけの異常終了では配信接続を閉じず、次の選局でhelperを作り直せるようにする。
             if (iq_helper_.Failed()) return -ECANCELED;
             const auto last=iq_helper_.LastTs();
             locked_=iq_helper_.Ready() && last && GetTickCount64()-last<3000;
@@ -205,6 +206,11 @@ protected:
         // メッセージ途中の USB パケットを残し、再開後に TS の端数をヘッダーとして
         // 読むことがある。受信要求を継続し、Gate の世代で選局前とロック前の TS を除く。
         if (!ret && !stream_buf_->AdvanceEpoch()) return -EIO;
+        // helperの起動失敗はUSB通信の異常ではない。ファームウェアを切り替える前に起動し、
+        // 失敗時も同じ接続で次の選局を受け付ける。
+        if (!ret && j83b) {
+            if (const int helper_error=StartIqHelper()) return helper_error;
+        }
         if (!ret) ret=j83b ? TuneJ83b() : TuneIsdbt();
         if (ret) {
             msg_err("PX-S1UD: tune failed system=%s frequency_khz=%u ret=%d\n",j83b ? "J.83B" : "ISDB-T",params_.freq,ret);
@@ -248,6 +254,24 @@ private:
         }
         return frontend_.Tune(params_.freq);
     }
+    int StartIqHelper()
+    {
+        // helper を先に起動し、IQ の送出の始めのブロックから渡す
+        // helper の読み取りスレッドだけが呼ぶため、記録はこの起動の間だけ callback が持つ。
+        auto overflow=std::make_shared<px4::StreamOverflowLog>("PX-S1UD J.83B");
+        int ret=iq_helper_.Start(j83b_.helper.wstring(),j83b_.log.wstring(),
+            [this,overflow](const std::uint8_t* data,std::size_t size) {
+                iq_output_.Write([&] {
+                    std::size_t bytes=size;
+                    const bool written=stream_buf_->Write(data,bytes);
+                    overflow->Record(written,size,bytes);
+                    stream_buf_->NotifyWrite();
+                });
+                return true;
+            });
+        if (ret) {msg_err("PX-S1UD: J.83B helper start failed ret=%d helper=%ls\n",ret,j83b_.helper.c_str());return ret;}
+        return 0;
+    }
     int TuneJ83b()
     {
         if (loaded_!=Loaded::J83b) {
@@ -260,29 +284,14 @@ private:
             loaded_=Loaded::J83b;
             msg_info("PX-S1UD: J.83B firmware loaded firmware=%u.%u\n",frontend_.Version()>>8,frontend_.Version()&255);
         }
-        // helper を先に起動し、IQ の送出の始めのブロックから渡す
-        // helper の読み取りスレッドだけが呼ぶため、記録はこの起動の間だけ callback が持つ。
-        auto overflow=std::make_shared<px4::StreamOverflowLog>("PX-S1UD J.83B");
-        int ret=iq_helper_.Start(j83b_.helper.wstring(),j83b_.log.wstring(),
-            [this,overflow](const std::uint8_t* data,std::size_t size) {
-                if (!iq_output_) return true;
-                std::size_t bytes=size;
-                const bool written=stream_buf_->Write(data,bytes);
-                overflow->Record(written,size,bytes);
-                stream_buf_->NotifyWrite();
-                return true;
-            },
-            // 読み取りのスレッドから呼ばれるため、mutex_ を取らずに配信の停止だけを要求する
-            [this] {stream_buf_->StopRequest();});
-        if (ret) {msg_err("PX-S1UD: J.83B helper start failed ret=%d helper=%ls\n",ret,j83b_.helper.c_str());return ret;}
         iq_min_pending_=static_cast<unsigned>(TransferCount); iq_max_resubmit_us_=0;
         iq_feed_=true;
-        ret=frontend_.SetIqStream(params_.freq*1000);
+        const int ret=frontend_.SetIqStream(params_.freq*1000);
         if (ret) {
             if (ret==-ETIMEDOUT) msg_err("PX-S1UD: the firmware does not answer the IQ stream request\n");
             return ret;
         }
-        iq_=true; iq_output_=capture_;
+        iq_=true; iq_output_.SetEnabled(capture_);
         msg_info("PX-S1UD: J.83B started frequency_khz=%u\n",params_.freq);
         return 0;
     }
@@ -290,7 +299,7 @@ private:
     int StopIq()
     {
         int ret=0;
-        iq_output_=false;
+        iq_output_.SetEnabled(false);
         if (iq_) {
             iq_=false;
             std::vector<std::uint8_t> p;
@@ -654,7 +663,8 @@ private:
     // loaded_ の Unknown は、この DriverHost が読み込んでいない (open 前から稼働中の) firmware
     enum class Loaded {Unknown,Isdbt,J83b};
     J83bConfig j83b_; bool j83b_supported_=false,iq_=false; Loaded loaded_=Loaded::Unknown;
-    std::atomic_bool iq_feed_{false},iq_output_{false};
+    std::atomic_bool iq_feed_{false};
+    IqOutputGate iq_output_;
     // firmware の読み込み直しの間か (Io::Reloading) と、その間に回復させた受信の失敗の数
     std::atomic_bool reloading_{false}; std::atomic_uint reload_recoveries_{0};
     // IQ の送出中に観測した、未完了の受信要求の最小数と、完了から出し直すまでの最大時間 (受信のスレッドが書く)
@@ -711,7 +721,8 @@ int Device::Init()
     wcscpy_s(info.device_name,device_def_.name.c_str());info.device_guid=device_def_.guid;
     wcscpy_s(info.receiver_name,def.name.c_str());info.receiver_guid=def.guid;
     info.systems=systems;info.index=def.index;
-    if (!receiver_manager_.Register(info,receiver_.get(),GetDeviceIdentity())) {receiver_.reset();return -EIO;}
+    // USB初期化とファームウェア探索の待機中も、他の受信機を開けるようにする。
+    if (!receiver_manager_.Register(info,receiver_.get(),GetDeviceIdentity(),true)) {receiver_.reset();return -EIO;}
     return 0;
 }
 void Device::Term()

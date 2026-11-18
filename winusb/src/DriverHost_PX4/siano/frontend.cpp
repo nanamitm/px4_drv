@@ -148,8 +148,12 @@ int Frontend::SetIqStream(std::uint32_t frequency_hz, std::vector<std::uint8_t>*
     // この要求自体が選局を兼ねるため、ISDB-T の選局要求は送らない (BonDriver_S1UD.dll と同じ)。
     // 通常の firmware はこの要求に応答しないため、期限を短くして J.83B 用の firmware でないことを早く返す
     const int ret=Request(MSG_IQ_STREAM_REQ,MSG_IQ_STREAM_RES,{frequency_hz},p,2000);
-    if (!ret && stats) *stats=std::move(p);
-    return ret;
+    if (ret) return ret;
+    if (p.size()<4) return -EBADMSG;
+    // 応答が届いても、先頭の結果が非ゼロならIQ送出の開始・停止は失敗している。
+    const auto result=sms_get_le32(p.data());
+    if (stats) *stats=std::move(p);
+    return result ? -EIO : 0;
 }
 int Frontend::RequestStats(std::vector<std::uint8_t>& payload)
 {

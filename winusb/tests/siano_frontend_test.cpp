@@ -9,6 +9,7 @@
 #include <cstdlib>
 #include <chrono>
 #include <fstream>
+#include <future>
 #include <string>
 
 using namespace px4::siano;
@@ -19,6 +20,7 @@ struct Mock final : Io {
     std::vector<std::uint16_t> responses;
     int mode=255, protocols=0, version=0x800, fail_type=0;
     bool short_version=false, old_mode_after_init=false;
+    bool short_iq=false; std::uint32_t iq_result=0;
     // reload_to_rom: SW_RELOAD_START で ROM へ戻る (J.83B 用の firmware の実機の挙動)。
     // boot_mode: 読み込んだ firmware が起動後に返すモード (J.83B 用の firmware は 7)
     bool reload_to_rom=false; int boot_mode=6; int reloading=0, reload_calls=0;
@@ -41,6 +43,10 @@ struct Mock final : Io {
         if (type==MSG_SMS_SWDOWNLOAD_TRIGGER_REQ || type==MSG_SW_RELOAD_EXEC_REQ) mode=boot_mode;
         if (type==MSG_SMS_INIT_DEVICE_REQ && !old_mode_after_init && boot_mode==6) mode=6;
         if (type==MSG_SMS_ISDBT_TUNE_REQ) p.resize(4);
+        if (type==MSG_IQ_STREAM_REQ && !short_iq) {
+            p.resize(28);
+            sms_put_le32(p.data(),iq_result);
+        }
         return 0;
     }
 };
@@ -142,6 +148,36 @@ void Generations()
     out.clear();current=gate.Ticket();gate.SetEnabled(false);
     Require(gate.Feed(current,packet.data(),packet.size(),write) && out.empty(),"stop prevents late output");
 }
+void IqOutputTransitions()
+{
+    using namespace std::chrono_literals;
+    IqOutputGate gate;
+    unsigned writes=0;
+    gate.Write([&]{++writes;});
+    Require(writes==0,"IQ output starts disabled");
+
+    gate.SetEnabled(true);
+    std::promise<void> inside,release,stopping;
+    auto release_wait=release.get_future();
+    auto writer=std::async(std::launch::async,[&] {
+        gate.Write([&]{inside.set_value();release_wait.wait();++writes;});
+    });
+    Require(inside.get_future().wait_for(2s)==std::future_status::ready,"IQ write entered");
+    auto stop=std::async(std::launch::async,[&] {
+        stopping.set_value();
+        gate.SetEnabled(false);
+    });
+    Require(stopping.get_future().wait_for(2s)==std::future_status::ready,"IQ stop entered");
+    const bool blocked=stop.wait_for(50ms)==std::future_status::timeout;
+    release.set_value();
+    writer.get();stop.get();
+    Require(blocked && writes==1,"IQ stop waits for the active write");
+    gate.Write([&]{++writes;});
+    Require(writes==1,"IQ callbacks cannot write after stop");
+    gate.SetEnabled(true);
+    gate.Write([&]{++writes;});
+    Require(writes==2,"IQ output resumes after reopening");
+}
 void FirmwarePaths()
 {
     namespace fs=std::filesystem;
@@ -211,8 +247,15 @@ void J83b()
     auto before=warm.messages.size();
     Require(f.SetIqStream(89999999)==-EINVAL && f.SetIqStream(775000001)==-EINVAL && warm.messages.size()==before,"J.83B range");
     Require(f.SetIqStream(0)==0 && sms_get_le32(warm.messages.back().data()+8)==0,"IQ stream stop");
+    warm.iq_result=1;
+    Require(f.SetIqStream(138750000)==-EIO,"IQ start rejected by firmware");
+    std::vector<std::uint8_t> rejected;
+    Require(f.SetIqStream(0,&rejected)==-EIO && rejected.size()==28 && sms_get_le32(rejected.data())==1,
+        "IQ stop rejection retains firmware diagnostics");
+    warm.short_iq=true;
+    Require(f.SetIqStream(138750000)==-EBADMSG,"missing IQ result word is malformed");
     Mock plain;plain.mode=6;plain.fail_type=MSG_IQ_STREAM_REQ;Frontend p(plain);
     Require(p.SetIqStream(138750000)==-ETIMEDOUT,"firmware without IQ support times out");
 }
 }
-int main() {Download();TuneAndStats();Frames();Generations();FirmwarePaths();J83b();std::puts("PASS: Siano boot/reload, warm mode, tune, PID, errors, stats, split frames, capture generations, firmware paths and J.83B requests");}
+int main() {Download();TuneAndStats();Frames();Generations();IqOutputTransitions();FirmwarePaths();J83b();std::puts("PASS: Siano boot/reload, tune, stats, frames, capture generations, IQ output transitions and J.83B requests");}
