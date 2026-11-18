@@ -59,10 +59,10 @@ const char* ShareModeName(card_command::ShareMode mode) noexcept
 
 } // namespace
 
-CardServer::CardServer(DeviceManager &device_manager,
+CardServer::CardServer(CardReaderDirectory &card_readers,
 			       ReceiverManager &receiver_manager) noexcept
 	: ServerBase(px4::ipc::Card, receiver_manager),
-	device_manager_(device_manager),
+	card_readers_(card_readers),
 	cards_mutex_()
 {
 	pipe_config_.in_buffer_size = sizeof(card_command::Command);
@@ -81,7 +81,7 @@ std::shared_ptr<CardServer::SharedCard> CardServer::GetCard(
 	const std::wstring &reader_name, int &error)
 {
 	std::lock_guard<std::mutex> lock(cards_mutex_);
-	auto device = device_manager_.FindCardReader(reader_name);
+	auto device = card_readers_.FindCardReader(reader_name);
 	if (!device) {
 		error = -ENOENT;
 		return nullptr;
@@ -372,7 +372,7 @@ void CardServer::CardConnection::Worker() noexcept
 
 			case card_command::Code::LIST_READERS:
 			{
-				auto readers = card_parent_.device_manager_.ListCardReaders();
+				auto readers = card_parent_.card_readers_.ListCardReaders();
 				/* 固定長 IPC へコピーする前に全件を検査し、切り詰めた別名を公開しない */
 				bool has_invalid_name = std::any_of(readers.begin(), readers.end(),
 					[](const std::wstring &reader) {
@@ -385,7 +385,7 @@ void CardServer::CardConnection::Worker() noexcept
 				command.reader_count = static_cast<std::uint32_t>(
 					std::min<std::size_t>(readers.size(), card_command::MAX_READERS));
 				command.reader_generation =
-					card_parent_.device_manager_.GetCardReaderGeneration();
+					card_parent_.card_readers_.GetCardReaderGeneration();
 				for (std::size_t index = 0; index < command.reader_count; index++)
 					wcscpy_s(command.readers[index], readers[index].c_str());
 				break;
@@ -448,7 +448,7 @@ void CardServer::CardConnection::Worker() noexcept
 				 * SCardReconnect() で回復する利用側が復旧できない。現在の機器が別なら、CONNECT と同じく取得し直す
 				 * 機器が戻っていない間は従来どおり古い機器で失敗させ、抜去 (REMOVED) を返す
 				 */
-				auto current_device = card_parent_.device_manager_.FindCardReader(reader_);
+				auto current_device = card_parent_.card_readers_.FindCardReader(reader_);
 				if (current_device && current_device != card_->device) {
 					const std::wstring reader = reader_;
 					ReleaseCard();
@@ -497,13 +497,13 @@ void CardServer::CardConnection::Worker() noexcept
 				std::vector<std::uint8_t> atr;
 				int ret;
 				std::shared_ptr<SharedCard> status_card;
-				if (card_ && card_->device->GetCardReaderName() == command.reader_name)
+				if (card_ && reader_ == command.reader_name)
 					status_card = card_;
 				if (!status_card) {
 					auto monitored = monitored_cards_.find(command.reader_name);
 					if (monitored != monitored_cards_.end()) {
 						/* USB 再接続後は同じ名前でも新しいデバイスを監視する */
-						auto current_device = card_parent_.device_manager_.FindCardReader(
+						auto current_device = card_parent_.card_readers_.FindCardReader(
 							command.reader_name);
 						if (current_device && monitored->second->device == current_device)
 							status_card = monitored->second;

@@ -11,6 +11,7 @@
 #include "config.hpp"
 #include "device_definition_set.hpp"
 #include "device_manager.hpp"
+#include "device_manager_card_readers.hpp"
 #include "receiver_manager.hpp"
 #include "ctrl_server.hpp"
 #include "stream_server.hpp"
@@ -42,6 +43,7 @@ private:
 	HANDLE mutex_;
 	HANDLE startup_event_;
 	std::unique_ptr<px4::DeviceManager> device_manager_;
+	std::unique_ptr<px4::DeviceManagerCardReaders> card_readers_;
 	std::unique_ptr<px4::CtrlServer> ctrl_server_;
 	std::unique_ptr<px4::StreamServer> stream_server_;
 	std::unique_ptr<px4::CardServer> card_server_;
