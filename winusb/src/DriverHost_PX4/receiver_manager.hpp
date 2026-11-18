@@ -32,6 +32,10 @@ public:
 	px4::ReceiverBase* SearchAndOpen(px4::command::ReceiverInfo &key, px4::command::ReceiverInfo &info, std::uint32_t &data_id);
 	px4::ReceiverBase* SearchByDataId(std::uint32_t data_id);
 	void ClearDataId(px4::ReceiverBase *receiver);
+	// 抜去通知を受けた機器の受信機を記録する。機器の破棄が後回しになると登録が残るため、検索の対象から外す
+	void MarkRemoved(const std::wstring &path);
+	// 抜去の印がある受信機と、機器の破棄で登録から外れた受信機を真とする。開いている接続が持つ受信機だけに使う
+	bool IsRemoved(px4::ReceiverBase *receiver);
 
 private:
 	struct ReceiverData {
@@ -41,6 +45,7 @@ private:
 		bool open_outside_lock;
 		bool opening = false;
 		bool unregistering = false;
+		bool removed = false;
 	};
 
 	bool GenerateDataId(px4::ReceiverBase *receiver, std::uint32_t &data_id);

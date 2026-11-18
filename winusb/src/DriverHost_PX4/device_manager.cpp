@@ -337,6 +337,8 @@ void DeviceManager::Remove(const std::wstring &path)
 
 		device = devices_.at(path);
 		device->SetAvailability(false);
+		/* 開いたままの接続が新しい機器へつなぎ直せるよう、古い受信機での失敗を抜去として区別させる */
+		receiver_manager_.MarkRemoved(path);
 		if (device->HasCardReader())
 			card_reader_generation_.fetch_add(1);
 		devices_.erase(path);

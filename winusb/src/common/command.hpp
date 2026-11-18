@@ -38,6 +38,9 @@ namespace command {
 		NONE = 0,	// request
 		SUCCEEDED,	// response
 		FAILED,		// response
+		// 抜去済みの機器の受信機で要求が失敗したことを示す。BonDriver はこの応答で新しい機器へつなぎ直す。
+		// SUCCEEDED 以外を失敗として扱う古い BonDriver には FAILED と同じ意味になる
+		DEVICE_REMOVED,	// response
 	};
 
 	struct CtrlCmdHeader {
