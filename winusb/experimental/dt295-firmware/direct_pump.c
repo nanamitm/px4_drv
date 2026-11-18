@@ -69,17 +69,6 @@ static unsigned sync_at(unsigned cursor)
     return ring_word(cursor) >> 24 == 0x47;
 }
 
-/* 1 USBパケットぶんの全レコードを確認してからFIFOへ書く。 */
-static unsigned block(unsigned cursor, unsigned phase)
-{
-    unsigned first = phase ? 188 - phase : 0;
-    unsigned raw = phase ? first + 4 : 0;
-    for (; first < 512; first += 188, raw += 192)
-        if (!sync_at(advance(cursor, raw)))
-            return 0;
-    return 1;
-}
-
 __attribute__((noinline)) static void pump(uint32_t *packet)
 {
     unsigned cursor = packet[6], budget = packet[7], state = packet[8];
@@ -105,13 +94,17 @@ __attribute__((noinline)) static void pump(uint32_t *packet)
         if (state == UNALIGNED) {
             if (pending < 3 * 192)
                 continue;
-            for (offset = 0; offset < 192; ++offset)
-                if (sync_at(offset) && sync_at(offset + 192) && sync_at(offset + 384))
+            /* 起動時の壊れたレコードで配置の確定を諦めない。見つけた位置を192で割った
+               余りだけ使い、先頭からのTSをホストへ渡して既存フレーマーに同期を回復させる。 */
+            unsigned at;
+            for (at = 0, offset = 0; at + 3 * 192 <= pending; ++at) {
+                if (sync_at(at) && sync_at(at + 192) && sync_at(at + 384))
                     break;
-            if (offset == 192) {
-                error = 3;
-                break;
+                if (++offset == 192)
+                    offset = 0;
             }
+            if (at + 3 * 192 > pending)
+                break;
             cursor = offset;
             phase = 0;
             state = offset << 8;
@@ -127,10 +120,8 @@ __attribute__((noinline)) static void pump(uint32_t *packet)
         }
         if (!(DTP_MMIO(FIFO_STATUS) & 4))
             continue;
-        if (!block(cursor, phase)) {
-            error = 3;
-            break;
-        }
+        /* DMAのレコード長は同期バイトの値によらず192バイト。同期異常もそのまま転送し、
+           ホストの188バイトフレーマーで回復する。単発の破損で録画全体を停止させない。 */
         for (unsigned word = 0; word < 128; ++word) {
             DTP_FIFO_WRITE(ring_word(cursor));
             phase += 4;
