@@ -1,6 +1,7 @@
 #include <array>
 // SPDX-License-Identifier: GPL-2.0-only
 #include "../src/DriverHost_PX4/pxbcud/device.hpp"
+#include "../src/DriverHost_PX4/pxbcud/recovery_budget.hpp"
 #include "msg.h"
 #include <setupapi.h>
 #include <vector>
@@ -18,6 +19,7 @@ unsigned ObservedPxBcudFailureCount();
 unsigned ObservedPxBcudStreamCount();
 void DamagePxBcudPat(unsigned milliseconds);
 unsigned long long DamagedPxBcudPatPackets();
+void BlankPxBcudData(unsigned milliseconds);
 
 int wmain(int argc,wchar_t **argv)
 {
@@ -43,7 +45,8 @@ int wmain(int argc,wchar_t **argv)
     const bool limit_test=argc>5 && !wcscmp(argv[5],L"--auto-limit");
     const bool stop_test=argc>5 && !wcscmp(argv[5],L"--auto-stop");
     const bool pat_test=argc>5 && !wcscmp(argv[5],L"--auto-pat");
-    if (argc>5 && argv[5][0]==L'-' && !recovery_test && !auto_test && !limit_test && !stop_test && !pat_test) return 2;
+    const bool nodata_test=argc>5 && !wcscmp(argv[5],L"--auto-nodata");
+    if (argc>5 && argv[5][0]==L'-' && !recovery_test && !auto_test && !limit_test && !stop_test && !pat_test && !nodata_test) return 2;
     const GUID interface_guid={0x07b21ac1,0x70c2,0x4bfc,{0x8c,0x4b,0xe1,0x3f,0xaf,0x28,0xce,0x5a}};
     HDEVINFO list=SetupDiGetClassDevsW(&interface_guid,nullptr,nullptr,DIGCF_DEVICEINTERFACE|DIGCF_PRESENT);
     if(list==INVALID_HANDLE_VALUE)return 2;
@@ -129,7 +132,28 @@ int wmain(int argc,wchar_t **argv)
         bool limit_observed=false;
         bool stop_observed=false;
         bool pat_observed=false;
-        if (pat_test) {
+        bool nodata_observed=false;
+        if (nodata_test) {
+            // TS が届かない状態が復旧の上限回数を超えて続いても打ち切らず、
+            // データが戻れば選局し直さずに同じ配信世代で受信が再開することを確認する。
+            // 1回の再試行は no_data の5秒を待つため、上限を超える回数の再試行には約50秒かかる。
+            const auto epoch_before=last_epoch.load();
+            const unsigned before_streams=ObservedPxBcudStreamCount();
+            constexpr unsigned BlankMilliseconds=55000;
+            BlankPxBcudData(BlankMilliseconds);
+            std::this_thread::sleep_for(std::chrono::milliseconds(BlankMilliseconds));
+            const unsigned restarts=ObservedPxBcudStreamCount()-before_streams;
+            const auto after_blank=packets.load();
+            std::this_thread::sleep_for(std::chrono::seconds(seconds));
+            bool resumed_lock=false;
+            const int resumed_status=receiver->CheckLock(resumed_lock);
+            nodata_observed=restarts>px4::pxbcud::RecoveryBudget::Limit && !reader_exited &&
+                packets.load()>after_blank && !resumed_status && resumed_lock && last_epoch.load()==epoch_before;
+            std::printf("Auto recovery without data observed=%d restarted_streams=%u limit=%u packets_after_blank=%llu lock_ret=%d original_reader_active=%d\n",
+                nodata_observed,restarts,static_cast<unsigned>(px4::pxbcud::RecoveryBudget::Limit),
+                static_cast<unsigned long long>(packets.load()-after_blank),resumed_status,!reader_exited.load());
+            if (!nodata_observed) switch_failed=true;
+        } else if (pat_test) {
             // 自動復旧の直後に PAT の CRC が通らない状態が pat_timeout (5秒) より長く続いても、
             // 同じチャンネルの受信を止めず、同じ配信世代で TS を渡し続けることを確認する。
             const auto epoch_before=last_epoch.load();
@@ -165,15 +189,18 @@ int wmain(int argc,wchar_t **argv)
             std::printf("Auto recovery cancellation observed=%d stop_ret=%d\n",stop_observed,stop_ret);
             if (!stop_observed) switch_failed=true;
         } else if (limit_test) {
+            // 上限より1回多く続けて失敗させ、上限の回数だけ復旧してから打ち切ることを確認する。
+            // 待機は2回目から250ms刻みで広がり、上限8回では合計約7秒になる。
+            constexpr unsigned Limit=static_cast<unsigned>(px4::pxbcud::RecoveryBudget::Limit);
             const unsigned before_streams=ObservedPxBcudStreamCount();
-            InjectPxBcudCompletionFailure(ERROR_GEN_FAILURE,4);
-            const auto deadline=std::chrono::steady_clock::now()+std::chrono::seconds(10);
-            while (ObservedPxBcudFailureCount()<4 && std::chrono::steady_clock::now()<deadline)
+            InjectPxBcudCompletionFailure(ERROR_GEN_FAILURE,Limit+1);
+            const auto deadline=std::chrono::steady_clock::now()+std::chrono::seconds(20);
+            while (ObservedPxBcudFailureCount()<Limit+1 && std::chrono::steady_clock::now()<deadline)
                 std::this_thread::sleep_for(std::chrono::milliseconds(10));
             std::this_thread::sleep_for(std::chrono::seconds(1));
             bool locked=false;
             const unsigned restarts=ObservedPxBcudStreamCount()-before_streams;
-            limit_observed=ObservedPxBcudFailureCount()==4 && restarts==3 && receiver->CheckLock(locked)==-EIO && !reader_exited;
+            limit_observed=ObservedPxBcudFailureCount()==Limit+1 && restarts==Limit && receiver->CheckLock(locked)==-EIO && !reader_exited;
             std::printf("Auto recovery limit observed=%d injected_failures=%u restarted_streams=%u original_reader_active=%d\n",
                 limit_observed,ObservedPxBcudFailureCount(),restarts,!reader_exited.load());
             if (!limit_observed) switch_failed=true;
@@ -233,7 +260,7 @@ int wmain(int argc,wchar_t **argv)
             locked,lock_status,cnr,cn_status,ret,write_error.load());
         // 自動復旧の故障注入では欠落したCCを観測することが目的であり、
         // 通常受信・手動選局の「CCエラー0」という成功条件とは分けて評価する。
-        const bool continuity_ok=(auto_test || limit_test || stop_test || pat_test) || !cc_errors;
+        const bool continuity_ok=(auto_test || limit_test || stop_test || pat_test || nodata_test) || !cc_errors;
         // PAT の破損の模擬では、TEI を立てた PAT が配信されることを確かめる。
         const bool tei_ok=pat_test || !tei;
         const bool state_ok=stop_test ? stop_observed : limit_test ? limit_observed : locked && !lock_status;

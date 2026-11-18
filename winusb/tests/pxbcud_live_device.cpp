@@ -16,6 +16,8 @@ thread_local std::array<LPOVERLAPPED,5> isoch_operations{};
 // PAT を壊す期限 (steady_clock の値) と、TEI を立てた PAT パケットの数。
 std::atomic<std::chrono::steady_clock::rep> pat_damage_until{0};
 std::atomic<unsigned long long> damaged_pat_packets{0};
+// isoch パケットの長さを 0 にして、TS が届かない状態を模擬する期限 (steady_clock の値)。
+std::atomic<std::chrono::steady_clock::rep> blank_until{0};
 // 受信スレッドが登録したバッファーと、完了待ちの要求のパケット記述子。
 struct Submitted { WINUSB_ISOCH_BUFFER_HANDLE buffer; PUSBD_ISO_PACKET_DESCRIPTOR packets; ULONG count; };
 thread_local std::unordered_map<WINUSB_ISOCH_BUFFER_HANDLE,std::uint8_t*> isoch_buffers;
@@ -75,8 +77,11 @@ BOOL TestGetOverlappedResult(WINUSB_INTERFACE_HANDLE usb, LPOVERLAPPED operation
     if (isoch && (result || result_error!=ERROR_IO_INCOMPLETE)) *slot=nullptr;
     const auto submitted=isoch_submitted.find(operation);
     if (submitted!=isoch_submitted.end() && (result || result_error!=ERROR_IO_INCOMPLETE)) {
-        if (result && !wait && std::chrono::steady_clock::now().time_since_epoch().count()<pat_damage_until.load())
+        const auto now=std::chrono::steady_clock::now().time_since_epoch().count();
+        if (result && !wait && now<pat_damage_until.load())
             DamagePat(submitted->second);
+        if (result && !wait && now<blank_until.load())
+            for (ULONG i=0;i<submitted->second.count;++i) submitted->second.packets[i].Length=0;
         isoch_submitted.erase(submitted);
     }
     // 実際の完了を回収してから失敗を模擬するため、未完了 I/O の寿命や
@@ -112,6 +117,10 @@ void DamagePxBcudPat(unsigned milliseconds)
     pat_damage_until=(std::chrono::steady_clock::now()+std::chrono::milliseconds(milliseconds)).time_since_epoch().count();
 }
 unsigned long long DamagedPxBcudPatPackets() { return damaged_pat_packets.load(); }
+void BlankPxBcudData(unsigned milliseconds)
+{
+    blank_until=(std::chrono::steady_clock::now()+std::chrono::milliseconds(milliseconds)).time_since_epoch().count();
+}
 
 // この翻訳単位は実機試験ツールだけが使用し、配布用ホストは元の
 // device.cpp を直接ビルドする。通常モードでは API の結果をそのまま返す。
