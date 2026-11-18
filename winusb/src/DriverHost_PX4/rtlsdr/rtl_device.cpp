@@ -113,15 +113,10 @@ protected:
         if(!async_tune_)return CheckLock(complete);
         std::lock_guard<std::mutex> lock(mutex_);
         complete=false;
-        if(!available_ || worker_error_)return -ECANCELED;
+        if(!available_)return -ECANCELED;
         if(!open_)return -EINVAL;
-        {
-            // 監視のスレッドが helper を起動し直す間はハンドルを入れ替えるため、同じロックで読む
-            std::lock_guard<std::mutex> handles(handle_mutex_);
-            if(!process_ || WaitForSingleObject(process_.Get(),0)!=WAIT_TIMEOUT)return -ECANCELED;
-        }
-        // 子プロセスへ選局要求を渡した時点で返し、TVTestが旧再生をリセットできるようにする。
-        // USBの初期化・復調は非同期。CheckLock/信号品質は実際のTS出力まで未ロックのまま。
+        // SetFrequency が成功した時点で選局は受付済み。helper の再起動中も受付結果は変えない。
+        // USB 初期化・復調は非同期で、受信状態は CheckLock が返す。
         complete=true;
         return 0;
     }
