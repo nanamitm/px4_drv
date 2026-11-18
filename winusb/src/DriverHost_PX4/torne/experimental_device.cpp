@@ -72,25 +72,25 @@ struct ExperimentalSession {
 		std::vector<std::uint8_t> &response, Clock::time_point deadline,HANDLE stop=nullptr)
 	{
 		std::lock_guard<std::mutex> lock(control_mutex);
-		if (!healthy || !frontend_started) return false;
-		control.Begin(deadline,stop);
-#ifndef PX4_TORNE_EXPERIMENTAL
-        frontend.SetStop(stop);
-#endif
-        const bool ok = frontend.Command(command, body, response, deadline);
-		if (!ok) { healthy = false; bus.Invalidate(); }
-		return ok;
+		return CommandLocked(command, body, response, deadline, stop);
+	}
+	// 統計やロックの確認のように、操作全体の期限を持たない単発の要求に使う。
+	// カード操作が制御mutexを数百ms保持するため、期限をロックの取得前に決めると待ち時間で期限が尽き、
+	// 失敗した要求がセッションを無効にする。期限はロックを取得してから数える。
+	bool CommandWithin(std::uint8_t command, const std::vector<std::uint8_t> &body,
+		std::vector<std::uint8_t> &response, Clock::duration budget, HANDLE stop=nullptr)
+	{
+		std::lock_guard<std::mutex> lock(control_mutex);
+		return CommandLocked(command, body, response, Clock::now() + budget, stop);
 	}
 	bool ReadStatus(std::vector<std::uint8_t> &response, Clock::time_point deadline,
 		HANDLE stop=nullptr, bool retry=false)
 	{
-#ifdef PX4_TORNE_EXPERIMENTAL
-		// 旧診断ヘルパーのプロトコルは 0x13 を使用する。
-		const auto command=0x13;
-#else
-		const auto command=retry ? 0x13 : NativeFrontend::ReadOnlyStatus;
-#endif
-		return Command(static_cast<std::uint8_t>(command), {}, response, deadline, stop) && response.size() == 24;
+		return Command(StatusCommand(retry), {}, response, deadline, stop) && response.size() == 24;
+	}
+	bool ReadStatusWithin(std::vector<std::uint8_t> &response, Clock::duration budget, HANDLE stop=nullptr)
+	{
+		return CommandWithin(StatusCommand(false), {}, response, budget, stop) && response.size() == 24;
 	}
 	void Invalidate()
 	{
@@ -102,6 +102,29 @@ struct ExperimentalSession {
 	{
 		std::lock_guard<std::mutex> lock(control_mutex);
 		return frontend.Error();
+	}
+	static std::uint8_t StatusCommand(bool retry)
+	{
+#ifdef PX4_TORNE_EXPERIMENTAL
+		// 旧診断ヘルパーのプロトコルは 0x13 を使用する。
+		(void)retry;
+		return 0x13;
+#else
+		return static_cast<std::uint8_t>(retry ? 0x13 : NativeFrontend::ReadOnlyStatus);
+#endif
+	}
+	// control_mutexを保持して呼ぶ。
+	bool CommandLocked(std::uint8_t command, const std::vector<std::uint8_t> &body,
+		std::vector<std::uint8_t> &response, Clock::time_point deadline, HANDLE stop)
+	{
+		if (!healthy || !frontend_started) return false;
+		control.Begin(deadline,stop);
+#ifndef PX4_TORNE_EXPERIMENTAL
+        frontend.SetStop(stop);
+#endif
+        const bool ok = frontend.Command(command, body, response, deadline);
+		if (!ok) { healthy = false; bus.Invalidate(); }
+		return ok;
 	}
 	bool InitializeBridge(bool bulk_i2c)
 	{
@@ -384,7 +407,7 @@ public:
 		if (!open_ || !parent_.available_) return -ECANCELED;
 		if (failed_) return -ECANCELED;
 		std::vector<std::uint8_t> response;
-		if (!session_->ReadStatus(response, Clock::now() + std::chrono::seconds(1))) return -ECANCELED;
+		if (!session_->ReadStatusWithin(response, std::chrono::seconds(1))) return -ECANCELED;
 		locked = tuned_ && response[0] == 1;
 		if (capture_) {
 			std::lock_guard<std::mutex> state(state_mutex_);
@@ -398,7 +421,7 @@ public:
 		value = 0;
 		if (!open_ || !parent_.available_) return -ENODEV;
 		std::vector<std::uint8_t> response;
-		if (!session_->ReadStatus(response, Clock::now() + std::chrono::seconds(1))) return -EIO;
+		if (!session_->ReadStatusWithin(response, std::chrono::seconds(1))) return -EIO;
 		double reading = 0;
 		std::size_t offset = 0;
 		if (type == px4::command::StatType::CNR && response[1]) offset = 8;
@@ -519,7 +542,7 @@ private:
                     const auto now=Clock::now();
                     if(now>=next_status) {
                         std::vector<std::uint8_t> response;
-                        if(!session_->ReadStatus(response,now+std::chrono::seconds(1),stop_.value)){worker_error_=ERROR_GEN_FAILURE;return;}
+                        if(!session_->ReadStatusWithin(response,std::chrono::seconds(1),stop_.value)){worker_error_=ERROR_GEN_FAILURE;return;}
                         watch.Lock(response[0]==1,Clock::now());
                         next_status=Clock::now()+std::chrono::seconds(1);
                     }
