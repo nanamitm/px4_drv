@@ -32,10 +32,18 @@ for script, extra in ((root / 'tools/check_dt295_source_firmware.py', []),
 msbuild = shutil.which('msbuild')
 if not msbuild:
     vswhere = Path(os.environ.get('ProgramFiles(x86)', 'C:/Program Files (x86)')) / 'Microsoft Visual Studio/Installer/vswhere.exe'
-    found = subprocess.check_output([str(vswhere), '-latest', '-version', '[17.0,18.0)', '-find', 'MSBuild/Current/Bin/MSBuild.exe'], text=True).strip()
-    if not found:
-        raise SystemExit('Visual Studio 2022 MSBuild not found')
-    msbuild = found.splitlines()[0]
+    # 試験プロジェクトは v143 を既定の toolset とするため、Visual Studio 2022 以降のうち
+    # v143 を Win32 と x64 の双方へ導入済みの環境を選び、併存時は Visual Studio 2022 を優先する。
+    instances = json.loads(subprocess.check_output([str(vswhere), '-all', '-version', '17.0', '-requires', 'Microsoft.Component.MSBuild', '-format', 'json', '-utf8'], encoding='utf-8') or '[]')
+    instances.sort(key=lambda instance: tuple(int(part) for part in instance['installationVersion'].split('.')))
+    for instance in instances:
+        vs = Path(instance['installationPath'])
+        candidate = vs / 'MSBuild/Current/Bin/MSBuild.exe'
+        if candidate.is_file() and all((vs / 'MSBuild/Microsoft/VC/v170/Platforms' / native / 'PlatformToolsets/v143').is_dir() for native in ('Win32', 'x64')):
+            msbuild = str(candidate)
+            break
+    if not msbuild:
+        raise SystemExit('MSBuild with the v143 platform toolset (Win32 and x64) not found; install Visual Studio 2022 or later with the MSVC v143 build tools')
 for platform in (('x86', 'x64') if args.platform == 'both' else (args.platform,)):
     native = 'Win32' if platform == 'x86' else 'x64'
     out = root / 'build' / platform / 'Release-static'

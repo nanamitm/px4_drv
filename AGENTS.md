@@ -208,7 +208,8 @@ make -C driver
 
 ### WinUSB 版
 
-Visual Studio 2022 と v143 toolset を使い、x86 と x64 の双方をビルドします。
+Visual Studio 2022 以降と v143 toolset を使い、x86 と x64 の双方をビルドします。  
+Visual Studio 2022 より新しい版では、インストーラーで MSVC v143 ビルドツールを x86 と x64 の双方へ追加すると、`build.ps1` が MSBuild を検出します。
 
 ```powershell
 Set-Location C:\Develop\px4_drv\winusb

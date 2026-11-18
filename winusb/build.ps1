@@ -38,22 +38,28 @@ try { (Get-Host).UI.RawUI.WindowSize = New-Object System.Management.Automation.H
 
 # MSBuild のパスを環境変数 PATH に追加
 # GitHub Actions では microsoft/setup-msbuild が PATH を設定するため、その設定を優先する
-# ローカル環境では Visual Studio 2022 のエディション差を吸収するため、vswhere で MSBuild を探索する
+# ローカル環境では Visual Studio のエディション差を吸収するため、vswhere で MSBuild を探索する
+# ビルドは PlatformToolset=v143 を明示するため、Visual Studio 2022 以降のうち v143 を x86 と x64 の双方へ導入済みの環境だけを選ぶ
+# Visual Studio 2022 と後継版が併存する場合は、v143 の本来の配布元である Visual Studio 2022 を優先する
 if ((Get-Command msbuild -ErrorAction SilentlyContinue) -eq $null) {
     $vswhere_path = Join-Path -Path ${env:ProgramFiles(x86)} -ChildPath 'Microsoft Visual Studio\Installer\vswhere.exe'
 
     if ((Test-Path $vswhere_path) -eq $True) {
-        $msbuild_file_path = & $vswhere_path -latest -version '[17.0,18.0)' -requires Microsoft.Component.MSBuild -find 'MSBuild\Current\Bin\MSBuild.exe' | Select-Object -First 1
-
-        if ($msbuild_file_path -ne $null) {
-            $msbuild_dir_path = Split-Path $msbuild_file_path -Parent
-            $env:PATH = "$env:PATH;$msbuild_dir_path"
+        $vs_instances = & $vswhere_path -all -version '17.0' -requires Microsoft.Component.MSBuild -format json | ConvertFrom-Json
+        foreach ($vs_instance in @($vs_instances | Sort-Object { [version]$_.installationVersion })) {
+            $msbuild_file_path = Join-Path $vs_instance.installationPath 'MSBuild\Current\Bin\MSBuild.exe'
+            $v143_paths = @('Win32', 'x64') | ForEach-Object { Join-Path $vs_instance.installationPath "MSBuild\Microsoft\VC\v170\Platforms\$_\PlatformToolsets\v143" }
+            if ((Test-Path $msbuild_file_path -PathType Leaf) -and -not ($v143_paths | Where-Object { -not (Test-Path $_ -PathType Container) })) {
+                $msbuild_dir_path = Split-Path $msbuild_file_path -Parent
+                $env:PATH = "$env:PATH;$msbuild_dir_path"
+                break
+            }
         }
     }
 }
 
 if ((Get-Command msbuild -ErrorAction SilentlyContinue) -eq $null) {
-    throw 'MSBuild was not found. Install Visual Studio 2022 with MSBuild.'
+    throw 'MSBuild with the v143 platform toolset (x86 and x64) was not found. Install Visual Studio 2022 or later with MSBuild and the MSVC v143 build tools.'
 }
 
 # カタログファイルと INF の不一致をビルド前に検出し、署名対象と異なるドライバーパッケージの生成を防ぐ
