@@ -8,9 +8,10 @@
 namespace px4::pxbcud {
 // USB FIFO 内に残る前の選局の TS は、同期が合っていても配信しない。
 // CRC が正しく current_next=1 の PAT が選択 TSID と一致した時点で開く。
+// open を指定すると最初から開いた状態で作り、PAT を待たずにすべて通す。
 class PatGate {
 public:
-    explicit PatGate(std::uint16_t tsid):tsid_(tsid) {}
+    explicit PatGate(std::uint16_t tsid,bool open=false):tsid_(tsid),ready_(open) {}
     bool Ready() const {return ready_;}
     bool Accept(const std::uint8_t *p)
     {

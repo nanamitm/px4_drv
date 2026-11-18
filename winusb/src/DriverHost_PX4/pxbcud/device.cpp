@@ -288,19 +288,27 @@ private:
         Clock::time_point outage{};
         bool have_outage=false;
         while (!stop_) {
-            const auto stream_begin=Clock::now();
             try { RunStream(have_outage?&outage:nullptr); }
             catch (...) { failure_time_=Clock::now();worker_error_=ERROR_NOT_ENOUGH_MEMORY; }
             const DWORD error=worker_error_.load();
             if (!error || stop_ || WaitForSingleObject(removed_,0)==WAIT_OBJECT_0) break;
             // 復旧が実って長く受信できていれば、それまでの連続失敗を忘れる。
             // 高負荷で時々失敗する状態と、復旧しても受信が続かない状態を分ける。
-            budget.NoteStream(Clock::now()-stream_begin);
+            // 受信の開始から数えると、データのないまま no_data を待った5秒も受信できた時間になるため、
+            // 最初にデータが届いてから最後に届くまでの時間で判断する。
+            budget.NoteStream(received_span_);
             if (!have_outage || !recovering_) {outage=failure_time_;have_outage=true;}
             const bool retryable=error==ERROR_GEN_FAILURE || error==ERROR_INVALID_PARAMETER ||
                 error==ERROR_TIMEOUT || error==ERROR_SEM_TIMEOUT;
             if (!auto_recovery_ || !retryable) break;
-            if (!budget.Take()) {
+            /*
+             * アンテナの断線、LNB の給電切れ、強い降雨などで TS が届かない間は、1回の再試行が
+             * no_data の5秒を待つため、制御転送でブリッジを占有しない。打ち切ると電波が戻っても
+             * 選局し直すまで録画が止まるため、データが1度も届かなかった受信の失敗は回数に数えず、
+             * 再試行を続ける。
+             */
+            const bool no_data=!received_any_ && (error==ERROR_TIMEOUT || error==ERROR_SEM_TIMEOUT);
+            if (!no_data && !budget.Take()) {
                 msg_err("PX-BCUD: auto recovery exhausted limit=%u healthy_run_seconds=%lld last_win32=%lu recovery_count=%llu\n",
                     static_cast<unsigned>(RecoveryBudget::Limit),
                     static_cast<long long>(RecoveryBudget::HealthyRun.count()),
@@ -309,7 +317,7 @@ private:
             }
             // 実らない再試行を詰めて繰り返すと、同じブリッジの制御転送を占有し続ける。
             // ロックを取る前に待ち、停止要求と抜去の監視を止めない。
-            const auto backoff=budget.Backoff();
+            const auto backoff=no_data?std::chrono::milliseconds::zero():budget.Backoff();
             if (backoff.count()) {
                 if (WaitForSingleObject(removed_,static_cast<DWORD>(backoff.count()))==WAIT_OBJECT_0) break;
                 if (stop_) break;
@@ -321,9 +329,9 @@ private:
             while (!lock.try_lock() && !stop_ && WaitForSingleObject(removed_,10)==WAIT_TIMEOUT) {}
             if (!lock.owns_lock() || stop_ || WaitForSingleObject(removed_,0)==WAIT_OBJECT_0) break;
             ++recovery_count_;
-            msg_warn("PX-BCUD: auto recovery begin count=%llu win32=%lu consecutive=%u backoff_ms=%lld possible_ts_loss=1\n",
+            msg_warn("PX-BCUD: auto recovery begin count=%llu win32=%lu consecutive=%u backoff_ms=%lld no_data=%u possible_ts_loss=1\n",
                 static_cast<unsigned long long>(recovery_count_),error,
-                static_cast<unsigned>(budget.Consecutive()),static_cast<long long>(backoff.count()));
+                static_cast<unsigned>(budget.Consecutive()),static_cast<long long>(backoff.count()),no_data?1u:0u);
             // RunStream の終了時点で全 isoch I/O と登録バッファを回収済み。
             // 選局は変えず、配信リングと epoch/CC を維持して欠落を隠さない。
             io_.Begin(1000);
@@ -390,11 +398,17 @@ private:
         };
         // 要求数は実測で決める。5要求 (40ms) では、優先度引き上げと書込みまとめの後も
         // 完了待ちの最大が40msへ張り付いて isoch が枯れたため、設定で増やせるようにする。
+        // Run が復旧の回数を数えるときに使う、この受信でデータが届いていた区間。
+        received_any_=false;received_span_=Clock::duration::zero();
+        Clock::time_point first_data{};
         const std::size_t request_count=requests_;
         const auto reads_storage=std::make_unique<Read[]>(request_count);
         Read *const reads=reads_storage.get();
         PlainFramer framer;
-        PatGate gate(frontend_.SelectedStream());
+        // 同じチャンネルの自動復旧では、USB FIFO に残る TS も選局中のチャンネルのもので、
+        // PAT で前の選局と区別する必要がない。復旧直後は信号の悪化で TEI が続くことがあり、
+        // PAT を待つと 5 秒の pat_timeout で受信が終わり、選局し直すまで録画が止まる。
+        PatGate gate(frontend_.SelectedStream(),outage!=nullptr);
         std::uint64_t startup_discarded=0;
         std::uint64_t iso_errors=0, empty_packets=0;
         std::vector<std::uint8_t> output;
@@ -542,6 +556,8 @@ private:
                     fail("packet_descriptor",next,ERROR_INVALID_DATA);break;
                 }
                 last_data=Clock::now();
+                if (!received_any_) {received_any_=true;first_data=last_data;}
+                received_span_=last_data-first_data;
                 framer.Feed(r.data.data()+packet.Offset,packet.Length,output);
             }
             entry.framing_end_us=elapsed_us();
@@ -607,6 +623,9 @@ private:
     const std::size_t requests_;
     std::uint64_t recovery_count_=0;
     Clock::time_point failure_time_{};
+    // 受信スレッドだけが読み書きする。
+    bool received_any_=false;
+    Clock::duration received_span_{};
     std::atomic_bool recovering_{false};
     std::mutex mutex_; std::condition_variable closed_;
     bool open_=false, resume_capture_=false,capture_requested_=false;
