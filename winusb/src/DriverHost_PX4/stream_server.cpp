@@ -45,7 +45,7 @@ void StreamServer::StreamConnection::Worker() noexcept
 	}
 	std::size_t size = config_.in_buffer_size;
 	std::unique_ptr<std::uint8_t[]> buf(new std::uint8_t[size]);
-	px4::ReceiverBase *receiver = nullptr;
+	std::shared_ptr<px4::ReceiverBase::StreamBuffer> stream_buf;
 	std::unique_ptr<std::thread> stream_th;
 
 	while (true) {
@@ -64,18 +64,18 @@ void StreamServer::StreamConnection::Worker() noexcept
 		switch (cmd->cmd) {
 		case px4::command::DataCmdCode::SET_DATA_ID:
 		case px4::command::DataCmdCode::SET_DATA_ID_FRAMED:
-			if (receiver)
+			if (stream_buf)
 				break;
 
-			receiver = receiver_manager_.SearchByDataId(cmd->data_id);
-			if (!receiver) {
+			stream_buf = receiver_manager_.BindStream(cmd->data_id);
+			if (!stream_buf) {
 				ret = false;
 				break;
 			}
 
-			receiver->GetStreamBuffer()->PrepareRead();
+			stream_buf->PrepareRead();
 			try {
-				stream_th.reset(new std::thread(&px4::StreamServer::StreamConnection::StreamWorker, this, receiver->GetStreamBuffer(),
+				stream_th.reset(new std::thread(&px4::StreamServer::StreamConnection::StreamWorker, this, stream_buf,
 					cmd->cmd==px4::command::DataCmdCode::SET_DATA_ID_FRAMED));
 			} catch (...) {
 				ret = false;
@@ -85,11 +85,11 @@ void StreamServer::StreamConnection::Worker() noexcept
 			break;
 
 		case px4::command::DataCmdCode::PURGE:
-			if (!receiver)
+			if (!stream_buf)
 				break;
 
 			/* 初期化を諦めた場合は前チャンネルの TS が残るため、記録に残す */
-			if (!receiver->GetStreamBuffer()->Purge())
+			if (!stream_buf->Purge())
 				msg_err("px4::StreamServer::StreamConnection::Worker: Purge() failed.\n");
 
 			break;
@@ -105,8 +105,8 @@ void StreamServer::StreamConnection::Worker() noexcept
 
 	/* 接続終了時はホスト全体の停止を待たず、詰まった送信も取り消す */
 	SetEvent(stream_quit_event_);
-	if (receiver && stream_th) {
-		receiver->GetStreamBuffer()->StopRequest();
+	if (stream_th) {
+		stream_buf->StopRequest();
 
 		stream_th->join();
 		stream_th.reset();

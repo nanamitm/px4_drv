@@ -30,7 +30,7 @@ public:
 		const DeviceIdentity &identity = {}, bool open_outside_lock = false);
 	bool Unregister(px4::ReceiverBase *receiver);
 	px4::ReceiverBase* SearchAndOpen(px4::command::ReceiverInfo &key, px4::command::ReceiverInfo &info, std::uint32_t &data_id);
-	px4::ReceiverBase* SearchByDataId(std::uint32_t data_id);
+	std::shared_ptr<px4::ReceiverBase::StreamBuffer> BindStream(std::uint32_t data_id);
 	void ClearDataId(px4::ReceiverBase *receiver);
 	// 抜去通知を受けた機器の受信機を記録する。機器の破棄が後回しになると登録が残るため、検索の対象から外す
 	void MarkRemoved(const std::wstring &path);
