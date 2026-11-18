@@ -9,6 +9,7 @@
 
 #include "atr_length.hpp"
 #include "smart_card.hpp"
+#include "../src/DriverHost_PX4/dt295/card_response.hpp"
 
 namespace {
 
@@ -42,6 +43,7 @@ public:
 		if (!is_present)
 			return -ENODEV;
 		reset_count++;
+		dt295_response.Reset();
 		read_queue.clear();
 		/* セッション再構築でカード側の N(S) も初期値へ戻る */
 		response_sequence = 0;
@@ -68,6 +70,16 @@ public:
 
 	int IsCardDataReady(bool &ready) override
 	{
+		if (use_dt295_response) {
+			// UARTから1バイトずつ届く場合も、製品コードの完成判定を経由する。
+			if (!dt295_response.Ready() && !read_queue.empty()) {
+				const auto byte = read_queue.front();
+				read_queue.pop_front();
+				if (const int rc = dt295_response.Append(&byte, 1)) return rc;
+			}
+			ready = dt295_response.Ready();
+			return 0;
+		}
 		if (ready_delay_checks) {
 			ready_delay_checks--;
 			ready = false;
@@ -96,6 +108,10 @@ public:
 
 	int ReadCardData(std::uint8_t *buffer, std::uint8_t &length) override
 	{
+		if (use_dt295_response) {
+			length = static_cast<std::uint8_t>(dt295_response.Read(buffer, length));
+			return 0;
+		}
 		if (atr_pending_without_ready) {
 			atr_read_without_ready = true;
 		} else if (!read_allowed) {
@@ -341,6 +357,8 @@ public:
 	};
 	std::uint32_t baudrate = 9600;
 	bool expected_crc = false;
+	bool use_dt295_response = false;
+	px4::dt295::CardResponse dt295_response;
 	std::vector<std::uint8_t> written_pcbs;
 	std::vector<std::uint8_t> ifs_values;
 	std::vector<std::uint8_t> apdu_block_lengths;
@@ -546,6 +564,23 @@ int main()
 		crc_present && crc_initialized && crc_atr.size() == 8,
 		"TA3 / TC3 CRC parameters were not applied.") && succeeded;
 	crc_card.Close();
+
+	/* PIX-DT295の製品用バッファとSmartCardを接続し、CRC付きS/Iブロックを通す。 */
+	auto dt295_device = std::make_shared<MockCardDevice>();
+	dt295_device->atr_bytes = { 0x3b, 0x90, 0x12, 0x81, 0x41, 0x01, 0x43 };
+	dt295_device->expected_crc = true;
+	dt295_device->is_present = true;
+	dt295_device->use_dt295_response = true;
+	px4::SmartCard dt295_card(dt295_device);
+	succeeded = Check(dt295_card.Open() == 0 &&
+		dt295_card.GetStatus(crc_present, crc_initialized, crc_atr) == 0 && crc_initialized &&
+		dt295_device->baudrate == 19200,
+		"PIX-DT295 buffered CRC initialization failed.") && succeeded;
+	response_length = sizeof(response);
+	succeeded = Check(dt295_card.Transmit(apdu, sizeof(apdu), response, response_length) == 0 &&
+		response_length == 2 && response[0] == 0x90 && response[1] == 0,
+		"PIX-DT295 lost the last CRC byte of a fragmented response.") && succeeded;
+	dt295_card.Close();
 
 	/* ACAS の TA1=13 は PPS なしで IT930x の38400bps 設定へ切り替える */
 	auto acas_device = std::make_shared<MockCardDevice>();

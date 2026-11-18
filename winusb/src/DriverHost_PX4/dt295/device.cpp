@@ -4,7 +4,6 @@
 #include "winusb_transport.hpp"
 #include "source_firmware.hpp"
 #include "stall_history.hpp"
-#include "../atr_length.hpp"
 #include "../tc90522_cnr.hpp"
 #include "../stream_overflow.hpp"
 #include "msg.h"
@@ -562,7 +561,7 @@ void Device::Term(){
     if(registered_){receiver_manager_.Unregister(receiver_.get());registered_=false;}
     // 実行中のカード操作がreceiver_を使い終わるまで待ってから破棄する。
     std::lock_guard<std::mutex> card(card_mutex_);
-    card_open_=false;card_received_.clear();card_remaining_=0;card_atr_=true;
+    card_open_=false;card_response_.Reset();
     if(receiver_){receiver_->WaitClosed();receiver_.reset();}
 }
 
@@ -570,14 +569,14 @@ int Device::OpenCard(){
     std::lock_guard<std::mutex> lock(card_mutex_);
     if(!receiver_ || !available_)return -ENODEV;
     if(card_open_)return -EBUSY;
-    card_open_=true;card_atr_=true;card_received_.clear();card_remaining_=0;
+    card_open_=true;card_response_.Reset();
     return 0;
 }
 
 void Device::CloseCard(){
     std::lock_guard<std::mutex> lock(card_mutex_);
     if(!card_open_)return;
-    card_open_=false;card_received_.clear();card_remaining_=0;card_atr_=true;
+    card_open_=false;card_response_.Reset();
     if(available_ && receiver_ && receiver_->Card([](CardUart &uart){return uart.PowerDown();}))
         msg_warn("PIX-DT295: card power down failed\n");
 }
@@ -588,14 +587,14 @@ int Device::DetectCard(bool &detected){
     if(!card_open_ || !available_ || !receiver_)return -ENODEV;
     const int rc=receiver_->Card([&detected](CardUart &uart){return uart.Present(detected);});
     // 抜去を検出したら、受信途中のATRやブロックを次のカードへ持ち越さない。
-    if(rc || !detected){card_received_.clear();card_remaining_=0;card_atr_=true;}
+    if(rc || !detected){card_response_.Reset();}
     return rc;
 }
 
 int Device::ResetCard(){
     std::lock_guard<std::mutex> lock(card_mutex_);
     if(!card_open_ || !available_ || !receiver_)return -ENODEV;
-    card_received_.clear();card_remaining_=0;card_atr_=true;
+    card_response_.Reset();
     return receiver_->Card([](CardUart &uart){return uart.Reset();});
 }
 
@@ -611,26 +610,14 @@ int Device::IsCardDataReady(bool &ready) try {
     std::lock_guard<std::mutex> lock(card_mutex_);
     ready=false;
     if(!card_open_ || !available_ || !receiver_)return -ENODEV;
-    if(card_remaining_){ready=true;return 0;}
+    if(card_response_.Ready()){ready=true;return 0;}
     // 1回に読むバイト数はCardUartが転送方式に合わせて区切り、TSのSERVICEを長く待たせない。
     std::uint8_t bytes[CardUart::BulkChunk]{};std::size_t count=0;
     const int rc=receiver_->Card([&](CardUart &uart){return uart.ReadBytes(bytes,sizeof(bytes),count);});
     if(rc)return rc;
-    if(card_received_.size()+count>518)return -EMSGSIZE;
-    card_received_.insert(card_received_.end(),bytes,bytes+count);
-    if(card_atr_){
-        // ATRの構造から全体の長さを求め、B-CAS以外の形式の正しいATRも受信を終えた時点で渡す。
-        // 長さを超えて溜まった場合はATRの前後に残留バイトがあるため、形式不正として再リセットさせる。
-        std::size_t atr_length=0;
-        const int atr_rc=px4::GetAtrLength(card_received_.data(),card_received_.size(),atr_length);
-        if(atr_rc==-EBADMSG)return atr_rc;
-        if(!atr_rc && card_received_.size()>atr_length)return -EBADMSG;
-        if(!atr_rc && card_received_.size()==atr_length)card_remaining_=atr_length;
-    }else if(card_received_.size()>=3){
-        const auto length=std::size_t(4)+card_received_[2];
-        if(card_received_.size()>=length)card_remaining_=length;
-    }
-    ready=card_remaining_!=0;
+    const int appended=card_response_.Append(bytes,count);
+    if(appended)return appended;
+    ready=card_response_.Ready();
     return 0;
 } catch(...) {return -ENOMEM;}
 
@@ -638,12 +625,7 @@ int Device::ReadCardData(std::uint8_t *buf,std::uint8_t &len){
     std::lock_guard<std::mutex> lock(card_mutex_);
     if(!card_open_ || !available_)return -ENODEV;
     if(!buf || !len)return -EINVAL;
-    const auto count=(std::min)(std::size_t(len),card_remaining_);
-    std::copy_n(card_received_.begin(),count,buf);
-    card_received_.erase(card_received_.begin(),card_received_.begin()+static_cast<std::ptrdiff_t>(count));
-    card_remaining_-=count;
-    if(count && card_atr_ && !card_remaining_)card_atr_=false;
-    len=static_cast<std::uint8_t>(count);
+    len=static_cast<std::uint8_t>(card_response_.Read(buf,len));
     return 0;
 }
 

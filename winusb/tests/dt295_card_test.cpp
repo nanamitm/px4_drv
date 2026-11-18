@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 // PIX-DT295 内蔵カードUARTの手順と、BC要求での直接アクセスを模擬I/Oで確認する。USBは開かない。
 #include "../src/DriverHost_PX4/dt295/card_uart.hpp"
+#include "../src/DriverHost_PX4/dt295/card_response.hpp"
 #include <algorithm>
 #include <cerrno>
 #include <cstddef>
@@ -16,6 +17,67 @@ using px4::dt295::DirectBus;
 namespace {
 int failures = 0;
 #define CHECK(x) do { if (!(x)) { std::printf("FAIL %s:%d %s\n", __FILE__, __LINE__, #x); ++failures; } } while (0)
+
+void TestResponse()
+{
+    // TC3のEDC指定以外が同じATR。TA1=0x12は19200bps、TD1/TD2はT=1。
+    const std::uint8_t crc_atr[]={0x3b,0x90,0x12,0x81,0x41,1,0x43};
+    const std::uint8_t lrc_atr[]={0x3b,0x90,0x12,0x81,0x41,0,0x42};
+    const std::uint8_t crc_block[]={0,0xe1,1,0xfe,0x12,0x34};
+    std::uint8_t out[255]{};
+    px4::dt295::CardResponse response;
+    for(std::size_t n=0;n<sizeof(crc_atr);++n){
+        CHECK(!response.Append(crc_atr+n,1));
+        CHECK(response.Ready()==(n+1==sizeof(crc_atr)));
+    }
+    CHECK(response.Read(out,2)==2 && response.Ready());
+    CHECK(response.Read(out+2,sizeof(out)-2)==sizeof(crc_atr)-2 && !response.Ready());
+    CHECK(!std::memcmp(out,crc_atr,sizeof(crc_atr)));
+    // LRCなら完成する長さまで来ても、CRCの最後の1バイトが届くまでは読ませない。
+    CHECK(!response.Append(crc_block,sizeof(crc_block)-1) && !response.Ready());
+    CHECK(!response.Read(out,sizeof(out)));
+    CHECK(!response.Append(crc_block+sizeof(crc_block)-1,1) && response.Ready());
+    CHECK(response.Read(out,sizeof(out))==sizeof(crc_block) && !response.Ready());
+    CHECK(!std::memcmp(out,crc_block,sizeof(crc_block)));
+
+    // 連結された2応答も1ブロックずつ読み、次の完成判定まで残余を保持する。
+    CHECK(!response.Append(crc_block,sizeof(crc_block)));
+    CHECK(!response.Append(crc_block,sizeof(crc_block)));
+    CHECK(response.Read(out,sizeof(out))==sizeof(crc_block) && !response.Ready());
+    CHECK(!response.Append(out,0) && response.Ready());
+    CHECK(response.Read(out,sizeof(out))==sizeof(crc_block) && !response.Ready());
+
+    // CRCの0バイトINF、および255バイトを超えるフレームを分割して読み出す。
+    const std::uint8_t empty_crc[]={0,0xe0,0,0x12,0x34};
+    CHECK(!response.Append(empty_crc,4) && !response.Ready());
+    CHECK(!response.Append(empty_crc+4,1) && response.Ready());
+    CHECK(response.Read(out,sizeof(out))==5);
+    std::vector<std::uint8_t> large(259,0x55);large[0]=0;large[1]=0;large[2]=254;
+    for(std::size_t at=0;at<large.size();at+=32){
+        const auto count=(std::min)(std::size_t(32),large.size()-at);
+        CHECK(!response.Append(large.data()+at,count));
+        CHECK(response.Ready()==(at+count==large.size()));
+    }
+    CHECK(response.Read(out,sizeof(out))==255 && response.Ready());
+    CHECK(response.Read(out,sizeof(out))==4 && !response.Ready());
+
+    // リセットで未完の応答とCRC指定を捨て、次のカードのLRCを受け付ける。
+    CHECK(!response.Append(crc_block,3));
+    response.Reset();
+    CHECK(!response.Ready() && !response.Read(out,sizeof(out)));
+    CHECK(!response.Append(lrc_atr,sizeof(lrc_atr)));
+    CHECK(response.Read(out,sizeof(out))==sizeof(lrc_atr));
+    CHECK(!response.Append(crc_block,5) && response.Ready());
+    CHECK(response.Read(out,sizeof(out))==5);
+
+    // TC2はT=0用。bit0が立っていてもT=1のCRC指定には使わない。
+    const std::uint8_t tc2_atr[]={0x3b,0x90,0x12,0x41,1,0xc2};
+    response.Reset();
+    CHECK(!response.Append(tc2_atr,sizeof(tc2_atr)));
+    CHECK(response.Read(out,sizeof(out))==sizeof(tc2_atr));
+    CHECK(!response.Append(crc_block,5) && response.Ready());
+    CHECK(response.Read(out,sizeof(out))==5);
+}
 
 struct Op { char kind; std::uint32_t address, value; };
 
@@ -321,6 +383,7 @@ void TestDirect()
 
 int main()
 {
+    TestResponse();
     TestPresent();
     TestReset();
     TestPowerDown();

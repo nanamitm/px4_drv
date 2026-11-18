@@ -3,6 +3,10 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+#include "mb86H/stream_input.h"
+#if defined(_MSC_VER) && !defined(__clang__)
+#define __attribute__(x)
+#endif
 
 static uint32_t *mmio(uint32_t address);
 static void fifo_write(uint32_t word);
@@ -144,19 +148,70 @@ static void returns_when_drained(void)
     assert(packet[2] == 0x80000004 && !packet[10] && !packet[7] && !written);
 }
 
-static void sync_failure_is_atomic(void)
+static unsigned packets;
+static int received(void *ctx, const uint8_t *packet)
+{
+    (void)ctx;
+    assert(packet[0] == 0x47);
+    for (unsigned b = 1; b < 188; ++b)
+        assert(packet[b] >= 0x80 && packet[b] < 0xbf);
+    ++packets;
+    return 0;
+}
+
+/* 実ファームウェアからホストのフレーマーまで通し、同期異常後の正常なTSを確認する。 */
+static void sync_failure_recovers(void)
 {
     populate(0);
-    ring[192 / 4] &= 0x00ffffff;
+    struct mb86H_stream_input input;
+    assert(!mb86H_stream_input_init(&input, MB86H_STREAM_FORMAT_RAW_TS, 0, 188));
+    packets = 0;
     uint32_t packet[16] = {0};
     packet[2] = 4;
     packet[7] = 1;
-    producer = 1920;
+    producer = 64 * 192;
     fifo_status = 4;
     select_reg = 15;
     written = 0;
     dtp_bulk_pump(packet);
-    assert(packet[10] == 3 && !packet[7] && !written);
+    assert(!packet[10] && packet[7] == 1);
+    assert(!mb86H_stream_input_push(&input, 0, output, written, received, NULL));
+    unsigned before = packets;
+    ring[3 * 192 / 4] &= 0x00ffffff;
+    packet[2] = 4;
+    packet[7] = 4;
+    packet[8] = packet[11];
+    written = 0;
+    dtp_bulk_pump(packet);
+    assert(!packet[10] && packet[7] == 4 && written == 4 * 512);
+    for (unsigned at = 0; at < written;) {
+        unsigned size = written - at < 137 ? written - at : 137;
+        assert(!mb86H_stream_input_push(&input, 0, output + at, size, received, NULL));
+        at += size;
+    }
+    assert(packets > before && input.framer.desyncs == 1);
+
+    /* 起動直後に壊れたレコードが続いても、後続の3個の同期で配置を確定する。 */
+    populate(7);
+    for (unsigned r = 0; r < 4; ++r)
+        ring[(7 + r * 192) / 4] &= 0xffffff00;
+    memset(packet, 0, sizeof(packet));
+    packet[2] = 4; packet[7] = 1; packet[8] = UNALIGNED;
+    written = 0;
+    dtp_bulk_pump(packet);
+    assert(!packet[10] && packet[7] == 1 && packet[11] >> 8 == 7);
+
+    /* 同期がない間は送出せず、正常な入力が来た次の要求で開始できる。 */
+    memset(ring, 0, sizeof(ring));
+    memset(packet, 0, sizeof(packet));
+    packet[2] = 4; packet[7] = 1; packet[8] = UNALIGNED;
+    written = 0;
+    dtp_bulk_pump(packet);
+    assert(!packet[10] && !packet[7] && !written && packet[11] == UNALIGNED);
+    populate(7);
+    packet[2] = 4; packet[7] = 1; packet[8] = packet[11];
+    dtp_bulk_pump(packet);
+    assert(!packet[10] && packet[7] == 1);
 }
 
 static void i2c_batch(void)
@@ -276,7 +331,7 @@ int main(void)
 {
     compact_all_offsets();
     returns_when_drained();
-    sync_failure_is_atomic();
+    sync_failure_recovers();
     i2c_batch();
     card_fifo();
     puts("PASS direct PIF1 TS compaction, I2C batch and card FIFO transfer");
