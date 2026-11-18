@@ -132,12 +132,21 @@ struct ExperimentalSession {
 		std::vector<std::uint8_t> &response, Clock::time_point deadline, HANDLE stop)
 	{
 		if (!healthy || !frontend_started) return false;
-		control.Begin(deadline,stop);
-#ifndef PX4_TORNE_EXPERIMENTAL
-        frontend.SetStop(stop);
+		if (stop && WaitForSingleObject(stop, 0) == WAIT_OBJECT_0)
+			return false;
+#ifdef PX4_TORNE_EXPERIMENTAL
+		control.Begin(deadline, stop);
+		const bool ok = frontend.Command(command, body, response, deadline);
+		const bool stopped_cleanly = false;
+#else
+		// 選局の停止はI2C要求の間かフロントエンドの待機で扱う。発行済みのmailbox要求は
+		// 応答を回収し、完了不明の要求を次の選局へ残さない。USB抜去と期限は転送にも適用する。
+		control.Begin(deadline);
+		frontend.SetStop(stop);
+		const bool ok = frontend.Command(command, body, response, deadline);
+		const bool stopped_cleanly = frontend.StoppedCleanly();
 #endif
-        const bool ok = frontend.Command(command, body, response, deadline);
-		if (!ok) { healthy = false; bus.Invalidate(); }
+		if (!ok && !stopped_cleanly) { healthy = false; bus.Invalidate(); }
 		return ok;
 	}
 	bool InitializeBridge(bool bulk_i2c)
