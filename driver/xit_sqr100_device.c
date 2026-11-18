@@ -524,7 +524,7 @@ static int xit_sqr100_device_load_config(struct xit_sqr100_device *xit,
 		return ret;
 	} else if (!tmp) {
 		dev_warn(dev, "EEPROM error.\n");
-		return ret;
+		return -EIO;
 	}
 
 	chrdev_config->system_cap = PTX_ISDB_T_SYSTEM | PTX_ISDB_S_SYSTEM | PTX_J83B_SYSTEM;
