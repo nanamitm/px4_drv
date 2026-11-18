@@ -19,16 +19,12 @@
 
 #include "px4_device_params.h"
 #include "firmware.h"
-#include "ts_sync.h"
+#include "ts_plain_framer.h"
 #include "cxd2856er_cnr.h"
-
-#define XITSQR100_DEVICE_TS_SYNC_COUNT	4
-#define XITSQR100_DEVICE_TS_SYNC_SIZE	(188 * XITSQR100_DEVICE_TS_SYNC_COUNT)
 
 struct xit_sqr100_stream_context {
 	struct ptx_chrdev *chrdev;
-	u8 remain_buf[XITSQR100_DEVICE_TS_SYNC_SIZE];
-	size_t remain_len;
+	struct px4_ts_plain_framer framer;
 };
 
 static void xit_sqr100_device_release(struct kref *kref);
@@ -76,86 +72,17 @@ static int xit_sqr100_backend_set_power(struct xit_sqr100_device *xit,
 	return 0;
 }
 
-static void xit_sqr100_device_stream_process(struct ptx_chrdev *chrdev,
-					     u8 **buf, u32 *len)
+static void xit_sqr100_put_ts(void *context, const unsigned char *data, size_t len)
 {
-	u8 *p = *buf;
-	u32 remain = *len;
-
-	while (likely(remain)) {
-		u32 i = 0;
-		bool sync_remain = false;
-
-		/* XIT-SQR100 は受信機番号のない通常の TS (同期バイト 0x47) を出力する */
-		while (true) {
-			if (likely(((i + 1) * 188) <= remain)) {
-				if (unlikely(!px4_ts_has_plain_sync(p[i * 188])))
-					break;
-			} else {
-				sync_remain = true;
-				break;
-			}
-			i++;
-		}
-
-		if (unlikely(i < XITSQR100_DEVICE_TS_SYNC_COUNT)) {
-			p++;
-			remain--;
-			continue;
-		}
-
-		ptx_chrdev_put_stream(chrdev, p, 188 * i);
-
-		p += 188 * i;
-		remain -= 188 * i;
-
-		if (unlikely(sync_remain))
-			break;
-	}
-
-	*buf = p;
-	*len = remain;
+	ptx_chrdev_put_stream(context, (void *)data, len);
 }
 
 static int xit_sqr100_device_stream_handler(void *context, void *buf, u32 len)
 {
 	struct xit_sqr100_stream_context *stream_ctx = context;
-	u8 *ctx_remain_buf = stream_ctx->remain_buf;
-	u32 ctx_remain_len = stream_ctx->remain_len;
-	u8 *p = buf;
-	u32 remain = len;
 
-	if (unlikely(ctx_remain_len)) {
-		if (likely((ctx_remain_len + len) >= XITSQR100_DEVICE_TS_SYNC_SIZE)) {
-			u32 t = XITSQR100_DEVICE_TS_SYNC_SIZE - ctx_remain_len;
-
-			memcpy(ctx_remain_buf + ctx_remain_len, p, t);
-			ctx_remain_len = XITSQR100_DEVICE_TS_SYNC_SIZE;
-
-			xit_sqr100_device_stream_process(stream_ctx->chrdev,
-							 &ctx_remain_buf,
-							 &ctx_remain_len);
-			if (likely(!ctx_remain_len)) {
-				p += t;
-				remain -= t;
-			}
-
-			stream_ctx->remain_len = 0;
-		} else {
-			memcpy(ctx_remain_buf + ctx_remain_len, p, len);
-			stream_ctx->remain_len += len;
-
-			return 0;
-		}
-	}
-
-	xit_sqr100_device_stream_process(stream_ctx->chrdev, &p, &remain);
-
-	if (unlikely(remain)) {
-		memcpy(stream_ctx->remain_buf, p, remain);
-		stream_ctx->remain_len = remain;
-	}
-
+	px4_ts_plain_feed(&stream_ctx->framer, buf, len,
+			  xit_sqr100_put_ts, stream_ctx->chrdev);
 	return 0;
 }
 
@@ -496,7 +423,7 @@ static int xit_sqr100_chrdev_start_capture(struct ptx_chrdev *chrdev)
 	}
 
 	/* 前の選局の端数を次の選局の TS へつなげない */
-	stream_ctx->remain_len = 0;
+	px4_ts_plain_reset(&stream_ctx->framer);
 
 	ret = itedtv_bus_start_streaming(&xit->it930x.bus,
 					 xit_sqr100_device_stream_handler,
