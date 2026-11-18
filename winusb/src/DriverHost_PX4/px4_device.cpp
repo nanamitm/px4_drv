@@ -662,27 +662,24 @@ int Px4Device::StreamHandler(void *context, void *buf, std::uint32_t len)
 	std::uint8_t *p = static_cast<std::uint8_t*>(buf);
 	std::size_t remain = len;
 
-	if (stream_ctx.remain_len) {
-		if ((stream_ctx.remain_len + len) >= PX4_DEVICE_TS_SYNC_SIZE) {
-			std::uint8_t * remain_buf = stream_ctx.remain_buf;
-			std::size_t t = PX4_DEVICE_TS_SYNC_SIZE - stream_ctx.remain_len;
+	while (stream_ctx.remain_len) {
+		std::size_t take = PX4_DEVICE_TS_SYNC_SIZE - stream_ctx.remain_len;
+		std::uint8_t *tail = stream_ctx.remain_buf;
 
-			memcpy(remain_buf + stream_ctx.remain_len, p, t);
-			stream_ctx.remain_len = PX4_DEVICE_TS_SYNC_SIZE;
-
-			StreamProcess(stream_ctx.stream_buf, &remain_buf, stream_ctx.remain_len);
-			if (!stream_ctx.remain_len) {
-				p += t;
-				remain -= t;
-			}
-
-			stream_ctx.remain_len = 0;
-		} else {
-			memcpy(stream_ctx.remain_buf + stream_ctx.remain_len, p, len);
-			stream_ctx.remain_len += len;
-
+		if (remain < take) {
+			memcpy(stream_ctx.remain_buf + stream_ctx.remain_len, p, remain);
+			stream_ctx.remain_len += remain;
 			return 0;
 		}
+
+		memcpy(stream_ctx.remain_buf + stream_ctx.remain_len, p, take);
+		stream_ctx.remain_len = PX4_DEVICE_TS_SYNC_SIZE;
+		StreamProcess(stream_ctx.stream_buf, &tail, stream_ctx.remain_len);
+		p += take;
+		remain -= take;
+		/* 同期候補が窓の途中にあれば、次の入力を足して検証する。 */
+		if (stream_ctx.remain_len)
+			memmove(stream_ctx.remain_buf, tail, stream_ctx.remain_len);
 	}
 
 	StreamProcess(stream_ctx.stream_buf, &p, remain);

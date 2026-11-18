@@ -188,29 +188,27 @@ static int px4_device_stream_handler(void *context, void *buf, u32 len)
 	u8 *p = buf;
 	u32 remain = len;
 
-	if (unlikely(ctx_remain_len)) {
-		if (likely((ctx_remain_len + len) >= PX4_DEVICE_TS_SYNC_SIZE)) {
-			u32 t = PX4_DEVICE_TS_SYNC_SIZE - ctx_remain_len;
+	while (unlikely(ctx_remain_len)) {
+		u32 take = PX4_DEVICE_TS_SYNC_SIZE - ctx_remain_len;
+		u8 *tail = ctx_remain_buf;
 
-			memcpy(ctx_remain_buf + ctx_remain_len, p, t);
-			ctx_remain_len = PX4_DEVICE_TS_SYNC_SIZE;
-
-			px4_device_stream_process(stream_ctx->chrdev,
-						  &ctx_remain_buf,
-						  &ctx_remain_len);
-			if (likely(!ctx_remain_len)) {
-				p += t;
-				remain -= t;
-			}
-
-			stream_ctx->remain_len = 0;
-		} else {
-			memcpy(ctx_remain_buf + ctx_remain_len, p, len);
-			stream_ctx->remain_len += len;
-
+		if (remain < take) {
+			memcpy(ctx_remain_buf + ctx_remain_len, p, remain);
+			stream_ctx->remain_len = ctx_remain_len + remain;
 			return 0;
 		}
+
+		memcpy(ctx_remain_buf + ctx_remain_len, p, take);
+		ctx_remain_len = PX4_DEVICE_TS_SYNC_SIZE;
+		px4_device_stream_process(stream_ctx->chrdev, &tail,
+					  &ctx_remain_len);
+		p += take;
+		remain -= take;
+		/* 同期候補が窓の途中にあれば、次の入力を足して検証する。 */
+		if (ctx_remain_len)
+			memmove(ctx_remain_buf, tail, ctx_remain_len);
 	}
+	stream_ctx->remain_len = 0;
 
 	px4_device_stream_process(stream_ctx->chrdev, &p, &remain);
 
