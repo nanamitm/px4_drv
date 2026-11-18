@@ -69,7 +69,7 @@ public:
     {
         std::lock_guard<std::mutex> lock(mutex_);
         if(!open_) return;
-        capture_=false;StopHelper();stream_buf_->Stop();frequency_=0;
+        capture_=false;StopHelper();stream_buf_->Stop();stream_started_=false;frequency_=0;
         open_=false;closed_.notify_all();
     }
     int CheckLock(bool &locked) override
@@ -87,13 +87,25 @@ public:
     {
         std::lock_guard<std::mutex> lock(mutex_);
         if(!open_ || !available_)return -ECANCELED;
-        if(!capture){capture_=false;StopHelper();stream_buf_->Stop();return 0;}
+        if(!capture){
+            capture_=false;
+            StopHelper();
+            // バッファを停止するとデータ接続の配信スレッドも終了する。
+            return !stream_started_ || stream_buf_->Purge() ? 0 : -EIO;
+        }
         if(capture_)return -EALREADY;
-        if(!stream_buf_->Alloc(188*8192))return -ENOMEM;
-        stream_buf_->SetDiscardNullPacketsOnOutput(false);
-        stream_buf_->SetThresholdSize(188*16);stream_buf_->Start();capture_=true;
+        if(!stream_started_){
+            if(!stream_buf_->Alloc(188*8192))return -ENOMEM;
+            stream_buf_->SetDiscardNullPacketsOnOutput(false);
+            stream_buf_->SetThresholdSize(188*16);
+            stream_buf_->Start();
+            stream_started_=true;
+        } else if(!stream_buf_->AdvanceEpoch()) {
+            return -EIO;
+        }
+        capture_=true;
         const int result=frequency_?StartHelper():0;
-        if(result){capture_=false;stream_buf_->Stop();}
+        if(result)capture_=false;
         return result;
     }
     int ReadStat(command::StatType type,std::int32_t &value) override
@@ -113,15 +125,10 @@ protected:
         if(!async_tune_)return CheckLock(complete);
         std::lock_guard<std::mutex> lock(mutex_);
         complete=false;
-        if(!available_ || worker_error_)return -ECANCELED;
+        if(!available_)return -ECANCELED;
         if(!open_)return -EINVAL;
-        {
-            // 監視のスレッドが helper を起動し直す間はハンドルを入れ替えるため、同じロックで読む
-            std::lock_guard<std::mutex> handles(handle_mutex_);
-            if(!process_ || WaitForSingleObject(process_.Get(),0)!=WAIT_TIMEOUT)return -ECANCELED;
-        }
-        // 子プロセスへ選局要求を渡した時点で返し、TVTestが旧再生をリセットできるようにする。
-        // USBの初期化・復調は非同期。CheckLock/信号品質は実際のTS出力まで未ロックのまま。
+        // SetFrequency が成功した時点で選局は受付済み。helper の再起動中も受付結果は変えない。
+        // USB 初期化・復調は非同期で、受信状態は CheckLock が返す。
         complete=true;
         return 0;
     }
@@ -361,6 +368,7 @@ private:
     // 起動し直す前に機器の有無を確かめるためのデバイスインターフェースのパス
     std::wstring device_path_;
     bool async_tune_=false;
+    bool stream_started_=false; // mutex_ で保護し、Close まで配信バッファを維持する
     int gain_=297;
     std::uint32_t frequency_=0;
     std::mutex mutex_;std::condition_variable closed_;

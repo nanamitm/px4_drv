@@ -351,10 +351,10 @@ fn run() -> Result<(), String> {
         let mut decoder = StreamingDecoder::new();
         let mut pat = pat::Pat::default();
         let mut out = std::io::stdout().lock();
-        let mut last_ts = Instant::now();
+        let mut last_ts = None;
+        let mut locked_since = None;
         let mut last_iq = Instant::now();
         let mut last_status = Instant::now();
-        let mut had_ts = false;
         let started = Instant::now();
         let mut samples = 0u64;
         let mut dropped = 0u64;
@@ -369,27 +369,36 @@ fn run() -> Result<(), String> {
                     last_iq = Instant::now();
                     samples += bytes.len() as u64 / 2;
                     let ts = decoder.feed(&bytes);
-                    let (accepted, total) = decoder.stats();
+                    let ts = if ts.is_empty() {
+                        ts
+                    } else {
+                        let filtered = pat.append(&ts)?;
+                        dropped += pat.take_dropped();
+                        filtered
+                    };
                     if !ts.is_empty() {
-                        if !had_ts {
+                        if last_ts.is_none() {
                             eprintln!(
                                 "First TS after {:.3}s, input_samples={samples}",
                                 started.elapsed().as_secs_f64()
                             );
                         }
-                        let ts = pat.append(&ts)?;
-                        dropped += pat.take_dropped();
+                        let (accepted, total) = decoder.stats();
                         let quality = (accepted as u64 * 10_000 / total.max(1) as u64) as u32;
                         for chunk in ts.chunks(MAX_TS) {
                             frame(&mut out, 2, chunk, quality, accepted, total)?;
                         }
-                        had_ts = true;
-                        last_ts = Instant::now();
-                    } else if had_ts && last_ts.elapsed() > Duration::from_secs(5) {
-                        eprintln!("TS lost; resetting decoder and PAT state");
-                        decoder = StreamingDecoder::new();
-                        pat = pat::Pat::default();
-                        had_ts = false;
+                        last_ts = Some(Instant::now());
+                    } else if decoder.is_locked() {
+                        // 初期同期が成立してから、有効な TS が一度も出ない場合も監視する。
+                        let since = last_ts.unwrap_or_else(|| *locked_since.get_or_insert_with(Instant::now));
+                        if since.elapsed() > Duration::from_secs(5) {
+                            eprintln!("No valid TS; resetting decoder and PAT state");
+                            decoder = StreamingDecoder::new();
+                            pat = pat::Pat::default();
+                            locked_since = None;
+                            last_ts = None;
+                        }
                     }
                 }
                 Err(mpsc::RecvTimeoutError::Disconnected) => break,
@@ -401,7 +410,7 @@ fn run() -> Result<(), String> {
             }
             if last_status.elapsed() >= Duration::from_millis(250) {
                 let (accepted, total) = decoder.stats();
-                let receiving = had_ts && last_ts.elapsed() < Duration::from_secs(3);
+                let receiving = last_ts.is_some_and(|ts| ts.elapsed() < Duration::from_secs(3));
                 let quality = if receiving {
                     (accepted as u64 * 10_000 / total.max(1) as u64) as u32
                 } else {
