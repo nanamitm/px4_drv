@@ -123,16 +123,34 @@ pub struct Pat {
     cc: u8,
     version: u8,
     since: usize,
+    dropped: u64,
 }
+
+/// DriverHost が形式不正としてフレームごと helper を止めるパケットか。
+/// 同期バイトの誤り、TEI、adaptation_field_control が 0、adaptation field の長さが 183 を超えるもの。
+/// 復調器は RS の訂正に成功したパケットだけを出すが、訂正能力を超える誤りを誤って訂正したパケットで
+/// こうした値が生じることがある。msi2500_frontend の retain_valid_packets と同じ条件。
+fn rejected_by_host(p: &[u8]) -> bool {
+    let afc = (p[3] >> 4) & 3;
+    p[0] != 0x47 || p[1] & 0x80 != 0 || afc == 0 || (afc & 2 != 0 && p[4] > 183)
+}
+
 impl Pat {
+    /// 前回の呼び出しから取り除いたパケットの数を返し、数え直す。
+    pub fn take_dropped(&mut self) -> u64 {
+        std::mem::take(&mut self.dropped)
+    }
     pub fn append(&mut self, input: &[u8]) -> Result<Vec<u8>, String> {
         if input.len() % 188 != 0 {
             return Err("Decoder returned unaligned TS".into());
         }
         let mut out = Vec::with_capacity(input.len() + 188 * (input.len() / 188 / 64 + 1));
         for p in input.chunks_exact(188) {
-            if p[0] != 0x47 || p[1] & 0x80 != 0 {
-                return Err("Decoder returned invalid TS".into());
+            // 1 パケットの誤訂正で受信全体を止めると、選局し直すまで録画が止まる。取り除いて数え、
+            // 欠落は配信先が continuity counter で検出する。
+            if rejected_by_host(p) {
+                self.dropped += 1;
+                continue;
             }
             let pid = (((p[1] & 31) as u16) << 8) | p[2] as u16;
             if pid == 0 || pid == 0x11 || (0x1fc8..=0x1fcf).contains(&pid) {
@@ -237,6 +255,27 @@ mod tests {
         p[4] = 255;
         pat.append(&p).unwrap();
         assert_eq!(pat.tsid, None);
+    }
+    #[test]
+    fn drops_packets_driverhost_would_reject() {
+        // 誤訂正で生じうる 4 種類のパケットを取り除き、正しいパケットの処理は続ける。
+        let good = section(0x1fc8, 2, 123);
+        let mut bad_sync = good;
+        bad_sync[0] = 0x46;
+        let mut tei = good;
+        tei[1] |= 0x80;
+        let mut afc0 = good;
+        afc0[3] &= 0xcf;
+        let mut long_af = good;
+        long_af[3] = 0x30;
+        long_af[4] = 184;
+        let input = [bad_sync, tei, afc0, long_af, good].concat();
+        let mut pat = Pat::default();
+        let out = pat.append(&input).unwrap();
+        assert_eq!(out, good.to_vec());
+        assert_eq!(pat.take_dropped(), 4);
+        assert_eq!(pat.take_dropped(), 0);
+        assert_eq!(pat.programs.get(&0x1fc8), Some(&123));
     }
     #[test]
     fn retains_broadcast_pat() {

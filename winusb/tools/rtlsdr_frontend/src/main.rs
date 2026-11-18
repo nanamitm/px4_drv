@@ -357,6 +357,7 @@ fn run() -> Result<(), String> {
         let mut had_ts = false;
         let started = Instant::now();
         let mut samples = 0u64;
+        let mut dropped = 0u64;
         loop {
             if stop.load(Ordering::Relaxed) {
                 break;
@@ -377,6 +378,7 @@ fn run() -> Result<(), String> {
                             );
                         }
                         let ts = pat.append(&ts)?;
+                        dropped += pat.take_dropped();
                         let quality = (accepted as u64 * 10_000 / total.max(1) as u64) as u32;
                         for chunk in ts.chunks(MAX_TS) {
                             frame(&mut out, 2, chunk, quality, accepted, total)?;
@@ -415,6 +417,9 @@ fn run() -> Result<(), String> {
         }
         let (accepted, total) = decoder.stats();
         eprintln!("RS accepted={accepted} total={total}");
+        if dropped > 0 {
+            eprintln!("Dropped {dropped} packets that DriverHost would reject (sync, TEI or invalid adaptation field)");
+        }
         Ok(())
     })();
     stop.store(true, Ordering::Relaxed);
