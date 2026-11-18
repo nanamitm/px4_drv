@@ -49,27 +49,34 @@ static int xit_sqr100_backend_set_power(struct xit_sqr100_device *xit,
 	if (state) {
 		ret = it930x_write_gpio(it930x, 5, true);
 		if (ret)
-			return ret;
+			goto power_off;
 
 		msleep(50);
 
 		ret = it930x_write_gpio(it930x, 2, false);
 		if (ret)
-			return ret;
+			goto power_off;
 
 		msleep(100);
 
 		ret = it930x_write_gpio(it930x, 2, true);
 		if (ret)
-			return ret;
+			goto power_off;
 
 		msleep(20);
-	} else {
+		return 0;
+	}
+
+power_off:
+	/* 投入途中で失敗した場合も、まだ利用者がいないため両方を停止する。
+	 * 停止時の結果で、呼び出し元へ返す投入失敗を上書きしない。
+	 */
+	if (atomic_read(&xit->available)) {
 		it930x_write_gpio(it930x, 5, false);
 		it930x_write_gpio(it930x, 2, false);
 	}
 
-	return 0;
+	return ret;
 }
 
 static void xit_sqr100_put_ts(void *context, const unsigned char *data, size_t len)
