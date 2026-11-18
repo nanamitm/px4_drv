@@ -92,6 +92,19 @@ struct ExperimentalSession {
 	{
 		return CommandWithin(StatusCommand(false), {}, response, budget, stop) && response.size() == 24;
 	}
+	// 制御転送の失敗後は、応答の分からないI2C要求がmailboxに残っている可能性があり、同じbootstrapの
+	// 世代のbusは再利用できない。受信とカードは同じセッションを共有するため、カードが開いたままだと
+	// セッションが作り直されず、受信機を開き直しても初期化できなかった。受信機を開くときに限り、
+	// bootstrapから新しい世代を作り直す。カードのT=1の状態は上位のSmartCardが次のAPDUで作り直す。
+	bool Recover(bool bulk_i2c)
+	{
+		std::lock_guard<std::mutex> lock(control_mutex);
+		if (healthy) return true;
+		msg_warn("torne: reinitializing the bridge after a failed control transfer\n");
+		if (!InitializeBridge(bulk_i2c)) return false;
+		healthy = true;
+		return true;
+	}
 	void Invalidate()
 	{
 		std::lock_guard<std::mutex> lock(control_mutex);
@@ -358,6 +371,11 @@ public:
 		try {
 			session_ = parent_.AcquireSession();
 			if (!session_) return -EIO;
+			if (!session_->Recover(parent_.bulk_i2c_)) {
+				msg_err("torne: bridge reinitialization failed.\n");
+				session_.reset();
+				return -EIO;
+			}
 			if (!session_->InitializeFrontend(parent_.output_error_packets_, (parent_.batch_i2c_writes_ || parent_.bulk_i2c_))) {
 				msg_err("torne: initialize failed (%s).\n", session_->FrontendError().c_str());
 				SleepFrontend();
