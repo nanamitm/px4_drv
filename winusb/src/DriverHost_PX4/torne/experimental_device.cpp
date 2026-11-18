@@ -756,7 +756,7 @@ int ExperimentalDevice::Init()
 	info.receiver_guid = definition.guid;
 	info.systems = px4::SystemType::ISDB_T;
 	info.index = definition.index;
-	registered_ = receiver_manager_.Register(info, receiver_.get(), GetDeviceIdentity());
+	registered_ = receiver_manager_.Register(info, receiver_.get(), GetDeviceIdentity(), true);
 	return registered_ ? 0 : -EIO;
 }
 void ExperimentalDevice::Term()
