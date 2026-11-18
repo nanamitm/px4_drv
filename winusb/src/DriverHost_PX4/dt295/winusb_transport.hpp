@@ -28,6 +28,10 @@ public:
     void Begin(unsigned milliseconds) { deadline_=Clock::now()+std::chrono::milliseconds(milliseconds); }
     // 失敗した要求を再送せず、保存済み前像を戻すときだけ通信を再開する。
     void BeginRestore(unsigned milliseconds) { failed_=0; Begin(milliseconds); }
+    int Failed() const { return failed_; }
+    // カード操作のように、失敗した要求の結果へ後続が依存しない操作の終わりに、呼び出し元が失敗を解除する。
+    // 失敗した要求そのものは再送しない。
+    void ClearFailure() { failed_=0; }
     dt295_io Callbacks();
     DWORD LastError() const { return last_error_; }
     void ReportTiming(const char *stage);

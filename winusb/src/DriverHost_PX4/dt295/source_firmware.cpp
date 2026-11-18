@@ -489,6 +489,11 @@ int SourceFirmware::Start(dt295_io io)
         msg_info("PIX-DT295: %s ready\n", direct_ ? "direct-fr PIF1" : "source-fr PIF1 raw TS");
         return 0;
     } catch (int error) {
+        // ブート領域やシステム設定が電源投入直後の値と異なる。前回のDriverHost_PX4が強制終了などで
+        // 復元を終えずにPIF1を残した場合に起きる。保存済み前像がないため、本体の再接続でしか戻せない。
+        if (error == -EPROTO && stage == std::string("boot validation"))
+            msg_err("PIX-DT295 %s: device is not in its power-on state, possibly because a previous DriverHost_PX4 "
+                "ended without restoring it; reconnect the USB cable and try again\n", direct_ ? "direct-fr" : "source-fr");
         return Failure(stage, error);
     } catch (const std::bad_alloc &) {
         return Failure(stage, -ENOMEM);
@@ -627,9 +632,11 @@ bool SourceFirmware::IsLocked()
 
 int SourceFirmware::Tune(bool satellite, uint32_t khz, uint32_t tsid)
 {
+    // 地デジはUHF 13〜62chの中心周波数を受け付ける。上限の770 MHzと700 MHz以上のRF設定はpix-userlandの
+    // frequency()と同じで、51ch以上を使う中継局があるため700 MHz未満へ限らない。
     if (!ready_ || ring_running_ ||
         (satellite ? khz < 950000 || khz > 2150000 || tsid > 0xffff
-                   : khz < 473000 || khz >= 700000))
+                   : khz < 473000 || khz > 770000))
         return -EINVAL;
     tuned_ = false;
     try {
@@ -827,9 +834,14 @@ void SourceFirmware::Restore()
     if (clock_changed_)
         Checked(Clock, clock_);
     int sleep_error = 0;
-    if (satellite_ && ready_) {
+    // 最後に選局した側のRFと出力を止める。地デジ側の値はpix-userlandが初期化の最後に地デジを
+    // 休止させる手順と同じで、Tuneが衛星へ切り替える前に使うTerrestrialSleepと共通にする。
+    if (ready_) {
         try {
-            SatelliteSleep();
+            if (satellite_)
+                SatelliteSleep();
+            else
+                TerrestrialSleep();
         } catch (int error) {
             // RFの停止要求が失敗してもI²C設定とブート領域の復元を試みる。
             sleep_error = error;
