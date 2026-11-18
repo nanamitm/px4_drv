@@ -441,7 +441,35 @@ void CardServer::CardConnection::Worker() noexcept
 				}
 				auto requested_mode =
 					static_cast<card_command::ShareMode>(command.share_mode);
-				int ret = card_parent_.ChangeShareMode(card_, share_mode_, requested_mode);
+				int ret = 0;
+				/*
+				 * 接続が持つ SharedCard は接続した時点の DeviceBase に結び付いている
+				 * 同じリーダー名の機器を挿し直すと別の DeviceBase が作られるため、古い機器へ再接続を続けると
+				 * SCardReconnect() で回復する利用側が復旧できない。現在の機器が別なら、CONNECT と同じく取得し直す
+				 * 機器が戻っていない間は従来どおり古い機器で失敗させ、抜去 (REMOVED) を返す
+				 */
+				auto current_device = card_parent_.device_manager_.FindCardReader(reader_);
+				if (current_device && current_device != card_->device) {
+					const std::wstring reader = reader_;
+					ReleaseCard();
+					auto card = card_parent_.AcquireCard(reader, requested_mode, ret);
+					if (!card) {
+						command.status = card_command::Status::FAILED;
+						if (ret == -ENOENT)
+							command.error = card_command::Error::NO_READER;
+						else
+							SetError(command, ret);
+						if (CardLogEnabled())
+							msg_warn("reconnect reader=%ls share=%s result=%d (replugged device)\n",
+								reader.c_str(), ShareModeName(requested_mode), ret);
+						break;
+					}
+					card_ = std::move(card);
+					share_mode_ = requested_mode;
+					reader_ = reader;
+				} else {
+					ret = card_parent_.ChangeShareMode(card_, share_mode_, requested_mode);
+				}
 				if (!ret) {
 					share_mode_ = requested_mode;
 					std::lock_guard<std::recursive_mutex> lock(card_->io_mutex);
