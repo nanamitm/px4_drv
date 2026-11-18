@@ -95,6 +95,10 @@ public:
             StopWorker(); return ret;
         }
         open_=true; tuned_=false; capture_=false; locked_=false; cnr_=0;
+        // Initialize は ISDB-T のモードを確かめてから成功を返す。前の open が失敗状態のまま閉じると、Close は
+        // 通常の firmware への読み込み直しを省き、loaded_ に J.83B が残る。そのままでは J.83B の選局が
+        // J.83B 用の firmware を読み込まずに IQ の送出を要求し、通常の firmware が応答せずに失敗する
+        loaded_=Loaded::Isdbt;
         signal_log_=(msg_get_mode() & (MSG_MODE_LOG_FILE | MSG_MODE_CONSOLE))!=0; signal_={}; signal_base_={};
         msg_info("PX-S1UD: opened firmware=%u.%u\n",frontend_.Version()>>8,frontend_.Version()&255);
         return 0;
