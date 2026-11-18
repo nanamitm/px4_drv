@@ -15,7 +15,7 @@ use crate::ofdm::{self, Ofdm, SymbolOut, Tmcc};
 use crate::raw384::decode_block;
 use crate::remux::{RemuxStats, Remuxer};
 use std::io::Write;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{sync_channel, Receiver, SyncSender, TrySendError};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
@@ -156,7 +156,11 @@ pub struct Live {
 }
 
 impl Live {
-    pub fn start(mut cfg: LiveConfig) -> (Live, Feeder) {
+    pub fn start(cfg: LiveConfig) -> (Live, Feeder) {
+        Self::start_with_reset(cfg, None)
+    }
+
+    pub fn start_with_reset(mut cfg: LiveConfig, reset: Option<Arc<AtomicBool>>) -> (Live, Feeder) {
         let (raw_tx, raw_rx) = sync_channel::<Vec<u8>>(cfg.raw_queue);
         let stats = Arc::new(Mutex::new(LiveStats { segments: 1, ..Default::default() }));
         let overflow = Arc::new(AtomicU64::new(0));
@@ -190,7 +194,7 @@ impl Live {
         let st = stats.clone();
         let ofdm_thread = std::thread::Builder::new()
             .name("ofdm".into())
-            .spawn(move || ofdm_loop(raw_rx, fec_tx, st))
+            .spawn(move || ofdm_loop(raw_rx, fec_tx, st, reset))
             .expect("spawn ofdm thread");
         let feeder = Feeder { tx: raw_tx, buf: Vec::with_capacity(CHUNK_BLOCKS * BLOCK), overflow: overflow.clone() };
         (Live { overflow, stats, ofdm_thread: Some(ofdm_thread), fec_threads }, feeder)
@@ -216,7 +220,12 @@ impl Live {
     }
 }
 
-fn ofdm_loop(rx: Receiver<Vec<u8>>, fec_tx: Vec<SyncSender<FecMsg>>, stats: Arc<Mutex<LiveStats>>) {
+fn ofdm_loop(
+    rx: Receiver<Vec<u8>>,
+    fec_tx: Vec<SyncSender<FecMsg>>,
+    stats: Arc<Mutex<LiveStats>>,
+    reset: Option<Arc<AtomicBool>>,
+) {
     let mut counter = BlockCounter::new(384);
     let mut ofdm = Ofdm::new();
     let mut samples = Vec::with_capacity(CHUNK_BLOCKS * 384);
@@ -227,7 +236,12 @@ fn ofdm_loop(rx: Receiver<Vec<u8>>, fec_tx: Vec<SyncSender<FecMsg>>, stats: Arc<
     let mut erased_done = 0u64;
     // 誤り訂正のスレッドが終わっていたら、それ以上は送らずに終える
     let send_sym = |s: Arc<SymbolOut>| fec_tx.iter().all(|t| t.send(FecMsg::Sym(s.clone())).is_ok());
-    let send_reset = || fec_tx.iter().all(|t| t.send(FecMsg::Reset).is_ok());
+    let restart = |ofdm: &mut Ofdm, segments: &mut u64, erased_done: &mut u64| {
+        *erased_done += ofdm.stats.erased_symbols;
+        *ofdm = Ofdm::new();
+        *segments += 1;
+        fec_tx.iter().all(|t| t.send(FecMsg::Reset).is_ok())
+    };
     let run = |samples: &mut Vec<_>, ofdm: &mut Ofdm, symbols: &mut u64| -> bool {
         if samples.is_empty() {
             return true;
@@ -243,6 +257,12 @@ fn ofdm_loop(rx: Receiver<Vec<u8>>, fec_tx: Vec<SyncSender<FecMsg>>, stats: Arc<
         true
     };
     'outer: for chunk in rx {
+        if reset.as_ref().is_some_and(|flag| flag.swap(false, Ordering::Relaxed)) {
+            eprintln!("[live] no valid TS; resetting OFDM and FEC");
+            if !restart(&mut ofdm, &mut segments, &mut erased_done) {
+                break;
+            }
+        }
         for blk in chunk.chunks_exact(BLOCK) {
             let state = counter.push(blk);
             if matches!(state, BlockState::Gap(_) | BlockState::Backward) && counter.gaps + counter.backward <= 12 {
@@ -272,10 +292,7 @@ fn ofdm_loop(rx: Receiver<Vec<u8>>, fec_tx: Vec<SyncSender<FecMsg>>, stats: Arc<
                     if !run(&mut samples, &mut ofdm, &mut symbols) {
                         break 'outer;
                     }
-                    erased_done += ofdm.stats.erased_symbols;
-                    ofdm = Ofdm::new();
-                    segments += 1;
-                    if !send_reset() {
+                    if !restart(&mut ofdm, &mut segments, &mut erased_done) {
                         break 'outer;
                     }
                 }
@@ -444,4 +461,27 @@ pub fn process_usage() -> (f64, usize, usize) {
         K32GetProcessMemoryInfo(h, &mut pmc, pmc.cb);
     }
     (secs(&k) + secs(&u), pmc.WorkingSetSize, pmc.PagefileUsage)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn requested_ofdm_resync_also_resets_both_fec_layers() {
+        let (input, rx) = sync_channel(1);
+        let (fec_a, rx_a) = sync_channel(1);
+        let (fec_b, rx_b) = sync_channel(1);
+        let stats = Arc::new(Mutex::new(LiveStats::default()));
+        let reset = Arc::new(AtomicBool::new(true));
+        input.send(vec![0; BLOCK]).unwrap();
+        drop(input);
+
+        ofdm_loop(rx, vec![fec_a, fec_b], stats.clone(), Some(reset.clone()));
+
+        assert!(!reset.load(Ordering::Relaxed));
+        assert!(matches!(rx_a.try_recv(), Ok(FecMsg::Reset)));
+        assert!(matches!(rx_b.try_recv(), Ok(FecMsg::Reset)));
+        assert_eq!(stats.lock().unwrap().segments, 2);
+    }
 }
