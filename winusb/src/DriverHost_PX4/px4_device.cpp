@@ -570,6 +570,7 @@ int Px4Device::StartCapture()
 		it930x_.bus.usb.streaming.no_raw_io = config_.usb.no_raw_io;
 
 		stream_ctx_.remain_len = 0;
+		stream_ctx_.locked = false;
 
 		ret = itedtv_bus_start_streaming(&it930x_.bus, StreamHandler, this);
 		if (ret) {
@@ -610,20 +611,34 @@ void Px4Device::StreamProcess(StreamContext &stream_ctx, std::uint8_t **buf, std
 
 	while (remain) {
 		std::size_t i;
-		bool sync_remain = false;
 
-		for (i = 0; i < PX4_DEVICE_TS_SYNC_COUNT; i++) {
-			if (((i + 1) * 188) <= remain) {
-				if (!px4_ts_has_tagged_sync(p[i * 188]))
-					break;
-			} else {
-				sync_remain = true;
+		if (stream_ctx.locked) {
+			u8 id;
+
+			if (remain < 188)
 				break;
+			if (!px4_ts_has_tagged_sync(p[0])) {
+				stream_ctx.locked = false;
+				continue;
 			}
+			id = (p[0] & 0x70) >> 4;
+			if (id && id < 5 && stream_ctx.enabled[id - 1]) {
+				p[0] = 0x47;
+				std::size_t pkt_len = 188;
+				stream_ctx.stream_buf[id - 1]->Write(p, pkt_len);
+			}
+			p += 188;
+			remain -= 188;
+			continue;
 		}
 
-		if (sync_remain)
+		if (remain < PX4_DEVICE_TS_SYNC_SIZE)
 			break;
+
+		for (i = 0; i < PX4_DEVICE_TS_SYNC_COUNT; i++) {
+			if (!px4_ts_has_tagged_sync(p[i * 188]))
+				break;
+		}
 
 		if (i < PX4_DEVICE_TS_SYNC_COUNT) {
 			p++;
@@ -631,19 +646,7 @@ void Px4Device::StreamProcess(StreamContext &stream_ctx, std::uint8_t **buf, std
 			continue;
 		}
 
-		while (remain >= 188 && px4_ts_has_tagged_sync(p[0])) {
-			u8 id = (p[0] & 0x70) >> 4;
-
-			if (id && id < 5 && stream_ctx.enabled[id - 1]) {
-				std::size_t pkt_len = 188;
-
-				p[0] = 0x47;
-				stream_ctx.stream_buf[id - 1]->Write(p, pkt_len);
-			}
-
-			p += 188;
-			remain -= 188;
-		}
+		stream_ctx.locked = true;
 	}
 
 	for (int i = 0; i < 4; i++)
@@ -665,7 +668,8 @@ int Px4Device::StreamHandler(void *context, void *buf, std::uint32_t len)
 	std::size_t remain = len;
 
 	while (stream_ctx.remain_len) {
-		std::size_t take = PX4_DEVICE_TS_SYNC_SIZE - stream_ctx.remain_len;
+		std::size_t need = stream_ctx.locked ? 188 : PX4_DEVICE_TS_SYNC_SIZE;
+		std::size_t take = need - stream_ctx.remain_len;
 		std::uint8_t *tail = stream_ctx.remain_buf;
 
 		if (remain < take) {
@@ -675,7 +679,7 @@ int Px4Device::StreamHandler(void *context, void *buf, std::uint32_t len)
 		}
 
 		memcpy(stream_ctx.remain_buf + stream_ctx.remain_len, p, take);
-		stream_ctx.remain_len = PX4_DEVICE_TS_SYNC_SIZE;
+		stream_ctx.remain_len = need;
 		StreamProcess(stream_ctx, &tail, stream_ctx.remain_len);
 		p += take;
 		remain -= take;

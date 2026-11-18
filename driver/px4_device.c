@@ -23,6 +23,7 @@ struct px4_stream_context {
 	struct ptx_chrdev *chrdev[PX4_CHRDEV_NUM];
 	u8 remain_buf[PX4_DEVICE_TS_SYNC_SIZE];
 	size_t remain_len;
+	bool locked;
 };
 
 static int px4_chrdev_set_lnb_voltage_s(struct ptx_chrdev *chrdev, int voltage);
@@ -132,7 +133,7 @@ static int px4_backend_term(struct px4_device *px4)
 	return 0;
 }
 
-static void px4_device_stream_process(struct ptx_chrdev **chrdev,
+static void px4_device_stream_process(struct px4_stream_context *stream_ctx,
 				      u8 **buf, u32 *len)
 {
 	u8 *p = *buf;
@@ -140,20 +141,33 @@ static void px4_device_stream_process(struct ptx_chrdev **chrdev,
 
 	while (likely(remain)) {
 		u32 i;
-		bool sync_remain = false;
 
-		for (i = 0; i < PX4_DEVICE_TS_SYNC_COUNT; i++) {
-			if (likely(((i + 1) * 188) <= remain)) {
-				if (unlikely(!px4_ts_has_tagged_sync(p[i * 188])))
-					break;
-			} else {
-				sync_remain = true;
+		if (stream_ctx->locked) {
+			u8 id;
+
+			if (remain < 188)
 				break;
+			if (!px4_ts_has_tagged_sync(p[0])) {
+				stream_ctx->locked = false;
+				continue;
 			}
+			id = (p[0] & 0x70) >> 4;
+			if (likely(id && id < 5)) {
+				p[0] = 0x47;
+				ptx_chrdev_put_stream(stream_ctx->chrdev[id - 1], p, 188);
+			}
+			p += 188;
+			remain -= 188;
+			continue;
 		}
 
-		if (unlikely(sync_remain))
+		if (remain < PX4_DEVICE_TS_SYNC_SIZE)
 			break;
+
+		for (i = 0; i < PX4_DEVICE_TS_SYNC_COUNT; i++) {
+			if (!px4_ts_has_tagged_sync(p[i * 188]))
+				break;
+		}
 
 		if (unlikely(i < PX4_DEVICE_TS_SYNC_COUNT)) {
 			p++;
@@ -161,17 +175,7 @@ static void px4_device_stream_process(struct ptx_chrdev **chrdev,
 			continue;
 		}
 
-		while (likely(remain >= 188 && ((p[0] & 0x8f) == 0x07))) {
-			u8 id = (p[0] & 0x70) >> 4;
-
-			if (likely(id && id < 5)) {
-				p[0] = 0x47;
-				ptx_chrdev_put_stream(chrdev[id - 1], p, 188);
-			}
-
-			p += 188;
-			remain -= 188;
-		}
+		stream_ctx->locked = true;
 	}
 
 	*buf = p;
@@ -189,7 +193,8 @@ static int px4_device_stream_handler(void *context, void *buf, u32 len)
 	u32 remain = len;
 
 	while (unlikely(ctx_remain_len)) {
-		u32 take = PX4_DEVICE_TS_SYNC_SIZE - ctx_remain_len;
+		u32 need = stream_ctx->locked ? 188 : PX4_DEVICE_TS_SYNC_SIZE;
+		u32 take = need - ctx_remain_len;
 		u8 *tail = ctx_remain_buf;
 
 		if (remain < take) {
@@ -199,8 +204,8 @@ static int px4_device_stream_handler(void *context, void *buf, u32 len)
 		}
 
 		memcpy(ctx_remain_buf + ctx_remain_len, p, take);
-		ctx_remain_len = PX4_DEVICE_TS_SYNC_SIZE;
-		px4_device_stream_process(stream_ctx->chrdev, &tail,
+		ctx_remain_len = need;
+		px4_device_stream_process(stream_ctx, &tail,
 					  &ctx_remain_len);
 		p += take;
 		remain -= take;
@@ -210,7 +215,7 @@ static int px4_device_stream_handler(void *context, void *buf, u32 len)
 	}
 	stream_ctx->remain_len = 0;
 
-	px4_device_stream_process(stream_ctx->chrdev, &p, &remain);
+	px4_device_stream_process(stream_ctx, &p, &remain);
 
 	if (unlikely(remain)) {
 		memcpy(stream_ctx->remain_buf, p, remain);
@@ -1018,6 +1023,7 @@ static int px4_chrdev_start_capture(struct ptx_chrdev *chrdev)
 		struct px4_stream_context *stream_ctx = px4->stream_ctx;
 
 		stream_ctx->remain_len = 0;
+		stream_ctx->locked = false;
 
 		ret = itedtv_bus_start_streaming(&px4->it930x.bus,
 						 px4_device_stream_handler,
