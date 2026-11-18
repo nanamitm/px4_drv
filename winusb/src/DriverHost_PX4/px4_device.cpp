@@ -254,7 +254,8 @@ int Px4Device::Init()
 	for (auto it = device_def_.receivers.cbegin(); it != device_def_.receivers.cend(); ++it) {
 		px4::command::ReceiverInfo ri;
 
-		if ((it->systems != px4::SystemType::ISDB_T && it->systems != px4::SystemType::ISDB_S) || (it->index < 0 || it->index > 2))
+		/* 各方式の受信機は2系統のため、設定の index は 0 と 1 だけを receivers_ へ対応付ける */
+		if ((it->systems != px4::SystemType::ISDB_T && it->systems != px4::SystemType::ISDB_S) || (it->index < 0 || it->index > 1))
 			continue;
 
 		wcscpy_s(ri.device_name, device_def_.name.c_str());
@@ -1324,6 +1325,15 @@ int Px4Device::Px4Receiver::Open()
 	return ret;
 
 fail:
+	/*
+	 * 開いている受信機がなければ初期化済みの記録を全受信機から消す
+	 * 記録が残ると、電源を入れ直した次回の Open() で復調器とチューナーの初期化が省かれる
+	 */
+	if (!parent_.open_count_) {
+		for (int i = 0; i < 4; i++)
+			parent_.receivers_[i]->Term();
+	}
+
 	if (parent_.mldev_)
 		parent_.mldev_->SetPower(parent_, index_, false, nullptr);
 	else if (!parent_.open_count_ && !parent_.card_open_)
