@@ -78,6 +78,12 @@ private:
 		px4::StreamFrameReader frames_;
 	};
 
+	void ConnectReceiver(px4::CtrlCmdClient &ctrl_client, std::unique_ptr<px4::PipeClient> &data_pipe);
+	std::unique_ptr<std::uint8_t[]> MakeParameterSet(DWORD space, DWORD ch);
+	bool TuneLocked(const px4::command::ParameterSet &param_set, bool &removed);
+	bool ReconnectLocked() noexcept;
+	std::uint32_t PurgeStreamLocked();
+
 	std::mutex mtx_;
 	std::wstring driver_host_path_;
 	px4::ConfigSet configs_;
@@ -94,6 +100,11 @@ private:
 	std::unique_ptr<px4::PipeClient> data_pipe_;
 	BOOL open_;
 	DWORD space_, ch_;
+	// 選局に成功したチャンネルがあり、つなぎ直した後に space_ と ch_ を選局し直せるか
+	bool tuned_ = false;
+	// 受信機の機器が抜去され、新しい機器へのつなぎ直しが済んでいないか
+	bool reconnect_needed_ = false;
+	ULONGLONG next_reconnect_tick_ = 0;
 	BOOL display_error_message_;
 
 	std::mutex stream_mtx_;
