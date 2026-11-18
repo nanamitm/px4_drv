@@ -41,7 +41,6 @@ Px4Device::Px4Device(const std::wstring &path, const px4::DeviceDefinition &devi
 	ParseSerialNumber();
 
 	memset(&it930x_, 0, sizeof(it930x_));
-	memset(&stream_ctx_, 0, sizeof(stream_ctx_));
 }
 
 Px4Device::~Px4Device()
@@ -307,10 +306,9 @@ void Px4Device::Term()
 
 	lock.unlock();
 
-	for (int i = 0; i < 4; i++) {
-		stream_ctx_.stream_buf[i] = nullptr;
-		receivers_[i].reset();
-	}
+	/* Close() は他の受信機と共有バッファを参照するため、すべて閉じるまで保持する。 */
+	for (const auto &receiver : receivers_)
+		receiver->WaitForClose();
 
 	lock.lock();
 
@@ -322,6 +320,12 @@ void Px4Device::Term()
 
 	it930x_term(&it930x_);
 	itedtv_bus_term(&it930x_.bus);
+
+	/* USB ワーカーの終了を待ってからコールバックの参照先を外す。 */
+	for (int i = 0; i < 4; i++) {
+		stream_ctx_.stream_buf[i].reset();
+		receivers_[i].reset();
+	}
 
 	init_ = false;
 	return;
@@ -1056,11 +1060,15 @@ Px4Device::Px4Receiver::~Px4Receiver()
 {
 	dev_dbg(&parent_.dev_, "px4::Px4Device::Px4Receiver::~Px4Receiver(%u)\n", index_);
 
-	std::unique_lock<std::mutex> lock(lock_);
-
-	close_cond_.wait(lock, [this] { return !open_; });
+	WaitForClose();
 
 	dev_dbg(&parent_.dev_, "px4::Px4Device::Px4Receiver::~Px4Receiver(%u): exit\n", index_);
+}
+
+void Px4Device::Px4Receiver::WaitForClose()
+{
+	std::unique_lock<std::mutex> lock(lock_);
+	close_cond_.wait(lock, [this] { return !open_; });
 }
 
 int Px4Device::Px4Receiver::Init(bool sleep)

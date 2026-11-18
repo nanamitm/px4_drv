@@ -155,6 +155,7 @@ private:
 
 		int Init(bool sleep);
 		void Term();
+		void WaitForClose();
 
 		int Open() override;
 		void Close() override;
