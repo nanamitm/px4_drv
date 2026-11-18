@@ -77,7 +77,7 @@ PLEX 社の [Webサイト](http://plex-net.co.jp) にて配布されている公
 #### ビルド・ドキュメント
 
 - ビルドとパッケージングを全自動で行うスクリプトを追加
-  - Visual Studio 2022（C++ 開発環境・v143）と Python 3・Rust/Cargo を用意し、`winusb/build.cmd` または `build.ps1` でビルドとパッケージングを行う。通常ビルドに Go は不要で、開発用の比較試験と移植ソースの再生成にのみ必要。
+  - Visual Studio 2022 以降（C++ 開発環境・MSVC v143 ビルドツール）と Python 3・Rust/Cargo を用意し、`winusb/build.cmd` または `build.ps1` でビルドとパッケージングを行う。通常ビルドに Go は不要で、開発用の比較試験と移植ソースの再生成にのみ必要。
 - fwtool: PX-W3PE5 / PX-Q3PE4 / PX-Q3PE5 / PX-W3U4 / PX-Q3U4 / PX-MLT5PE / PX-MLT8PE の2021年版公式 Windows ドライバからのファームウェア抽出に対応 (v0.6.0 以降)
   - 既定の抽出済みファームウェアで問題なく動作することが知られているため、特段実用性はない
 - README（このページ）に WinUSB 版のインストール方法などを追記
@@ -192,7 +192,7 @@ PLEX PX-S1UD（USB ID `3275:0080`）向けに、WinUSB を直接使う地デジ1
 Windows (WinUSB) 版のドライバは、OS にチューナーを認識させるための inf ファイルと、px4_drv 専用の BonDriver、ドライバの実体でチューナー操作を司る DriverHost_PX4 から構成されています。
 
 **ビルド済みのアーカイブは [tsukumijima/DTV-Builds](https://github.com/tsukumijima/DTV-Builds) からダウンロードできます。**  
-または、winusb フォルダにある build.ps1 を実行して、ご自分でビルドしたものを使うこともできます (Visual Studio 2022 が必要です) 。
+または、winusb フォルダにある build.ps1 を実行して、ご自分でビルドしたものを使うこともできます (Visual Studio 2022 以降と MSVC v143 ビルドツールが必要です) 。
 
 ### 1. 自己署名証明書のインストール
 
