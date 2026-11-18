@@ -151,6 +151,7 @@ public:
             // C/N には helper が報告する復調器の MER (dB) を ISDB-T の CNR と同じ dB×1000 で返す。
             // RS の成功割合は正常受信中にほぼ 100% で変わらず、C/N の目安にならないため。
             // MER をまだ報告していない間 (起動直後と MER を送らない古い helper) は、従来どおり RS の成功割合を返す
+            // helperだけの異常終了では配信接続を閉じず、次の選局でhelperを作り直せるようにする。
             if (iq_helper_.Failed()) return -ECANCELED;
             const auto last=iq_helper_.LastTs();
             locked_=iq_helper_.Ready() && last && GetTickCount64()-last<3000;
@@ -266,9 +267,7 @@ private:
                 overflow->Record(written,size,bytes);
                 stream_buf_->NotifyWrite();
                 return true;
-            },
-            // 読み取りのスレッドから呼ばれるため、mutex_ を取らずに配信の停止だけを要求する
-            [this] {stream_buf_->StopRequest();});
+            });
         if (ret) {msg_err("PX-S1UD: J.83B helper start failed ret=%d helper=%ls\n",ret,j83b_.helper.c_str());return ret;}
         return 0;
     }

@@ -30,10 +30,10 @@ std::wstring Quote(const std::wstring& input)
 void CloseIf(HANDLE& h) {if (h && h!=INVALID_HANDLE_VALUE) CloseHandle(h);h=nullptr;}
 }
 
-int IqHelper::Start(const std::wstring& exe,const std::wstring& log,TsHandler ts,FailHandler fail)
+int IqHelper::Start(const std::wstring& exe,const std::wstring& log,TsHandler ts)
 {
     Stop();
-    ts_=std::move(ts);fail_=std::move(fail);
+    ts_=std::move(ts);
     SECURITY_ATTRIBUTES sa{sizeof(sa),nullptr,TRUE};
     HANDLE child_input=nullptr,child_output=nullptr,child_error=nullptr;
     auto cleanup=[&]{CloseIf(child_input);CloseIf(child_output);CloseIf(child_error);};
@@ -87,7 +87,7 @@ int IqHelper::Start(const std::wstring& exe,const std::wstring& log,TsHandler ts
 
 void IqHelper::Feed(const std::uint8_t* block,std::size_t size)
 {
-    if (!running_) return;
+    if (!running_ || failed_) return;
     std::unique_lock<std::mutex> lock(mutex_);
     if (closing_) return;
     if (queue_.size()>=QueueBlocks) {++dropped_;return;}
@@ -173,7 +173,6 @@ void IqHelper::Fail(const char* reason)
     quality_=0;
     // 書き込み中の WriteFile を終わらせるため、helper を止める
     if (job_) TerminateJobObject(job_,ERROR_INVALID_DATA);
-    if (fail_) fail_();
 }
 
 void IqHelper::Stop()
