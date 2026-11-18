@@ -2,6 +2,7 @@
 #include "device.hpp"
 #include "card_uart.hpp"
 #include "frontend.hpp"
+#include "stream_records.hpp"
 
 #include "../resource.h"
 #include "../tc90522_cnr.hpp"
@@ -794,8 +795,7 @@ private:
                          read.Stage());
             if (stop_)
                 break;
-            if (const int result = Deliver(read.data, read.Size(), overflow))
-                return result;
+            Deliver(read.data, read.Size(), overflow);
             stage = NextStage(end - begin, read.Stage());
             // 未処理量がない状態の操作12の時間は、送出量を流量で割った値に近い。
             if (const auto us = std::chrono::duration_cast<std::chrono::microseconds>(end - begin).count())
@@ -930,19 +930,16 @@ private:
         return WaitForSingleObject(parent_.removed_, milliseconds) == WAIT_TIMEOUT ? 0 : -ENODEV;
     }
 
-    int Deliver(const std::vector<std::uint8_t>& bytes, std::size_t length, px4::StreamOverflowLog& overflow)
+    void Deliver(const std::vector<std::uint8_t>& bytes, std::size_t length, px4::StreamOverflowLog& overflow)
     {
-        // 1レコードは4バイトの接頭辞と188バイトのTS。1回の転送はレコード境界で終わる。
-        for (std::size_t offset = 4; offset < length; offset += 192) {
-            const auto* packet = bytes.data() + offset;
-            if (packet[0] != 0x47)
-                return -EIO;
+        const auto skipped = DeliverRecords(bytes.data(), length, [&](const std::uint8_t* packet) {
             std::size_t size = 188;
             const bool written = stream_buf_->Write(packet, size);
             overflow.Record(written, 188, size);
-        }
+        });
+        if (skipped)
+            msg_warn("GV-MVP/XZ3: discarded %zu TS records with invalid sync\n", skipped);
         stream_buf_->NotifyWrite();
-        return 0;
     }
 
     Device& parent_;
