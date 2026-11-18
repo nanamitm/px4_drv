@@ -526,6 +526,32 @@ fail_backend_power:
 	return ret;
 }
 
+/* px4->lock を保持し、解除に失敗した場合は次の開始または close で再試行する。 */
+static int px4_chrdev_disable_ts_pins(struct ptx_chrdev *chrdev)
+{
+	struct px4_chrdev *chrdev4 = chrdev->priv;
+	struct px4_device *px4 = chrdev4->parent;
+	int ret = 0;
+
+	if (atomic_read(&px4->available)) {
+		switch (chrdev->system_cap) {
+		case PTX_ISDB_T_SYSTEM:
+			ret = tc90522_enable_ts_pins_t(&chrdev4->tc90522, false);
+			break;
+		case PTX_ISDB_S_SYSTEM:
+			ret = tc90522_enable_ts_pins_s(&chrdev4->tc90522, false);
+			break;
+		default:
+			break;
+		}
+	}
+	chrdev4->ts_pin_cleanup_pending = !!ret;
+	if (ret)
+		dev_warn(px4->dev, "TS pin disable failed for receiver %u: %d\n",
+			 chrdev->id, ret);
+	return ret;
+}
+
 static int px4_chrdev_release(struct ptx_chrdev *chrdev)
 {
 	struct ptx_chrdev_group *chrdev_group = chrdev->parent;
@@ -544,6 +570,9 @@ static int px4_chrdev_release(struct ptx_chrdev *chrdev)
 		mutex_unlock(&px4->lock);
 		return -EALREADY;
 	}
+
+	if (chrdev4->ts_pin_cleanup_pending)
+		px4_chrdev_disable_ts_pins(chrdev);
 
 	px4->open_count--;
 	if (!px4->open_count) {
@@ -938,6 +967,16 @@ static int px4_chrdev_start_capture(struct ptx_chrdev *chrdev)
 
 	mutex_lock(&px4->lock);
 
+	if (!atomic_read(&px4->available)) {
+		ret = -ENODEV;
+		goto fail;
+	}
+	if (chrdev4->ts_pin_cleanup_pending) {
+		ret = px4_chrdev_disable_ts_pins(chrdev);
+		if (ret)
+			goto fail;
+	}
+
 	if (!px4->streaming_count) {
 		ret = it930x_purge_psb(&px4->it930x,
 				       px4_device_params.psb_purge_timeout);
@@ -973,7 +1012,7 @@ static int px4_chrdev_start_capture(struct ptx_chrdev *chrdev)
 	}
 
 	if (ret)
-		goto fail;
+		goto fail_pins;
 
 	if (!px4->streaming_count) {
 		struct px4_stream_context *stream_ctx = px4->stream_ctx;
@@ -987,7 +1026,7 @@ static int px4_chrdev_start_capture(struct ptx_chrdev *chrdev)
 			dev_err(px4->dev,
 				"px4_chrdev_start_capture %u:%u: itedtv_bus_start_streaming() failed. (ret: %d)\n",
 				chrdev_group->id, chrdev->id, ret);
-				goto fail_bus;
+				goto fail_pins;
 		}
 	}
 
@@ -1000,19 +1039,9 @@ static int px4_chrdev_start_capture(struct ptx_chrdev *chrdev)
 	mutex_unlock(&px4->lock);
 	return 0;
 
-fail_bus:
-	switch (chrdev->system_cap) {
-	case PTX_ISDB_T_SYSTEM:
-		tc90522_enable_ts_pins_t(tc90522, false);
-		break;
-
-	case PTX_ISDB_S_SYSTEM:
-		tc90522_enable_ts_pins_s(tc90522, false);
-		break;
-
-	default:
-		break;
-	}
+fail_pins:
+	/* 有効化の複数レジスタ書き込みは途中まで成功していることがある。 */
+	px4_chrdev_disable_ts_pins(chrdev);
 
 fail:
 	mutex_unlock(&px4->lock);
@@ -1024,7 +1053,6 @@ static int px4_chrdev_stop_capture(struct ptx_chrdev *chrdev)
 	struct ptx_chrdev_group *chrdev_group = chrdev->parent;
 	struct px4_chrdev *chrdev4 = chrdev->priv;
 	struct px4_device *px4 = chrdev4->parent;
-	struct tc90522_demod *tc90522 = &chrdev4->tc90522;
 
 	dev_dbg(px4->dev,
 		"px4_chrdev_stop_capture %u:%u\n",
@@ -1049,23 +1077,9 @@ static int px4_chrdev_stop_capture(struct ptx_chrdev *chrdev)
 			chrdev_group->id, chrdev->id, px4->streaming_count);
 	}
 
+	/* 共有 USB の停止は完了済み。TS ピンの解除だけを次回に持ち越す。 */
+	px4_chrdev_disable_ts_pins(chrdev);
 	mutex_unlock(&px4->lock);
-
-	if (!atomic_read(&px4->available))
-		return 0;
-
-	switch (chrdev->system_cap) {
-	case PTX_ISDB_T_SYSTEM:
-		tc90522_enable_ts_pins_t(tc90522, false);
-		break;
-
-	case PTX_ISDB_S_SYSTEM:
-		tc90522_enable_ts_pins_s(tc90522, false);
-		break;
-
-	default:
-		break;
-	}
 
 	return 0;
 }
@@ -1282,6 +1296,7 @@ int px4_device_init(struct px4_device *px4, struct device *dev,
 		chrdev4->chrdev = NULL;
 		chrdev4->parent = px4;
 		chrdev4->lnb_power = false;
+		chrdev4->ts_pin_cleanup_pending = false;
 	}
 
 	ret = px4_parse_serial_number(&px4->serial, dev_serial);
