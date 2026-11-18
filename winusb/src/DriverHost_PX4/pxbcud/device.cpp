@@ -689,7 +689,8 @@ int Device::Init()
     wcscpy_s(info.device_name,device_def_.name.c_str()); info.device_guid=device_def_.guid;
     wcscpy_s(info.receiver_name,definition.name.c_str()); info.receiver_guid=definition.guid;
     info.systems=SystemType::ISDB_S; info.index=definition.index;
-    if (!receiver_manager_.Register(info,receiver_.get(),GetDeviceIdentity())) {receiver_.reset();return -EIO;}
+    // USB初期化の待機中も別の受信機のOpenとデータ接続を通す。
+    if (!receiver_manager_.Register(info,receiver_.get(),GetDeviceIdentity(),true)) {receiver_.reset();return -EIO;}
     return 0;
 }
 void Device::Term()
