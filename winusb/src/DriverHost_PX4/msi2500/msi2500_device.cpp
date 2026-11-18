@@ -6,6 +6,7 @@
 #include "device.hpp"
 #include "../rtlsdr/protocol.hpp"
 #include "../stream_overflow.hpp"
+#include "../pxbcud/recovery_budget.hpp"
 #include "msg.h"
 #include "util.hpp"
 #include <array>
@@ -130,7 +131,11 @@ protected:
         complete=false;
         if(!available_ || worker_error_)return -ECANCELED;
         if(!open_)return -EINVAL;
-        if(!process_ || WaitForSingleObject(process_.Get(),0)!=WAIT_TIMEOUT)return -ECANCELED;
+        {
+            // 監視のスレッドが helper を起動し直す間はハンドルを入れ替えるため、同じロックで読む
+            std::lock_guard<std::mutex> handles(handle_mutex_);
+            if(!process_ || WaitForSingleObject(process_.Get(),0)!=WAIT_TIMEOUT)return -ECANCELED;
+        }
         // 子プロセスへ選局要求を渡した時点で返す。USB の初期化と復調は非同期で、
         // CheckLock と信号品質は実際の TS 出力まで未ロックのまま。
         complete=true;
@@ -158,6 +163,8 @@ protected:
     }
     int SetStreamId() override {return 0;}
 private:
+    // helper の終了コード。引数の誤りは起動し直しても直らないため、自動の起動し直しの対象外にする
+    static constexpr DWORD HelperArgumentError=2;
     int StartHelper()
     {
         try {return Launch();}
@@ -166,24 +173,41 @@ private:
     int Launch()
     {
         StopHelper();
+        {
+            std::lock_guard<std::mutex> handles(handle_mutex_);
+            drain_only_=false;
+            const int result=StartProcess();
+            if(result){drain_only_=true;return result;}
+        }
+        stop_=false;worker_error_=false;ready_=false;last_ts_=0;quality_=0;mer_x100_=-1;
+        worker_=std::thread([this]{Supervise();});
+        msg_info("MSi2500: started device=%llu system=%s frequency=%u\n",static_cast<unsigned long long>(index_),system_j83b_ ? "J.83B" : "ISDB-T",frequency_);
+        return 0;
+    }
+    // helper のプロセスとパイプを作る。handle_mutex_ を保持して呼ぶ。失敗した場合は作りかけのハンドルを閉じる
+    int StartProcess()
+    {
+        auto fail=[this](int result){input_.Set(nullptr);output_.Set(nullptr);process_.Set(nullptr);job_.Set(nullptr);return result;};
         SECURITY_ATTRIBUTES sa{sizeof(sa),nullptr,TRUE};
         HANDLE a=nullptr,b=nullptr;
         Handle child_input,child_output,child_error;
-        if(!CreatePipe(&a,&b,&sa,0))return -EIO;
+        if(!CreatePipe(&a,&b,&sa,0))return fail(-EIO);
         child_input.Set(a);input_.Set(b);
-        if(!SetHandleInformation(input_.Get(),HANDLE_FLAG_INHERIT,0)){StopHelper();return -EIO;}
+        if(!SetHandleInformation(input_.Get(),HANDLE_FLAG_INHERIT,0))return fail(-EIO);
         // helper はフルセグの TS を約 1 フレームごとにまとめて書くため、パイプの容量を大きく取る
-        if(!CreatePipe(&a,&b,&sa,1<<20)){StopHelper();return -EIO;}
+        if(!CreatePipe(&a,&b,&sa,1<<20))return fail(-EIO);
         output_.Set(a);child_output.Set(b);
-        if(!SetHandleInformation(output_.Get(),HANDLE_FLAG_INHERIT,0)){StopHelper();return -EIO;}
-        // この機器はシリアル番号を返さない個体があるため、ログ名は DriverHost 内の機器番号で区別する
+        if(!SetHandleInformation(output_.Get(),HANDLE_FLAG_INHERIT,0))return fail(-EIO);
+        // この機器はシリアル番号を返さない個体があるため、ログ名は DriverHost 内の機器番号で区別する。
+        // 起動し直した helper も同じ名前へ書くため、前の helper の終了理由を残すよう追記で開く
         const auto log=px4::util::path::GetDir()+L"\\msi2500_frontend-"+std::to_wstring(index_)+L".log";
-        child_error.Set(CreateFileW(log.c_str(),GENERIC_WRITE,FILE_SHARE_READ|FILE_SHARE_WRITE,&sa,CREATE_ALWAYS,FILE_ATTRIBUTE_NORMAL,nullptr));
-        if(!child_error){StopHelper();return -EIO;}
+        child_error.Set(CreateFileW(log.c_str(),FILE_APPEND_DATA,FILE_SHARE_READ|FILE_SHARE_WRITE,&sa,
+            restart_count_ ? OPEN_ALWAYS : CREATE_ALWAYS,FILE_ATTRIBUTE_NORMAL,nullptr));
+        if(!child_error)return fail(-EIO);
         job_.Set(CreateJobObjectW(nullptr,nullptr));
         JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits{};
         limits.BasicLimitInformation.LimitFlags=JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
-        if(!job_ || !SetInformationJobObject(job_.Get(),JobObjectExtendedLimitInformation,&limits,sizeof(limits))){StopHelper();return -EIO;}
+        if(!job_ || !SetInformationJobObject(job_.Get(),JobObjectExtendedLimitInformation,&limits,sizeof(limits)))return fail(-EIO);
         STARTUPINFOEXW startup{};startup.StartupInfo.cb=sizeof(startup);
         startup.StartupInfo.dwFlags=STARTF_USESTDHANDLES;
         startup.StartupInfo.hStdInput=child_input.Get();startup.StartupInfo.hStdOutput=child_output.Get();startup.StartupInfo.hStdError=child_error.Get();
@@ -191,7 +215,7 @@ private:
         InitializeProcThreadAttributeList(nullptr,1,0,&attribute_size);
         std::vector<std::uint8_t> attributes(attribute_size);
         startup.lpAttributeList=reinterpret_cast<LPPROC_THREAD_ATTRIBUTE_LIST>(attributes.data());
-        if(!InitializeProcThreadAttributeList(startup.lpAttributeList,1,0,&attribute_size)){StopHelper();return -EIO;}
+        if(!InitializeProcThreadAttributeList(startup.lpAttributeList,1,0,&attribute_size))return fail(-EIO);
         HANDLE inherited[]={child_input.Get(),child_output.Get(),child_error.Get()};
         const bool attr_ok=UpdateProcThreadAttribute(startup.lpAttributeList,0,PROC_THREAD_ATTRIBUTE_HANDLE_LIST,inherited,sizeof(inherited),nullptr,nullptr)!=FALSE;
         // 個体は DriverHost が列挙したデバイスインターフェースのパスで指定する
@@ -203,17 +227,14 @@ private:
         const BOOL created=attr_ok && CreateProcessW(helper_.c_str(),command.data(),nullptr,nullptr,TRUE,
             CREATE_NO_WINDOW|CREATE_SUSPENDED|EXTENDED_STARTUPINFO_PRESENT,nullptr,nullptr,&startup.StartupInfo,&process);
         DeleteProcThreadAttributeList(startup.lpAttributeList);
-        if(!created){msg_err("MSi2500: CreateProcess failed win32=%lu\n",GetLastError());StopHelper();return -EIO;}
+        if(!created){msg_err("MSi2500: CreateProcess failed win32=%lu\n",GetLastError());return fail(-EIO);}
         process_.Set(process.hProcess);Handle thread;thread.Set(process.hThread);
         if(!AssignProcessToJobObject(job_.Get(),process_.Get())){
-            TerminateProcess(process_.Get(),ERROR_ACCESS_DENIED);WaitForSingleObject(process_.Get(),1000);StopHelper();return -EIO;
+            TerminateProcess(process_.Get(),ERROR_ACCESS_DENIED);WaitForSingleObject(process_.Get(),1000);return fail(-EIO);
         }
-        stop_=false;drain_only_=false;worker_error_=false;ready_=false;last_ts_=0;quality_=0;mer_x100_=-1;
-        if(ResumeThread(thread.Get())==static_cast<DWORD>(-1)){StopHelper();return -EIO;}
+        if(ResumeThread(thread.Get())==static_cast<DWORD>(-1)){TerminateJobObject(job_.Get(),ERROR_INVALID_FUNCTION);return fail(-EIO);}
         // 子への出力書込端を親が残すと、子の終了を EOF として検出できなくなる。
         child_input.Set(nullptr);child_output.Set(nullptr);child_error.Set(nullptr);
-        worker_=std::thread([this]{ReadHelper();});
-        msg_info("MSi2500: started device=%llu system=%s frequency=%u\n",static_cast<unsigned long long>(index_),system_j83b_ ? "J.83B" : "ISDB-T",frequency_);
         return 0;
     }
     void StopHelper()
@@ -221,23 +242,112 @@ private:
         // 停止要求後も stdout を排出する。先に reader を止めると、パイプへ書き込み中の
         // helper が詰まり、stdin の停止要求を受けても終了できなくなる。
         // helper は停止要求の後に USB の転送を止め、停止要求と ADC の休止を送ってから終わる。
-        // この順序を省くと次回の取り込みでデータが届かない状態に入ることがあったため、強制終了までの期限は長めに取る
-        drain_only_=true;input_.Set(nullptr);
-        if(process_ && WaitForSingleObject(process_.Get(),5000)==WAIT_TIMEOUT){
+        // この順序を省くと次回の取り込みでデータが届かない状態に入ることがあったため、強制終了までの期限は長めに取る。
+        // drain_only_ を立てた後は監視のスレッドがハンドルを入れ替えないため、ロックの外で待てる
+        HANDLE process=nullptr,job=nullptr;
+        {
+            std::lock_guard<std::mutex> handles(handle_mutex_);
+            drain_only_=true;input_.Set(nullptr);
+            process=process_.Get();job=job_.Get();
+        }
+        if(process && WaitForSingleObject(process,5000)==WAIT_TIMEOUT){
             msg_warn("MSi2500: helper stop deadline expired; terminating owned job\n");
-            TerminateJobObject(job_.Get(),ERROR_TIMEOUT);WaitForSingleObject(process_.Get(),1000);
+            TerminateJobObject(job,ERROR_TIMEOUT);WaitForSingleObject(process,1000);
         }
         stop_=true;
         if(worker_.joinable())worker_.join();
-        output_.Set(nullptr);process_.Set(nullptr);job_.Set(nullptr);
+        {
+            std::lock_guard<std::mutex> handles(handle_mutex_);
+            output_.Set(nullptr);process_.Set(nullptr);job_.Set(nullptr);
+        }
         ready_=false;last_ts_=0;quality_=0;mer_x100_=-1;
     }
-    void ReadHelper() noexcept
+    // 起動し直しを止めるべきか。Close・選局・取り込みの停止 (drain_only_) と抜去 (available_) を優先する
+    bool Stopping() const {return stop_ || drain_only_ || !available_;}
+    /*
+     * 機器のデバイスインターフェースがまだあるか。抜去では helper が転送の失敗で先に終わり、
+     * DriverHost が抜去の通知を受け取るのはその後になる (実機では helper の失敗が先だった)。
+     * 通知の前に起動し直すと、抜いた機器へ helper を起動して失敗させるため、パスが消えていれば待つ。
+     * アクセス権を求めずに開くため、機器の状態は変えない
+     */
+    bool DevicePresent() const
     {
+        const HANDLE h=CreateFileW(device_path_.c_str(),0,FILE_SHARE_READ|FILE_SHARE_WRITE,nullptr,OPEN_EXISTING,0,nullptr);
+        if(h!=INVALID_HANDLE_VALUE){CloseHandle(h);return true;}
+        const DWORD error=GetLastError();
+        return error!=ERROR_FILE_NOT_FOUND && error!=ERROR_PATH_NOT_FOUND && error!=ERROR_NO_SUCH_DEVICE &&
+            error!=ERROR_DEVICE_NOT_CONNECTED;
+    }
+    /*
+     * helper が予期せず終わったとき (USB の受信が止まる、転送の失敗が続く、異常終了、応答なし、形式不正)、
+     * 同じ周波数で helper を起動し直す。配信の接続と世代は保ち、欠けた区間は配信先が continuity counter で
+     * 検出する。打ち切ると選局し直すまで録画が止まるため、PX-BCUD の自動復旧と同じ回数の制限と待機で続ける。
+     * 回数を使い切った後も配信の接続は残し、CheckLock の失敗で知らせて選局し直しを待つ。
+     */
+    void Supervise() noexcept
+    {
+        px4::pxbcud::RecoveryBudget budget;
+        for(;;) {
+            const auto run=ReadHelper();
+            if(Stopping())break;
+            DWORD exit_code=STILL_ACTIVE;
+            {
+                std::lock_guard<std::mutex> handles(handle_mutex_);
+                if(Stopping())break;
+                // 形式不正や応答なしでは helper がまだ動いているため、job ごと止めてから回収する
+                if(job_)TerminateJobObject(job_.Get(),ERROR_INVALID_DATA);
+                if(process_){WaitForSingleObject(process_.Get(),1000);GetExitCodeProcess(process_.Get(),&exit_code);}
+                input_.Set(nullptr);output_.Set(nullptr);process_.Set(nullptr);job_.Set(nullptr);
+            }
+            ready_=false;quality_=0;mer_x100_=-1;
+            const auto failed_at=GetTickCount64();
+            budget.NoteStream(std::chrono::milliseconds(run.received_ms));
+            if(exit_code==HelperArgumentError){
+                Exhausted("helper rejected its arguments",exit_code);
+                break;
+            }
+            bool started=false;
+            while(!started) {
+                if(!budget.Take()){
+                    Exhausted("auto restart exhausted",exit_code);
+                    return;
+                }
+                const auto backoff=budget.Backoff();
+                for(auto waited=std::chrono::milliseconds::zero();waited<backoff && !Stopping();waited+=std::chrono::milliseconds(10))Sleep(10);
+                // パスが消えていれば抜去の通知を最長 3 秒待つ。期限を過ぎてもないときは起動し直しの失敗として数える
+                if(!DevicePresent()){
+                    for(int i=0;i<300 && !Stopping() && !DevicePresent();++i)Sleep(10);
+                    if(Stopping())return;
+                    if(!DevicePresent()){msg_warn("MSi2500: device interface is missing; not restarting the helper\n");continue;}
+                }
+                std::lock_guard<std::mutex> handles(handle_mutex_);
+                if(Stopping())return;
+                ++restart_count_;
+                msg_warn("MSi2500: helper restart count=%llu exit_code=%lu consecutive=%u backoff_ms=%lld possible_ts_loss=1\n",
+                    static_cast<unsigned long long>(restart_count_),exit_code,static_cast<unsigned>(budget.Consecutive()),
+                    static_cast<long long>(backoff.count()));
+                started=!StartProcess();
+                if(!started)msg_err("MSi2500: helper restart failed count=%llu\n",static_cast<unsigned long long>(restart_count_));
+            }
+            restarted_at_=failed_at;
+        }
+    }
+    void Exhausted(const char *reason,DWORD exit_code)
+    {
+        worker_error_=true;quality_=0;
+        msg_err("MSi2500: %s exit_code=%lu restart_count=%llu limit=%u; waiting for a retune\n",reason,exit_code,
+            static_cast<unsigned long long>(restart_count_),static_cast<unsigned>(px4::pxbcud::RecoveryBudget::Limit));
+    }
+    struct HelperRun {std::uint64_t received_ms=0;};
+    // 1 つの helper の出力を、終わるか停止を求められるまで読む。最初と最後の TS の間を返す
+    HelperRun ReadHelper() noexcept
+    {
+        HelperRun run;
         try {
             Frames frames;std::array<std::uint8_t,65536> bytes{};
             px4::StreamOverflowLog overflow("MSi2500");
             auto last_message=GetTickCount64();
+            ULONGLONG first_ts=0;
             while(!stop_ && available_) {
                 DWORD available=0;
                 if(!PeekNamedPipe(output_.Get(),nullptr,0,nullptr,&available,nullptr))break;
@@ -264,6 +374,12 @@ private:
                         }
                         if(frame.kind==2){
                             quality_=frame.quality;last_ts_=GetTickCount64();
+                            if(!first_ts)first_ts=last_ts_;
+                            run.received_ms=last_ts_-first_ts;
+                            if(const auto restarted=restarted_at_.exchange(0)){
+                                msg_warn("MSi2500: helper restart resumed count=%llu outage_ms=%llu possible_ts_loss=1\n",
+                                    static_cast<unsigned long long>(restart_count_),static_cast<unsigned long long>(last_ts_-restarted));
+                            }
                             if(capture_ && !stop_ && !drain_only_){
                                 std::size_t size=frame.size;
                                 // 引数の評価順は決まっていないため、Write が size を書き換えてから記録へ渡す。
@@ -279,7 +395,8 @@ private:
                 if(!valid){msg_err("MSi2500: invalid or failed helper frame\n");break;}
             }
         } catch(const std::exception &error){msg_err("MSi2500: reader failed: %s\n",error.what());}
-        if(!stop_ && !drain_only_ && available_){worker_error_=true;quality_=0;stream_buf_->StopRequest();TerminateJobObject(job_.Get(),ERROR_INVALID_DATA);msg_err("MSi2500: frontend stopped unexpectedly\n");}
+        if(!Stopping())msg_err("MSi2500: frontend stopped unexpectedly\n");
+        return run;
     }
     std::wstring device_path_;
     std::uintptr_t index_;
@@ -298,7 +415,13 @@ private:
     // 復調器の MER (dB×100)。helper の起動と停止で破棄し、未受信の間は -1
     std::atomic<std::int32_t> mer_x100_{-1};
     std::atomic<ULONGLONG> last_ts_{0};
+    // helper のハンドル。監視のスレッドが起動し直すときに入れ替えるため、handle_mutex_ で守る。
+    // 取得順は mutex_、handle_mutex_ の順で、監視のスレッドは handle_mutex_ だけを取る
+    std::mutex handle_mutex_;
     Handle process_,job_,input_,output_;
+    // 起動し直した回数 (handle_mutex_ を保持して更新する) と、起動し直した後に最初の TS を待つ間の失敗の時刻
+    std::uint64_t restart_count_=0;
+    std::atomic<ULONGLONG> restarted_at_{0};
     std::thread worker_;
 };
 
