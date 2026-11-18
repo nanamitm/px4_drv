@@ -1,8 +1,40 @@
 // SPDX-License-Identifier: GPL-2.0-only
 #include "../src/DriverHost_PX4/xz3/stream_records.hpp"
+#include "../src/DriverHost_PX4/xz3/pump_progress.hpp"
 #include <array>
 #include <cstdio>
 #include <vector>
+
+static bool TestPartialPump()
+{
+    using namespace px4::xz3;
+    const auto small = PumpSize(3), large = PumpSize(0);
+    PumpProgress progress;
+    // 512バイトだけ先に届き、しばらく無入力が続く。残りのバイトを次の操作12で補う。
+    if (!ValidPumpReply(2, 0, 512, 512, 512) || !ValidPumpReply(2, 0, 0, 512, 512))
+        return false;
+    progress.Sent(512);
+    progress.Sent(0);
+    if (progress.Complete(large) || progress.Stage(0, large + small) != 0)
+        return false;
+    progress.Sent(large);
+    if (!progress.Complete(large))
+        return false;
+    progress.Collected(large);
+    // 先行した512バイトは次の読み出しの一部で、切り捨てるとTS境界がずれる。
+    if (progress.Complete(small) || progress.Stage(2, small * 2) != 3)
+        return false;
+    progress.Sent(small - 512);
+    if (!progress.Complete(small))
+        return false;
+    progress.Collected(small);
+    return !progress.Complete(small) && progress.Stage(2, small * 2) == 2 &&
+           ValidPumpReply(0, 3, small, small, small) &&
+           !ValidPumpReply(0, 3, 512, 512, 512) &&
+           !ValidPumpReply(2, 3, 513, 512, 512) &&
+           !ValidPumpReply(2, 3, 512, 512, RingBytes) &&
+           !ValidPumpReply(6, 3, 0, 0, 0);
+}
 
 int main()
 {
@@ -17,6 +49,10 @@ int main()
     });
     if (skipped != 1 || received != std::vector<std::uint8_t>{0, 0, 0x42})
         return 1;
+    if (!TestPartialPump()) {
+        std::puts("xz3_stream_test: partial pump recovery failed");
+        return 1;
+    }
     std::puts("xz3_stream_test: passed");
     return 0;
 }
