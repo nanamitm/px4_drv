@@ -3,6 +3,8 @@
 #include "device_manager.hpp"
 
 #include <algorithm>
+#include <chrono>
+#include <system_error>
 
 #include <windows.h>
 #include <setupapi.h>
@@ -118,6 +120,9 @@ DeviceManager::DeviceManager(const px4::DeviceDefinitionSet &device_defs, px4::R
 DeviceManager::~DeviceManager()
 {
 	notifier_.reset();
+
+	/* 抜去した機器の破棄の完了を待つ。DriverHost は先にサーバーを止めて受信機を閉じているため、待ちは終わる */
+	removed_devices_.clear();
 }
 
 void DeviceManager::Search(const GUID &guid, const std::pair<DeviceType, px4::DeviceDefinition> &def)
@@ -347,8 +352,34 @@ void DeviceManager::Remove(const std::wstring &path)
 	/*
 	 * 機器の破棄は開いている受信機が閉じるまで待つため、一覧のロックを解いてから行う
 	 * ロックを保持したまま待つと、カードリーダーの列挙と検索も巻き添えで止まる
+	 *
+	 * この関数は機器の到着と抜去の通知を処理するスレッドで呼ばれる。ここで破棄を待つと、受信中に抜き差しした機器の
+	 * 到着の通知が利用側の終了まで処理されず、挿し直した機器を登録できない (XIT-SQR100 の実機のログで確認)
+	 * そのため最後の参照を別のスレッドへ渡して破棄させ、DeviceManager の破棄の時点で完了を待つ
+	 * スレッドを作れない場合は、std::async の例外とともに参照がこのスレッドで解放され、従来と同じく破棄を待つ
+	 * 通知の処理は noexcept のため、例外はここで止める
 	 */
-	device.reset();
+	std::future<void> teardown;
+
+	try {
+		teardown = std::async(std::launch::async, [device = std::move(device)]() mutable {
+			device.reset();
+		});
+	} catch (const std::system_error &ex) {
+		msg_err("px4::DeviceManager::Remove: %s\n", ex.what());
+		return;
+	}
+
+	std::lock_guard<std::mutex> lock(mtx_);
+
+	for (auto it = removed_devices_.begin(); it != removed_devices_.end();) {
+		if (it->wait_for(std::chrono::seconds(0)) == std::future_status::ready)
+			it = removed_devices_.erase(it);
+		else
+			++it;
+	}
+
+	removed_devices_.emplace_back(std::move(teardown));
 }
 
 bool DeviceManager::Exists(const std::wstring &path) const
