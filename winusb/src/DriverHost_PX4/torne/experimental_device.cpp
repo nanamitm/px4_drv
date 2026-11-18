@@ -566,7 +566,9 @@ private:
                     output.clear();framer.Feed(raw.data(),transferred,output);
                     for(std::size_t offset=0;offset<output.size();offset+=188) {
                         quality.Feed(output.data()+offset);std::size_t count=188;
-                        overflow.Record(stream_buf_->Write(output.data()+offset,count),188,count);
+                        // 引数の評価順は決まっていないため、Write が count を書き換えてから記録へ渡す。
+                        const bool written=stream_buf_->Write(output.data()+offset,count);
+                        overflow.Record(written,188,count);
                     }
                     stream_buf_->NotifyWrite();
                     if(!output.empty() && !worker_error_) {

@@ -231,7 +231,9 @@ private:
                         quality_=frame.quality;last_ts_=GetTickCount64();
                         if(capture_ && !stop_ && !drain_only_){
                             std::size_t size=frame.size;
-                            overflow.Record(stream_buf_->Write(data,size),frame.size,size);
+                            // 引数の評価順は決まっていないため、Write が size を書き換えてから記録へ渡す。
+                            const bool written=stream_buf_->Write(data,size);
+                            overflow.Record(written,frame.size,size);
                             stream_buf_->NotifyWrite();
                         }
                     }
