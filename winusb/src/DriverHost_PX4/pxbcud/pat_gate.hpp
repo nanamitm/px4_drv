@@ -17,31 +17,55 @@ public:
     bool Accept(const std::uint8_t *p)
     {
         if (ready_) return true;
-        if(p[0]!=0x47 || (p[1]&0x80) || (p[1]&31) || p[2]) return false;
+        if (p[0]!=0x47 || (p[1]&0x80) || (p[1]&31) || p[2]) return false;
         const unsigned afc=(p[3]>>4)&3;
-        if(!(afc&1))return false;
         std::size_t offset=4;
-        if(afc&2) {
-            if(p[4]>182)return false;
-            if(p[4] && (p[5]&0x80)){size_=0;cc_=-1;}
+        if (afc&2) {
+            if (p[4]>183) return false;
+            if (p[4] && (p[5]&0x80)) Restart();
             offset+=1+p[4];
         }
+        if (!(afc&1) || offset>=188) return false;
         const int cc=p[3]&15;
-        if(cc_==cc)return false;
-        if(cc_>=0 && cc!=((cc_+1)&15))size_=0;
+        if (cc_==cc) return false;
+        if (cc_>=0 && cc!=((cc_+1)&15)) ResetSection();
         cc_=cc;
-        if(p[1]&0x40) {
-            const std::size_t pointer=p[offset++];
-            if(pointer>=188-offset){size_=0;return false;}
-            offset+=pointer;size_=0;collecting_=true;
+        if (!(p[1]&0x40)) {
+            if (collecting_) Consume(p,offset,188);
+            return ready_;
         }
-        if(!collecting_)return false;
-        while(offset<188 && size_<section_.size()) {
+
+        const std::size_t pointer=p[offset++];
+        if (pointer>=188-offset) {
+            ResetSection();
+            return false;
+        }
+        // pointer手前は前のセクションの残り。CRCを確認してから新しいセクションに進む。
+        const auto start=offset+pointer;
+        if (collecting_) Consume(p,offset,start);
+        ResetSection();
+        offset=start;
+        while (!ready_ && offset<188 && p[offset]==0x00) {
+            collecting_=true;
+            if (!Consume(p,offset,188)) break;
+        }
+        return ready_;
+    }
+private:
+    void ResetSection() {size_=0;collecting_=false;}
+
+    // 完成したセクションを1つ検査する。不完全な場合は次のパケットに持ち越す。
+    bool Consume(const std::uint8_t *p,std::size_t &offset,std::size_t end)
+    {
+        while (offset<end) {
             section_[size_++]=p[offset++];
-            if(size_<3)continue;
+            if (size_<3) continue;
             const std::size_t total=3+((section_[1]&15)<<8)+section_[2];
-            if(section_[0] || !(section_[1]&0x80) || total<12 || total>section_.size())break;
-            if(size_==total) {
+            if (section_[0] || !(section_[1]&0x80) || total<12 || total>section_.size()) {
+                ResetSection();
+                return false;
+            }
+            if (size_==total) {
                 std::uint32_t crc=0xffffffff;
                 for(std::size_t i=0;i<size_;++i) {
                     crc^=static_cast<std::uint32_t>(section_[i])<<24;
@@ -49,18 +73,12 @@ public:
                 }
                 ready_=!crc && (section_[5]&1) &&
                     static_cast<std::uint16_t>((section_[3]<<8)|section_[4])==tsid_;
-                break;
+                ResetSection();
+                return true;
             }
         }
-        if(!ready_ && size_>=3) {
-            const std::size_t total=3+((section_[1]&15)<<8)+section_[2];
-            if(section_[0] || !(section_[1]&0x80) || total<12 || total>section_.size() || size_>=total) {
-                size_=0;collecting_=false;
-            }
-        }
-        return ready_;
+        return false;
     }
-private:
     const std::uint16_t tsid_;
     std::array<std::uint8_t,1024> section_{};
     std::size_t size_=0;

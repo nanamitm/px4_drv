@@ -145,7 +145,14 @@ void TestPatGate()
     PatGate damaged(0x4010);CHECK(!damaged.Accept(bad[0].data()));CHECK(damaged.Accept(correct[0].data()));
     auto long_pat=MakePat(0x4010,50);CHECK(long_pat.size()==2);
     PatGate spanning(0x4010);CHECK(!spanning.Accept(long_pat[0].data()));CHECK(spanning.Accept(long_pat[1].data()));
-    PatGate missing(0x4010);CHECK(!missing.Accept(long_pat[0].data()));long_pat[1][3]=0x12;CHECK(!missing.Accept(long_pat[1].data()));
+    auto combined=long_pat[1];
+    constexpr unsigned tail=12+4*50-183;
+    combined[1]|=0x40;
+    std::memmove(combined.data()+5,combined.data()+4,tail);
+    combined[4]=tail;
+    std::memcpy(combined.data()+5+tail,old[0].data()+5,16);
+    PatGate packed(0x4010);CHECK(!packed.Accept(long_pat[0].data()));CHECK(packed.Accept(combined.data()));
+    PatGate missing(0x4010);CHECK(!missing.Accept(long_pat[0].data()));combined[3]=0x12;CHECK(!missing.Accept(combined.data()));
     PatGate invalid(0x4010);bad[0]=correct[0];bad[0][1]|=0x80;CHECK(!invalid.Accept(bad[0].data()));
     bad[0]=correct[0];bad[0][4]=184;CHECK(!invalid.Accept(bad[0].data()));
     // PAT確認前の復旧では旧局や途切れたPATを受理せず、確認後の復旧ではTEI付きも通す。
