@@ -82,7 +82,7 @@ public:
     {
         std::lock_guard<std::mutex> lock(mutex_);
         if(!open_) return;
-        capture_=false;StopHelper();stream_buf_->Stop();frequency_=0;
+        capture_=false;StopHelper();stream_buf_->Stop();stream_started_=false;frequency_=0;
         open_=false;closed_.notify_all();
     }
     int CheckLock(bool &locked) override
@@ -100,16 +100,26 @@ public:
     {
         std::lock_guard<std::mutex> lock(mutex_);
         if(!open_ || !available_)return -ECANCELED;
-        if(!capture){capture_=false;StopHelper();stream_buf_->Stop();return 0;}
+        if(!capture){
+            capture_=false;
+            StopHelper();
+            // 配信スレッドは同じデータ接続での再開まで待機させる。
+            return !stream_started_ || stream_buf_->Purge() ? 0 : -EIO;
+        }
         if(capture_)return -EALREADY;
-        // フルセグの TS は約 2.1 MB/s で、helper の出力は再多重化で約 1 フレーム (0.23 秒) ごとにまとまって届く。
-        // J.83B (256QAM、5.6 Msps) の TS は約 4.85 MB/s。選局の前に確保するため、J.83B でも約 3 秒分になる大きさを
-        // どちらの系統にも確保する (フルセグでは約 7 秒分)
-        if(!stream_buf_->Alloc(188*81920))return -ENOMEM;
-        stream_buf_->SetDiscardNullPacketsOnOutput(false);
-        stream_buf_->SetThresholdSize(188*64);stream_buf_->Start();capture_=true;
+        if(!stream_started_){
+            // フルセグは約 2.1 MB/s、J.83B は約 4.85 MB/s。どちらにも J.83B の約 3 秒分を確保する。
+            if(!stream_buf_->Alloc(188*81920))return -ENOMEM;
+            stream_buf_->SetDiscardNullPacketsOnOutput(false);
+            stream_buf_->SetThresholdSize(188*64);
+            stream_buf_->Start();
+            stream_started_=true;
+        } else if(!stream_buf_->AdvanceEpoch()) {
+            return -EIO;
+        }
+        capture_=true;
         const int result=frequency_?StartHelper():0;
-        if(result){capture_=false;stream_buf_->Stop();}
+        if(result)capture_=false;
         return result;
     }
     int ReadStat(command::StatType type,std::int32_t &value) override
@@ -396,6 +406,7 @@ private:
     std::uintptr_t index_;
     std::wstring helper_;
     bool async_tune_=false;
+    bool stream_started_=false; // mutex_ で保護し、Close まで配信バッファを維持する
     int gain_=40;
     int gain_j83b_=46;
     // 受信機定義で J.83B を受け付けるか (Device::Init で設定する) と、起動中の helper の系統
