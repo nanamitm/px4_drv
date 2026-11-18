@@ -115,7 +115,10 @@ MaxUrbs=10
 
 DriverHostはUSB転送のエラー31・87と受信タイムアウト時に、同じ配信接続を保って受信の再開を試みます。
 未完了I/Oの取消・完了回収・バッファ登録解除の後、capture停止、alt0、alt1、capture開始の順に戻します。
-新しい受信ではTSの端数とPATの組み立て状態を捨て、選択したTSIDのPATを再確認します。
+新しい受信ではTSの端数とPATの組み立て状態を捨てます。
+選局後の最初の受信では選択したTSIDのPATを確認しますが、同じチャンネルの自動復旧では確認を省きます。
+自動復旧時に機器のFIFOに残るTSは選局中のチャンネルのもので、復旧直後は信号の悪化でPATのCRCが5秒以上通らないことがあり、
+確認を待つと `pat_timeout` で受信が終わり、選局し直すまで録画が止まるためです。
 同じチャンネルの自動復旧では配信世代とTSのCCを変更しないため、欠落した連番は配信先でも観測できます。
 欠落をすべてTVTestのDで検出できる保証はなく、DriverHostの復旧ログにも停止時間を残します。
 復旧履歴をファイルに保存する場合は `DriverHost_PX4.ini` の `DebugLog=true` を指定してください。
@@ -153,6 +156,7 @@ Visual Studio 2022 / v143 で `winusb/build.ps1` を実行すると、通常の�
 .\winusb\build\x64\Release-static\pxbcud_live_test.exe 1049480 0 2 - --auto-recover
 .\winusb\build\x64\Release-static\pxbcud_live_test.exe 1049480 0 2 - --auto-limit
 .\winusb\build\x64\Release-static\pxbcud_live_test.exe 1049480 0 2 - --auto-stop
+.\winusb\build\x64\Release-static\pxbcud_live_test.exe 1049480 0 2 - --auto-pat
 
 # 自動復旧を止め、最大1時間の最初の異常を時刻付きログへ保存する
 .\winusb\build\x64\Release-static\pxbcud_usb_diagnostic.exe 1049480 0 3600
@@ -162,6 +166,8 @@ Visual Studio 2022 / v143 で `winusb/build.ps1` を実行すると、通常の�
 各エラーの通知と再選局後のパケット増加、同じ読取スレッドの継続、同期・TEI・CCを確認します。
 配布用DriverHostには模擬注入処理を含みません。`--auto-recover` は再選局なしの復旧と
 その間のCC欠落を記録し、`--auto-limit` は連続4故障に対して3回で復旧を打ち切ることを確認します。
+`--auto-pat` は1回の故障の後、8秒間PID 0のパケットにTEIを立ててPATが通らない状態を作り、
+`pat_timeout` で止まらずに同じ配信世代でTSが続くことを確認します。
 通常受信と手動再選局の試験は従来どおりCCエラー0を成功条件とします。
 自動復旧打切り後も配信接続は手動再選局を待ち、USB抜去や接続終了時は配信も終了します。
 この試験は復旧経路を対象としており、実際のUSBエラー31・87の発生原因は別途調査が必要です。

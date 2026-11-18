@@ -393,7 +393,10 @@ private:
         const auto reads_storage=std::make_unique<Read[]>(request_count);
         Read *const reads=reads_storage.get();
         PlainFramer framer;
-        PatGate gate(frontend_.SelectedStream());
+        // 同じチャンネルの自動復旧では、USB FIFO に残る TS も選局中のチャンネルのもので、
+        // PAT で前の選局と区別する必要がない。復旧直後は信号の悪化で TEI が続くことがあり、
+        // PAT を待つと 5 秒の pat_timeout で受信が終わり、選局し直すまで録画が止まる。
+        PatGate gate(frontend_.SelectedStream(),outage!=nullptr);
         std::uint64_t startup_discarded=0;
         std::uint64_t iso_errors=0, empty_packets=0;
         std::vector<std::uint8_t> output;
