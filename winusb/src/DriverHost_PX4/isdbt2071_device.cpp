@@ -8,7 +8,6 @@
 #include "type.hpp"
 #include "command.hpp"
 #include "misc_win.h"
-#include "ts_sync.h"
 
 namespace px4 {
 
@@ -390,7 +389,7 @@ int Isdbt2071Device::StartCapture()
 		it930x_.bus.usb.streaming.no_dma = true;
 		it930x_.bus.usb.streaming.no_raw_io = config_.usb.no_raw_io;
 
-		stream_ctx_.remain_len = 0;
+		px4_ts_plain_reset(&stream_ctx_.framer);
 
 		ret = itedtv_bus_start_streaming(&it930x_.bus, StreamHandler, this);
 		if (ret) {
@@ -420,88 +419,14 @@ int Isdbt2071Device::StopCapture()
 	return 0;
 }
 
-void Isdbt2071Device::StreamProcess(std::shared_ptr<px4::ReceiverBase::StreamBuffer> stream_buf, std::uint8_t **buf, std::size_t &len)
-{
-	std::uint8_t *p = *buf;
-	std::size_t remain = len;
-
-	while (remain) {
-		std::size_t i = 0;
-		bool sync_remain = false;
-
-		while (true) {
-			if (((i + 1) * 188) <= remain) {
-				/* 連続する同期バイトを数え、崩れた位置の直前までを出力する */
-				if (!px4_ts_has_plain_sync(p[i * 188]))
-					break;
-			} else {
-				sync_remain = true;
-				break;
-			}
-			i++;
-		}
-
-		if (i < ISDBT2071_DEVICE_TS_SYNC_COUNT) {
-			p++;
-			remain--;
-			continue;
-		}
-
-		std::size_t pkt_len = 188 * i;
-		stream_buf->Write(p, pkt_len);
-
-		p += 188 * i;
-		remain -= 188 * i;
-
-		if (sync_remain)
-			break;
-	}
-
-	stream_buf->NotifyWrite();
-
-	*buf = p;
-	len = remain;
-
-	return;
-}
-
 int Isdbt2071Device::StreamHandler(void *context, void *buf, std::uint32_t len)
 {
-	Isdbt2071Device &obj = *static_cast<Isdbt2071Device*>(context);
-	StreamContext &stream_ctx = obj.stream_ctx_;
-	std::uint8_t *p = static_cast<std::uint8_t*>(buf);
-	std::size_t remain = len;
-
-	if (stream_ctx.remain_len) {
-		if ((stream_ctx.remain_len + len) >= ISDBT2071_DEVICE_TS_SYNC_SIZE) {
-			std::uint8_t * remain_buf = stream_ctx.remain_buf;
-			std::size_t t = ISDBT2071_DEVICE_TS_SYNC_SIZE - stream_ctx.remain_len;
-
-			memcpy(remain_buf + stream_ctx.remain_len, p, t);
-			stream_ctx.remain_len = ISDBT2071_DEVICE_TS_SYNC_SIZE;
-
-			StreamProcess(stream_ctx.stream_buf, &remain_buf, stream_ctx.remain_len);
-			if (!stream_ctx.remain_len) {
-				p += t;
-				remain -= t;
-			}
-
-			stream_ctx.remain_len = 0;
-		} else {
-			memcpy(stream_ctx.remain_buf + stream_ctx.remain_len, p, len);
-			stream_ctx.remain_len += len;
-
-			return 0;
-		}
-	}
-
-	StreamProcess(stream_ctx.stream_buf, &p, remain);
-
-	if (remain) {
-		memcpy(stream_ctx.remain_buf, p, remain);
-		stream_ctx.remain_len = remain;
-	}
-
+	auto &stream = static_cast<Isdbt2071Device *>(context)->stream_ctx_;
+	px4_ts_plain_feed(&stream.framer, static_cast<const std::uint8_t *>(buf), len,
+		[](void *ctx, const unsigned char *data, std::size_t size) {
+			static_cast<px4::ReceiverBase::StreamBuffer *>(ctx)->Write(data, size);
+		}, stream.stream_buf.get());
+	stream.stream_buf->NotifyWrite();
 	return 0;
 }
 

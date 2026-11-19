@@ -22,11 +22,9 @@
 #include "itedtv_bus.h"
 #include "tc90522.h"
 #include "r850.h"
+#include "ts_plain_framer.h"
 
 namespace px4 {
-
-#define ISDBT2071_DEVICE_TS_SYNC_COUNT	4U
-#define ISDBT2071_DEVICE_TS_SYNC_SIZE		(188U * ISDBT2071_DEVICE_TS_SYNC_COUNT)
 
 enum class Isdbt2071DeviceModel {
 	ISDBT2071 = 0,
@@ -83,9 +81,7 @@ public:
 private:
 	struct StreamContext final {
 		std::shared_ptr<px4::ReceiverBase::StreamBuffer> stream_buf;
-		/* 最初のコールバック前も未処理データなしの状態として初期化 */
-		std::uint8_t remain_buf[ISDBT2071_DEVICE_TS_SYNC_SIZE] = {};
-		std::size_t remain_len = 0;
+		px4_ts_plain_framer framer{};
 	};
 
 	class Isdbt2071Receiver final : public px4::ReceiverBase {
@@ -144,7 +140,6 @@ private:
 	int StartCapture();
 	int StopCapture();
 
-	static void StreamProcess(std::shared_ptr<px4::ReceiverBase::StreamBuffer> stream_buf, std::uint8_t **buf, std::size_t &len);
 	static int StreamHandler(void *context, void *buf, std::uint32_t len);
 
 	Isdbt2071DeviceModel model_;

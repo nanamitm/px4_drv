@@ -15,15 +15,11 @@
 
 #include "px4_device_params.h"
 #include "firmware.h"
-#include "ts_sync.h"
-
-#define ISDBT2071_DEVICE_TS_SYNC_COUNT	4
-#define ISDBT2071_DEVICE_TS_SYNC_SIZE	(188 * ISDBT2071_DEVICE_TS_SYNC_COUNT)
+#include "ts_plain_framer.h"
 
 struct isdbt2071_stream_context {
 	struct ptx_chrdev *chrdev;
-	u8 remain_buf[ISDBT2071_DEVICE_TS_SYNC_SIZE];
-	size_t remain_len;
+	struct px4_ts_plain_framer framer;
 };
 
 static void isdbt2071_device_release(struct kref *kref);
@@ -97,87 +93,17 @@ static int isdbt2071_backend_term(struct isdbt2071_device *isdbt2071)
 	return 0;
 }
 
-static void isdbt2071_device_stream_process(struct ptx_chrdev *chrdev,
-					   u8 **buf, u32 *len)
+static void isdbt2071_put_ts(void *context, const unsigned char *data, size_t len)
 {
-	u8 *p = *buf;
-	u32 remain = *len;
-
-	while (likely(remain)) {
-		u32 i = 0;
-		bool sync_remain = false;
-
-		while (true) {
-			if (likely(((i + 1) * 188) <= remain)) {
-				if (unlikely(!px4_ts_has_plain_sync(p[i * 188])))
-					break;
-			} else {
-				sync_remain = true;
-				break;
-			}
-			i++;
-		}
-
-		if (unlikely(i < ISDBT2071_DEVICE_TS_SYNC_COUNT)) {
-			p++;
-			remain--;
-			continue;
-		}
-
-		ptx_chrdev_put_stream(chrdev, p, 188 * i);
-
-		p += 188 * i;
-		remain -= 188 * i;
-
-		if (unlikely(sync_remain))
-			break;
-	}
-
-	*buf = p;
-	*len = remain;
-
-	return;
+	ptx_chrdev_put_stream(context, (void *)data, len);
 }
 
 static int isdbt2071_device_stream_handler(void *context, void *buf, u32 len)
 {
 	struct isdbt2071_stream_context *stream_ctx = context;
-	u8 *ctx_remain_buf = stream_ctx->remain_buf;
-	u32 ctx_remain_len = stream_ctx->remain_len;
-	u8 *p = buf;
-	u32 remain = len;
 
-	if (unlikely(ctx_remain_len)) {
-		if (likely((ctx_remain_len + len) >= ISDBT2071_DEVICE_TS_SYNC_SIZE)) {
-			u32 t = ISDBT2071_DEVICE_TS_SYNC_SIZE - ctx_remain_len;
-
-			memcpy(ctx_remain_buf + ctx_remain_len, p, t);
-			ctx_remain_len = ISDBT2071_DEVICE_TS_SYNC_SIZE;
-
-			isdbt2071_device_stream_process(stream_ctx->chrdev,
-						  &ctx_remain_buf,
-						  &ctx_remain_len);
-			if (likely(!ctx_remain_len)) {
-				p += t;
-				remain -= t;
-			}
-
-			stream_ctx->remain_len = 0;
-		} else {
-			memcpy(ctx_remain_buf + ctx_remain_len, p, len);
-			stream_ctx->remain_len += len;
-
-			return 0;
-		}
-	}
-
-	isdbt2071_device_stream_process(stream_ctx->chrdev, &p, &remain);
-
-	if (unlikely(remain)) {
-		memcpy(stream_ctx->remain_buf, p, remain);
-		stream_ctx->remain_len = remain;
-	}
-
+	px4_ts_plain_feed(&stream_ctx->framer, buf, len,
+			  isdbt2071_put_ts, stream_ctx->chrdev);
 	return 0;
 }
 
@@ -497,7 +423,7 @@ static int isdbt2071_chrdev_start_capture(struct ptx_chrdev *chrdev)
 	if (ret)
 		goto fail_tc;
 
-	stream_ctx->remain_len = 0;
+	px4_ts_plain_reset(&stream_ctx->framer);
 
 	ret = itedtv_bus_start_streaming(&isdbt2071->it930x.bus,
 					 isdbt2071_device_stream_handler,
