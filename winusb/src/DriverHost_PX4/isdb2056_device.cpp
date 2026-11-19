@@ -8,7 +8,6 @@
 #include "type.hpp"
 #include "command.hpp"
 #include "misc_win.h"
-#include "ts_sync.h"
 
 namespace px4 {
 
@@ -235,13 +234,16 @@ void Isdb2056Device::Term()
 
 	lock.unlock();
 
-	stream_ctx_.stream_buf = nullptr;
-	receiver_.reset();
+	receiver_->WaitForClose();
 
 	lock.lock();
 
 	it930x_term(&it930x_);
 	itedtv_bus_term(&it930x_.bus);
+
+	/* 最後の USB コールバックが完了してから参照先を解放する。 */
+	stream_ctx_.stream_buf.reset();
+	receiver_.reset();
 
 	init_ = false;
 	return;
@@ -358,27 +360,25 @@ int Isdb2056Device::SetBackendPower(bool state)
 	int ret = 0;
 	std::lock_guard<std::recursive_mutex> lock(lock_);
 
-	if (!state && !available_)
-		return 0;
+	if (!available_)
+		return state ? -ENODEV : 0;
 
 	if (state) {
 		ret = it930x_write_gpio(&it930x_, 3, false);
-		if (ret)
-			return ret;
-
-		Sleep(100);
-
-		ret = it930x_write_gpio(&it930x_, 2, true);
-		if (ret)
-			return ret;
-
-		Sleep(20);
-	} else {
-		it930x_write_gpio(&it930x_, 2, false);
-		it930x_write_gpio(&it930x_, 3, true);
+		if (!ret) {
+			Sleep(100);
+			ret = it930x_write_gpio(&it930x_, 2, true);
+		}
+		if (!ret) {
+			Sleep(20);
+			return 0;
+		}
 	}
 
-	return 0;
+	/* 途中で失敗しても電源停止とリセットの両方を試し、最初のエラーを返す。 */
+	const int power_ret = it930x_write_gpio(&it930x_, 2, false);
+	const int reset_ret = it930x_write_gpio(&it930x_, 3, true);
+	return ret ? ret : (power_ret ? power_ret : reset_ret);
 }
 
 int Isdb2056Device::SetLnbVoltage(std::int32_t voltage)
@@ -418,7 +418,7 @@ int Isdb2056Device::StartCapture()
 		it930x_.bus.usb.streaming.no_dma = true;
 		it930x_.bus.usb.streaming.no_raw_io = config_.usb.no_raw_io;
 
-		stream_ctx_.remain_len = 0;
+		px4_ts_plain_reset(&stream_ctx_.framer);
 
 		ret = itedtv_bus_start_streaming(&it930x_.bus, StreamHandler, this);
 		if (ret) {
@@ -448,88 +448,14 @@ int Isdb2056Device::StopCapture()
 	return 0;
 }
 
-void Isdb2056Device::StreamProcess(std::shared_ptr<px4::ReceiverBase::StreamBuffer> stream_buf, std::uint8_t **buf, std::size_t &len)
-{
-	std::uint8_t *p = *buf;
-	std::size_t remain = len;
-
-	while (remain) {
-		std::size_t i = 0;
-		bool sync_remain = false;
-
-		while (true) {
-			if (((i + 1) * 188) <= remain) {
-				/* 連続する同期バイトを数え、崩れた位置の直前までを出力する */
-				if (!px4_ts_has_plain_sync(p[i * 188]))
-					break;
-			} else {
-				sync_remain = true;
-				break;
-			}
-			i++;
-		}
-
-		if (i < ISDB2056_DEVICE_TS_SYNC_COUNT) {
-			p++;
-			remain--;
-			continue;
-		}
-
-		std::size_t pkt_len = 188 * i;
-		stream_buf->Write(p, pkt_len);
-
-		p += 188 * i;
-		remain -= 188 * i;
-
-		if (sync_remain)
-			break;
-	}
-
-	stream_buf->NotifyWrite();
-
-	*buf = p;
-	len = remain;
-
-	return;
-}
-
 int Isdb2056Device::StreamHandler(void *context, void *buf, std::uint32_t len)
 {
-	Isdb2056Device &obj = *static_cast<Isdb2056Device*>(context);
-	StreamContext &stream_ctx = obj.stream_ctx_;
-	std::uint8_t *p = static_cast<std::uint8_t*>(buf);
-	std::size_t remain = len;
-
-	if (stream_ctx.remain_len) {
-		if ((stream_ctx.remain_len + len) >= ISDB2056_DEVICE_TS_SYNC_SIZE) {
-			std::uint8_t * remain_buf = stream_ctx.remain_buf;
-			std::size_t t = ISDB2056_DEVICE_TS_SYNC_SIZE - stream_ctx.remain_len;
-
-			memcpy(remain_buf + stream_ctx.remain_len, p, t);
-			stream_ctx.remain_len = ISDB2056_DEVICE_TS_SYNC_SIZE;
-
-			StreamProcess(stream_ctx.stream_buf, &remain_buf, stream_ctx.remain_len);
-			if (!stream_ctx.remain_len) {
-				p += t;
-				remain -= t;
-			}
-
-			stream_ctx.remain_len = 0;
-		} else {
-			memcpy(stream_ctx.remain_buf + stream_ctx.remain_len, p, len);
-			stream_ctx.remain_len += len;
-
-			return 0;
-		}
-	}
-
-	StreamProcess(stream_ctx.stream_buf, &p, remain);
-
-	if (remain) {
-		memcpy(stream_ctx.remain_buf, p, remain);
-		stream_ctx.remain_len = remain;
-	}
-
+	auto &stream = static_cast<Isdb2056Device *>(context)->stream_ctx_;
+	px4_ts_plain_feed(&stream.framer, static_cast<const std::uint8_t *>(buf), len,
+		[](void *ctx, const unsigned char *data, std::size_t size) {
+			static_cast<px4::ReceiverBase::StreamBuffer *>(ctx)->Write(data, size);
+		}, stream.stream_buf.get());
+	stream.stream_buf->NotifyWrite();
 	return 0;
 }
 
@@ -608,11 +534,15 @@ Isdb2056Device::Isdb2056Receiver::~Isdb2056Receiver()
 {
 	dev_dbg(&parent_.dev_, "px4::Isdb2056Device::Isdb2056Receiver::~Isdb2056Receiver(%u)\n", index_);
 
-	std::unique_lock<std::mutex> lock(lock_);
-
-	close_cond_.wait(lock, [this] { return !open_; });
+	WaitForClose();
 
 	dev_dbg(&parent_.dev_, "px4::Isdb2056Device::Isdb2056Receiver::~Isdb2056Receiver(%u): exit\n", index_);
+}
+
+void Isdb2056Device::Isdb2056Receiver::WaitForClose()
+{
+	std::unique_lock<std::mutex> lock(lock_);
+	close_cond_.wait(lock, [this] { return !open_; });
 }
 
 int Isdb2056Device::Isdb2056Receiver::Init(bool sleep)
@@ -833,9 +763,14 @@ void Isdb2056Device::Isdb2056Receiver::Close()
 	std::unique_lock<std::mutex> lock(lock_);
 	std::lock_guard<std::recursive_mutex> dev_lock(parent_.lock_);
 
+	stream_buf_->Stop();
+	stream_buffer_started_ = false;
+	DisableTsPins();
 	parent_.receiver_->Term();
 	parent_.SetBackendPower(false);
 
+	current_system_ = px4::SystemType::UNSPECIFIED;
+	ts_pin_system_ = px4::SystemType::UNSPECIFIED;
 	open_ = false;
 
 	lock.unlock();
@@ -1092,7 +1027,7 @@ int Isdb2056Device::Isdb2056Receiver::CheckLock(bool &locked)
 		return -EINVAL;
 
 	int ret = 0;
-	std::lock_guard<std::mutex> lock(lock_);
+	std::unique_lock<std::mutex> lock(lock_);
 
 	switch (current_system_) {
 	case px4::SystemType::ISDB_T:
@@ -1110,9 +1045,8 @@ int Isdb2056Device::Isdb2056Receiver::CheckLock(bool &locked)
 
 	if (locked) {
 		dev_dbg(&parent_.dev_, "px4::Isdb2056Device::Isdb2056Receiver::CheckLock(%u): system: %d locked: true\n", index_, current_system_);
-		lock_.unlock();
-		ret = SetCapture(true);
-		lock_.lock();
+		lock.unlock();
+		return SetCapture(true);
 	}
 
 	return ret;
@@ -1184,71 +1118,99 @@ int Isdb2056Device::Isdb2056Receiver::SetLnbVoltage(std::int32_t voltage)
 	return 0;
 }
 
-int Isdb2056Device::Isdb2056Receiver::SetCapture(bool capture)
+int Isdb2056Device::Isdb2056Receiver::SetTsPins(px4::SystemType system, bool enabled)
 {
-	if (!init_ || !open_)
-		return -EINVAL;
-
-	dev_dbg(&parent_.dev_, "px4::Isdb2056Device::Isdb2056Receiver::SetCapture(%u): capture: %s\n", index_, (capture) ? "true" : "false");
-	dev_dbg(&parent_.dev_, "px4::Isdb2056Device::Isdb2056Receiver::SetCapture(%u): streaming: %s\n", index_, (streaming_) ? "true" : "false");
-	dev_dbg(&parent_.dev_, "px4::Isdb2056Device::Isdb2056Receiver::SetCapture(%u): current_system: %d\n", index_, current_system_);
-
-	int ret = 0;
-	std::lock_guard<std::mutex> lock(lock_);
-
-	switch (current_system_) {
+	int ret;
+	switch (system) {
 	case px4::SystemType::ISDB_T:
-		ret = tc90522_enable_ts_pins_t(&tc90522_t_, capture);
-		if (ret)
-			dev_err(&parent_.dev_, "px4::Isdb2056Device::Isdb2056Receiver::SetCapture(%u): tc90522_enable_ts_pins_t() failed.\n", index_);
-
+		ret = tc90522_enable_ts_pins_t(&tc90522_t_, enabled);
 		break;
-
 	case px4::SystemType::ISDB_S:
-		ret = tc90522_enable_ts_pins_s(&tc90522_s_, capture);
-		if (ret)
-			dev_err(&parent_.dev_, "px4::Isdb2056Device::Isdb2056Receiver::SetCapture(%u): tc90522_enable_ts_pins_s() failed.\n", index_);
-
+		ret = tc90522_enable_ts_pins_s(&tc90522_s_, enabled);
 		break;
-
 	default:
-		return 0;
+		return -EINVAL;
 	}
 
 	if (ret)
-		return ret;
+		dev_err(&parent_.dev_, "ISDB2056: TS pin change failed (system=%u, enabled=%d, ret=%d)\n",
+			static_cast<unsigned>(system), enabled, ret);
+	return ret;
+}
 
-	if (capture) {
-		ret = parent_.PrepareCapture();
-		if (ret)
-			return ret;
+int Isdb2056Device::Isdb2056Receiver::DisableTsPins()
+{
+	int ret = 0;
+	if (ts_pin_system_ != px4::SystemType::UNSPECIFIED && parent_.available_)
+		ret = SetTsPins(ts_pin_system_, false);
+	if (!ret)
+		ts_pin_system_ = px4::SystemType::UNSPECIFIED;
+	return ret;
+}
 
-		ret = parent_.StartCapture();
-		if (ret)
-			return ret;
+int Isdb2056Device::Isdb2056Receiver::SetCapture(bool capture)
+{
+	std::lock_guard<std::mutex> lock(lock_);
+	if (!init_ || !open_)
+		return -EINVAL;
 
-		std::size_t size = 188 * parent_.config_.device.receiver_max_packets;
-
-		if (!streaming_) {
-			stream_buf_->Alloc(size);
-			stream_buf_->SetThresholdSize(size / 10);
-			stream_buf_->Start();
-			streaming_ = true;
-		} else {
-			stream_buf_->Purge();
+	if (!capture) {
+		/* 選局状態や TS ピンの解除失敗にかかわらず USB 受信を停止する。 */
+		const bool was_streaming = streaming_;
+		if (was_streaming) {
+			parent_.StopCapture();
+			streaming_ = false;
 		}
-	} else {
-		ret = parent_.StopCapture();
-		if (ret)
-			return ret;
-
-		stream_buf_->Stop();
-		streaming_ = false;
+		/* バッファの配信側は残し、同じ接続で再開できるようにする。 */
+		int ret = DisableTsPins();
+		if (was_streaming && !stream_buf_->Purge() && !ret)
+			ret = -EIO;
+		return ret;
 	}
 
-	dev_dbg(&parent_.dev_, "px4::Isdb2056Device::Isdb2056Receiver::SetCapture(%u): succeeded.\n", index_);
+	/* Open 直後は、選局が完了するまで受信開始を保留する。 */
+	if (current_system_ == px4::SystemType::UNSPECIFIED)
+		return 0;
+	if (!parent_.available_)
+		return -ENODEV;
 
-	return ret;
+	if (!stream_buffer_started_) {
+		const auto packets = parent_.config_.device.receiver_max_packets;
+		if (!packets || packets > SIZE_MAX / 188)
+			return -EINVAL;
+		const std::size_t size = static_cast<std::size_t>(packets) * 188;
+		if (!stream_buf_->Alloc(size))
+			return -ENOMEM;
+		stream_buf_->SetThresholdSize(size / 10);
+	} else if (!streaming_ && !stream_buf_->AdvanceEpoch()) {
+		return -EIO;
+	}
+
+	if (ts_pin_system_ != current_system_) {
+		int ret = DisableTsPins();
+		if (ret)
+			return ret;
+	}
+	/* 有効化が途中で失敗しても、解除を試せるように対象を記録する。 */
+	ts_pin_system_ = current_system_;
+	int ret = SetTsPins(ts_pin_system_, true);
+	if (!ret)
+		ret = parent_.PrepareCapture();
+	if (!ret)
+		ret = parent_.StartCapture();
+	if (ret) {
+		DisableTsPins();
+		return ret;
+	}
+
+	if (!stream_buffer_started_) {
+		stream_buf_->Start();
+		stream_buffer_started_ = true;
+	}
+	if (streaming_ && !stream_buf_->Purge())
+		return -EIO;
+	streaming_ = true;
+	return 0;
 }
 
 int Isdb2056Device::Isdb2056Receiver::ReadStat(px4::command::StatType type, std::int32_t &value)

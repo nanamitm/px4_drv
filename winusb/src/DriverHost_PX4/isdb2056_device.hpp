@@ -23,11 +23,9 @@
 #include "tc90522.h"
 #include "r850.h"
 #include "rt710.h"
+#include "ts_plain_framer.h"
 
 namespace px4 {
-
-#define ISDB2056_DEVICE_TS_SYNC_COUNT	4U
-#define ISDB2056_DEVICE_TS_SYNC_SIZE		(188U * ISDB2056_DEVICE_TS_SYNC_COUNT)
 
 enum class Isdb2056DeviceModel {
 	ISDB2056 = 0,
@@ -87,9 +85,7 @@ public:
 private:
 	struct StreamContext final {
 		std::shared_ptr<px4::ReceiverBase::StreamBuffer> stream_buf;
-		/* 最初のコールバック前も未処理データなしの状態として初期化 */
-		std::uint8_t remain_buf[ISDB2056_DEVICE_TS_SYNC_SIZE] = {};
-		std::size_t remain_len = 0;
+		px4_ts_plain_framer framer{};
 	};
 
 	class Isdb2056Receiver final : public px4::ReceiverBase {
@@ -97,6 +93,7 @@ private:
 		Isdb2056Receiver() = delete;
 		Isdb2056Receiver(Isdb2056Device &parent, std::uintptr_t index);
 		~Isdb2056Receiver();
+		void WaitForClose();
 
 		// cannot copy
 		Isdb2056Receiver(const Isdb2056Receiver &) = delete;
@@ -121,6 +118,9 @@ private:
 		int SetStreamId() override;
 
 	private:
+		int SetTsPins(px4::SystemType system, bool enabled);
+		int DisableTsPins();
+
 		static struct tc90522_regbuf tc_init_t_[];
 		static struct tc90522_regbuf tc_init_s_[];
 
@@ -138,7 +138,9 @@ private:
 		r850_tuner r850_;
 		rt710_tuner rt710_;
 		px4::SystemType current_system_;
+		px4::SystemType ts_pin_system_ = px4::SystemType::UNSPECIFIED;
 		std::atomic_bool streaming_;
+		bool stream_buffer_started_ = false;
 	};
 
 	void LoadConfig();
@@ -152,7 +154,6 @@ private:
 	int StartCapture();
 	int StopCapture();
 
-	static void StreamProcess(std::shared_ptr<px4::ReceiverBase::StreamBuffer> stream_buf, std::uint8_t **buf, std::size_t &len);
 	static int StreamHandler(void *context, void *buf, std::uint32_t len);
 
 	Isdb2056DeviceModel model_;
