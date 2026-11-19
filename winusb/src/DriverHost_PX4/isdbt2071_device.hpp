@@ -114,6 +114,8 @@ private:
 		int SetStreamId() override;
 
 	private:
+		int StopReceiverCapture();
+
 		static struct tc90522_regbuf tc_init_t_[];
 
 		Isdbt2071Device &parent_;
@@ -127,6 +129,7 @@ private:
 		r850_tuner r850_;
 		px4::SystemType system_;
 		std::atomic_bool streaming_;
+		bool ts_pin_cleanup_pending_ = false;
 	};
 
 	void LoadConfig();

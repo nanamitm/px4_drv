@@ -627,18 +627,17 @@ void Isdbt2071Device::Isdbt2071Receiver::Close()
 {
 	dev_dbg(&parent_.dev_, "px4::Isdbt2071Device::Isdbt2071Receiver::Close(%u): init_: %s, open_: %s\n", index_, (init_) ? "true" : "false", (open_) ? "true" : "false");
 
+	std::lock_guard<std::mutex> lock(lock_);
 	if (!init_ || !open_)
 		return;
 
-	SetCapture(false);
-	SetLnbVoltage(0);
-
-	std::unique_lock<std::mutex> lock(lock_);
 	std::lock_guard<std::recursive_mutex> dev_lock(parent_.lock_);
 
+	StopReceiverCapture();
 	parent_.receiver_->Term();
 	parent_.SetBackendPower(false);
 
+	ts_pin_cleanup_pending_ = false;
 	open_ = false;
 
 	close_cond_.notify_all();
@@ -735,11 +734,11 @@ int Isdbt2071Device::Isdbt2071Receiver::SetFrequency()
 
 int Isdbt2071Device::Isdbt2071Receiver::CheckLock(bool &locked)
 {
+	std::unique_lock<std::mutex> lock(lock_);
 	if (!init_ || !open_)
 		return -EINVAL;
 
 	int ret = 0;
-	std::lock_guard<std::mutex> lock(lock_);
 
 	switch (system_) {
 	case px4::SystemType::ISDB_T:
@@ -751,11 +750,10 @@ int Isdbt2071Device::Isdbt2071Receiver::CheckLock(bool &locked)
 		break;
 	}
 
-	if (locked) {
+	if (!ret && locked) {
 		dev_dbg(&parent_.dev_, "px4::Isdbt2071Device::Isdbt2071Receiver::CheckLock(%u): system: %d locked: true\n", index_, system_);
-		lock_.unlock();
-		ret = SetCapture(true);
-		lock_.lock();
+		lock.unlock();
+		return SetCapture(true);
 	}
 
 	return ret;
@@ -771,62 +769,63 @@ int Isdbt2071Device::Isdbt2071Receiver::SetLnbVoltage(std::int32_t voltage)
 	return 0;
 }
 
+int Isdbt2071Device::Isdbt2071Receiver::StopReceiverCapture()
+{
+	/* TS ピンの解除が失敗しても USB ワーカーの終了を待つ。 */
+	if (streaming_) {
+		parent_.StopCapture();
+		streaming_ = false;
+		stream_buf_->Stop();
+	}
+
+	if (ts_pin_cleanup_pending_ && parent_.available_) {
+		const int ret = tc90522_enable_ts_pins_t(&tc90522_t_, false);
+		if (ret) {
+			dev_err(&parent_.dev_, "ISDBT2071: disabling TS pins failed (ret: %d)\n", ret);
+			return ret;
+		}
+	}
+	ts_pin_cleanup_pending_ = false;
+	return 0;
+}
+
 int Isdbt2071Device::Isdbt2071Receiver::SetCapture(bool capture)
 {
+	std::lock_guard<std::mutex> lock(lock_);
 	if (!init_ || !open_)
 		return -EINVAL;
 
-	dev_dbg(&parent_.dev_, "px4::Isdbt2071Device::Isdbt2071Receiver::SetCapture(%u): capture: %s\n", index_, (capture) ? "true" : "false");
+	std::lock_guard<std::recursive_mutex> dev_lock(parent_.lock_);
+	if (!capture)
+		return StopReceiverCapture();
+	if (!parent_.available_)
+		return -ENODEV;
 
-	int ret = 0;
-	std::lock_guard<std::mutex> lock(lock_);
-
-	switch (system_) {
-	case px4::SystemType::ISDB_T:
-		ret = tc90522_enable_ts_pins_t(&tc90522_t_, capture);
-		if (ret)
-			dev_err(&parent_.dev_, "px4::Isdbt2071Device::Isdbt2071Receiver::SetCapture(%u): tc90522_enable_ts_pins_t() failed.\n", index_);
-
-		break;
-
-	default:
-		return 0;
-	}
-
+	/* ピン有効化が途中で失敗した場合にも解除を試す。 */
+	ts_pin_cleanup_pending_ = true;
+	int ret = tc90522_enable_ts_pins_t(&tc90522_t_, true);
 	if (ret)
-		return ret;
-
-	if (capture) {
+		dev_err(&parent_.dev_, "ISDBT2071: enabling TS pins failed (ret: %d)\n", ret);
+	if (!ret)
 		ret = parent_.PrepareCapture();
-		if (ret)
-			return ret;
-
+	if (!ret)
 		ret = parent_.StartCapture();
-		if (ret)
-			return ret;
-
-		std::size_t size = 188 * parent_.config_.device.receiver_max_packets;
-
-		if (!streaming_) {
-			stream_buf_->Alloc(size);
-			stream_buf_->SetThresholdSize(size / 10);
-			stream_buf_->Start();
-			streaming_ = true;
-		} else {
-			stream_buf_->Purge();
-		}
-	} else {
-		ret = parent_.StopCapture();
-		if (ret)
-			return ret;
-
-		stream_buf_->Stop();
-		streaming_ = false;
+	if (ret) {
+		StopReceiverCapture();
+		return ret;
 	}
 
-	dev_dbg(&parent_.dev_, "px4::Isdbt2071Device::Isdbt2071Receiver::SetCapture(%u): succeeded.\n", index_);
+	if (!streaming_) {
+		const std::size_t size = 188 * parent_.config_.device.receiver_max_packets;
+		stream_buf_->Alloc(size);
+		stream_buf_->SetThresholdSize(size / 10);
+		stream_buf_->Start();
+		streaming_ = true;
+	} else if (!stream_buf_->Purge()) {
+		return -EIO;
+	}
 
-	return ret;
+	return 0;
 }
 
 int Isdbt2071Device::Isdbt2071Receiver::ReadStat(px4::command::StatType type, std::int32_t &value)
