@@ -75,7 +75,6 @@ PxMltDevice::PxMltDevice(const std::wstring &path, const px4::DeviceDefinition &
 	LoadConfig();
 
 	memset(&it930x_, 0, sizeof(it930x_));
-	memset(&stream_ctx_, 0, sizeof(stream_ctx_));
 }
 
 PxMltDevice::~PxMltDevice()
@@ -276,15 +275,19 @@ void PxMltDevice::Term()
 
 	lock.unlock();
 
-	for (int i = 0; i < receiver_num_; i++) {
-		stream_ctx_.stream_buf[i] = nullptr;
-		receivers_[i].reset();
-	}
+	/* Close() と USB ワーカーの参照先を、終了が確定するまで保持する。 */
+	for (int i = 0; i < receiver_num_; i++)
+		receivers_[i]->WaitForClose();
 
 	lock.lock();
 
 	it930x_term(&it930x_);
 	itedtv_bus_term(&it930x_.bus);
+
+	for (int i = 0; i < receiver_num_; i++) {
+		stream_ctx_.stream_buf[i].reset();
+		receivers_[i].reset();
+	}
 
 	init_ = false;
 	return;
@@ -519,85 +522,80 @@ int PxMltDevice::StopCapture()
 	return 0;
 }
 
-void PxMltDevice::StreamProcess(std::shared_ptr<px4::ReceiverBase::StreamBuffer> stream_buf[], int num, std::uint8_t **buf, std::size_t &len, StreamStats &stats)
+void PxMltDevice::StreamProcess(StreamContext &stream_ctx, int num, std::uint8_t **buf, std::size_t &len)
 {
+	StreamStats &stats = stream_ctx.stats;
 	std::uint8_t *p = *buf;
 	std::size_t remain = len;
 
-	while (remain) {
-		std::size_t i;
-		bool sync_remain = false;
-
-		for (i = 0; i < PXMLT_DEVICE_TS_SYNC_COUNT; i++) {
-			if (((i + 1) * 188) <= remain) {
-				if (!px4_ts_has_tagged_sync(p[i * 188]))
-					break;
-			} else {
-				sync_remain = true;
+	while (remain >= 188) {
+		if (stats.aligned && !px4_ts_has_tagged_sync(p[0])) {
+			if (remain < PXMLT_DEVICE_TS_SYNC_SIZE)
 				break;
+
+			/* 既知の境界で bit7 付きのパケットを数え、再同期の位置は通常どおり探索する。 */
+			const std::uint8_t *q = p;
+			std::size_t r = remain;
+			int good_run = 0;
+			while (r >= 188 && good_run < PXMLT_DEVICE_TS_SYNC_COUNT) {
+				if (px4_ts_has_tagged_sync(q[0])) {
+					good_run++;
+				} else if ((q[0] & 0x0f) == 0x07) {
+					u8 id = (q[0] & 0x70) >> 4;
+
+					if (id && id <= num)
+						stats.error_flagged[id - 1]++;
+					good_run = 0;
+				} else {
+					break;
+				}
+				q += 188;
+				r -= 188;
 			}
+			stats.aligned = false;
 		}
 
-		if (sync_remain)
-			break;
+		if (!stats.aligned) {
+			if (remain < PXMLT_DEVICE_TS_SYNC_SIZE)
+				break;
 
-		if (i < PXMLT_DEVICE_TS_SYNC_COUNT) {
-			if (stats.aligned) {
-				/* 配信済みパケットの直後で同期を失ったため、ここはパケット境界と分かる。
-				 * 境界を保ったまま先読みし、bit7 以外は同期値と一致するパケットを
-				 * 誤りフラグ付きとして数える。読み飛ばし処理そのものは変えない。 */
-				const std::uint8_t *q = p;
-				std::size_t r = remain;
-				int good_run = 0;
-
-				while (r >= 188 && good_run < PXMLT_DEVICE_TS_SYNC_COUNT) {
-					if (px4_ts_has_tagged_sync(q[0])) {
-						good_run++;
-					} else if ((q[0] & 0x0f) == 0x07) {
-						u8 id = (q[0] & 0x70) >> 4;
-
-						if (id && id <= 5)
-							stats.error_flagged[id - 1]++;
-						good_run = 0;
-					} else {
-						break;
-					}
-					q += 188;
-					r -= 188;
+			std::size_t i;
+			for (i = 0; i < PXMLT_DEVICE_TS_SYNC_COUNT; i++) {
+				if (!px4_ts_has_tagged_sync(p[i * 188]))
+					break;
+			}
+			if (i < PXMLT_DEVICE_TS_SYNC_COUNT) {
+				if (!stats.in_resync) {
+					stats.in_resync = true;
+					stats.resync_events++;
 				}
-
-				stats.aligned = false;
+				stats.skipped_bytes++;
+				p++;
+				remain--;
+				continue;
 			}
-			if (!stats.in_resync) {
-				stats.in_resync = true;
-				stats.resync_events++;
-			}
-			stats.skipped_bytes++;
-
-			p++;
-			remain--;
-			continue;
+			stats.aligned = true;
 		}
 
 		while (remain >= 188 && px4_ts_has_tagged_sync(p[0])) {
 			u8 id = (p[0] & 0x70) >> 4;
 
-			if (id && id <= num) {
+			if (id && id <= num && stream_ctx.enabled[id - 1]) {
 				std::size_t pkt_len = 188;
 
 				p[0] = 0x47;
-				stream_buf[id - 1]->Write(p, pkt_len);
+				stream_ctx.stream_buf[id - 1]->Write(p, pkt_len);
 			}
 
 			p += 188;
 			remain -= 188;
-			stats.aligned = true;
 			stats.in_resync = false;
 		}
 	}
 
 	for (int i = 0; i < num; i++)
-		stream_buf[i]->NotifyWrite();
+		if (stream_ctx.enabled[i])
+			stream_ctx.stream_buf[i]->NotifyWrite();
 
 	*buf = p;
 	len = remain;
@@ -610,47 +608,42 @@ int PxMltDevice::StreamHandler(void *context, void *buf, std::uint32_t len)
 	PxMltDevice &obj = *static_cast<PxMltDevice*>(context);
 	int receiver_num = obj.receiver_num_;
 	StreamContext &stream_ctx = obj.stream_ctx_;
+	std::unique_lock<std::mutex> lock(stream_ctx.lock);
 	std::uint8_t *p = static_cast<std::uint8_t*>(buf);
 	std::size_t remain = len;
 
-	if (stream_ctx.remain_len) {
-		if ((stream_ctx.remain_len + len) >= PXMLT_DEVICE_TS_SYNC_SIZE) {
-			std::uint8_t * remain_buf = stream_ctx.remain_buf;
-			std::size_t t = PXMLT_DEVICE_TS_SYNC_SIZE - stream_ctx.remain_len;
+	while (stream_ctx.remain_len) {
+		const std::size_t need = stream_ctx.stats.aligned && px4_ts_has_tagged_sync(stream_ctx.remain_buf[0])
+			? 188 : PXMLT_DEVICE_TS_SYNC_SIZE;
+		const std::size_t take = need - stream_ctx.remain_len;
+		std::uint8_t *tail = stream_ctx.remain_buf;
 
-			memcpy(remain_buf + stream_ctx.remain_len, p, t);
-			std::size_t prev_len = stream_ctx.remain_len;
-			std::uint64_t prev_skipped = stream_ctx.stats.skipped_bytes;
-
-			stream_ctx.remain_len = PXMLT_DEVICE_TS_SYNC_SIZE;
-
-			StreamProcess(stream_ctx.stream_buf, receiver_num, &remain_buf, stream_ctx.remain_len, stream_ctx.stats);
-			if (!stream_ctx.remain_len) {
-				p += t;
-				remain -= t;
-			} else {
-				/* 同期できなかった場合、前回の端数は捨てられ、今回の先頭 t バイトは
-				 * 下の処理で読み直される。読み直す分を二重に数えないよう、
-				 * 捨てられる前回の端数だけを読み飛ばし数とする。 */
-				stream_ctx.stats.skipped_bytes = prev_skipped + prev_len;
-				stream_ctx.stats.aligned = false;
-			}
-
-			stream_ctx.remain_len = 0;
-		} else {
-			memcpy(stream_ctx.remain_buf + stream_ctx.remain_len, p, len);
-			stream_ctx.remain_len += len;
-
+		if (remain < take) {
+			memcpy(stream_ctx.remain_buf + stream_ctx.remain_len, p, remain);
+			stream_ctx.remain_len += remain;
 			return 0;
 		}
+
+		memcpy(stream_ctx.remain_buf + stream_ctx.remain_len, p, take);
+		stream_ctx.remain_len = need;
+		StreamProcess(stream_ctx, receiver_num, &tail, stream_ctx.remain_len);
+		p += take;
+		remain -= take;
+		/* 同期候補が窓の途中にあれば、次の入力を足して検証する。 */
+		if (stream_ctx.remain_len)
+			memmove(stream_ctx.remain_buf, tail, stream_ctx.remain_len);
 	}
 
-	StreamProcess(stream_ctx.stream_buf, receiver_num, &p, remain, stream_ctx.stats);
+	StreamProcess(stream_ctx, receiver_num, &p, remain);
 
 	if (remain) {
-		dev_dbg(&obj.dev_, "px4::PxMltDevice::StreamHandler: remain: %lu\n", remain);
 		memcpy(stream_ctx.remain_buf, p, remain);
 		stream_ctx.remain_len = remain;
+	}
+	lock.unlock();
+
+	if (remain) {
+		dev_dbg(&obj.dev_, "px4::PxMltDevice::StreamHandler: remain: %lu\n", static_cast<unsigned long>(remain));
 	}
 
 	/* ログはファイルへ同期書き込みされるため、受信スレッドでの出力は
@@ -706,11 +699,15 @@ PxMltDevice::PxMltReceiver::~PxMltReceiver()
 {
 	dev_dbg(&parent_.dev_, "px4::PxMltDevice::PxMltReceiver::~PxMltReceiver(%u)\n", index_);
 
-	std::unique_lock<std::mutex> lock(lock_);
-
-	close_cond_.wait(lock, [this] { return !open_; });
+	WaitForClose();
 
 	dev_dbg(&parent_.dev_, "px4::PxMltDevice::PxMltReceiver::~PxMltReceiver(%u): exit\n", index_);
+}
+
+void PxMltDevice::PxMltReceiver::WaitForClose()
+{
+	std::unique_lock<std::mutex> lock(lock_);
+	close_cond_.wait(lock, [this] { return !open_; });
 }
 
 int PxMltDevice::PxMltReceiver::Open()
@@ -830,6 +827,9 @@ void PxMltDevice::PxMltReceiver::Close()
 	std::unique_lock<std::mutex> lock(lock_);
 	std::lock_guard<std::recursive_mutex> dev_lock(parent_.lock_);
 
+	stream_buf_->Stop();
+	stream_buffer_started_ = false;
+
 	assert(parent_.open_count_ > 0);
 
 	{
@@ -906,6 +906,7 @@ int PxMltDevice::PxMltReceiver::SetFrequency()
 		for (int i = 0; i < parent_.receiver_num_; i++) {
 			PxMltReceiver &receiver = *parent_.receivers_[i];
 			std::lock_guard<std::recursive_mutex> dev_lock(parent_.lock_);
+			std::lock_guard<std::mutex> tuner_lock(*receiver.tuner_lock_);
 
 			if (receiver.cxd2858er_.config.ter.rfin_matching)
 				continue;
@@ -916,10 +917,8 @@ int PxMltDevice::PxMltReceiver::SetFrequency()
 				continue;
 
 			ret = cxd2856er_init(&receiver.cxd2856er_);
-			if (!ret) {
-				std::lock_guard<std::mutex> tuner_lock(*receiver.tuner_lock_);
+			if (!ret)
 				ret = cxd2858er_init(&receiver.cxd2858er_);
-			}
 			cxd2856er_term(&receiver.cxd2856er_);
 
 			if (ret) {
@@ -961,14 +960,14 @@ int PxMltDevice::PxMltReceiver::SetFrequency()
 		case px4::SystemType::ISDB_T:
 			ret = cxd2858er_set_params_t(&cxd2858er_, CXD2858ER_ISDB_T_SYSTEM, params_.freq, 6);
 			if (ret)
-				dev_err(&parent_.dev_, "px4::PxMltDevice::PxMltReceiver::SetFrequency(%u): cxd2858er_set_params_t(%u, 6) failed. (ret: %d)\n");
+				dev_err(&parent_.dev_, "px4::PxMltDevice::PxMltReceiver::SetFrequency(%u): cxd2858er_set_params_t(%u, 6) failed. (ret: %d)\n", static_cast<unsigned>(index_), params_.freq, ret);
 
 			break;
 
 		case px4::SystemType::ISDB_S:
 			ret = cxd2858er_set_params_s(&cxd2858er_, CXD2858ER_ISDB_S_SYSTEM, params_.freq, 28860);
 			if (ret)
-				dev_err(&parent_.dev_, "px4::PxMltDevice::PxMltReceiver::SetFrequency(%u): cxd2858er_set_params_s(%u, 28860) failed. (ret: %d)\n");
+				dev_err(&parent_.dev_, "px4::PxMltDevice::PxMltReceiver::SetFrequency(%u): cxd2858er_set_params_s(%u, 28860) failed. (ret: %d)\n", static_cast<unsigned>(index_), params_.freq, ret);
 
 			break;
 
@@ -990,7 +989,7 @@ int PxMltDevice::PxMltReceiver::SetFrequency()
 
 	ret = cxd2856er_post_tune(&cxd2856er_);
 	if (ret) {
-		dev_err(&parent_.dev_, "px4::PxMltDevice::PxMltReceiver::SetFrequency(%u): cxd2856er_post_tune() failed. (ret: %d)\n");
+		dev_err(&parent_.dev_, "px4::PxMltDevice::PxMltReceiver::SetFrequency(%u): cxd2856er_post_tune() failed. (ret: %d)\n", static_cast<unsigned>(index_), ret);
 		return ret;
 	}
 
@@ -1120,31 +1119,50 @@ int PxMltDevice::PxMltReceiver::SetCapture(bool capture)
 	if ((capture && streaming_) || (!capture && !streaming_))
 		return -EALREADY;
 
-	if (capture)
-		ret = parent_.StartCapture();
-	else
-		ret = parent_.StopCapture();
-
-	if (!ret) {
-		if (capture) {
-			std::size_t size = 188 * parent_.config_.device.receiver_max_packets;
-
-			stream_buf_->Alloc(size);
+	if (capture) {
+		if (!stream_buffer_started_) {
+			const auto packets = parent_.config_.device.receiver_max_packets;
+			if (!packets || packets > SIZE_MAX / 188)
+				return -EINVAL;
+			const std::size_t size = static_cast<std::size_t>(packets) * 188;
+			if (!stream_buf_->Alloc(size))
+				return -ENOMEM;
 			stream_buf_->SetThresholdSize(size / 10);
-			stream_buf_->Start();
-		} else {
-			stream_buf_->Stop();
-			{
-				const auto diagnostics = stream_buf_->GetWriteDiagnostics();
-				dev_info(&parent_.dev_, "TS output diagnostics input=%u freq=%u receiver_max_packets=%u rejected_bytes=%llu rejected_writes=%llu purge_write_discarded_bytes=%llu purge_requests=%llu (capture interval, rejection may include inactive output)\n",
-					index_, params_.freq, parent_.config_.device.receiver_max_packets,
-					static_cast<unsigned long long>(diagnostics.rejected_bytes),
-					static_cast<unsigned long long>(diagnostics.rejected_writes),
-					static_cast<unsigned long long>(diagnostics.purge_write_discarded_bytes),
-					static_cast<unsigned long long>(diagnostics.purge_requests));
-			}
+		} else if (!stream_buf_->AdvanceEpoch()) {
+			return -EIO;
 		}
-		streaming_ = capture;
+
+		ret = parent_.StartCapture();
+		if (ret)
+			return ret;
+		/* 初回はバッファを稼働させ、再開時も診断の計数を初期化する。 */
+		stream_buf_->Start();
+		stream_buffer_started_ = true;
+		{
+			std::lock_guard<std::mutex> stream_lock(parent_.stream_ctx_.lock);
+			parent_.stream_ctx_.enabled[index_] = true;
+		}
+		streaming_ = true;
+	} else {
+		{
+			/* 同じデータ接続の配信スレッドは待機させ、この入力への書き込みだけを止める。 */
+			std::lock_guard<std::mutex> stream_lock(parent_.stream_ctx_.lock);
+			parent_.stream_ctx_.enabled[index_] = false;
+		}
+		ret = parent_.StopCapture();
+		if (ret)
+			return ret;
+		streaming_ = false;
+
+		const auto diagnostics = stream_buf_->GetWriteDiagnostics();
+		dev_info(&parent_.dev_, "TS output diagnostics input=%u freq=%u receiver_max_packets=%u rejected_bytes=%llu rejected_writes=%llu purge_write_discarded_bytes=%llu purge_requests=%llu (capture interval)\n",
+			static_cast<unsigned>(index_), params_.freq, parent_.config_.device.receiver_max_packets,
+			static_cast<unsigned long long>(diagnostics.rejected_bytes),
+			static_cast<unsigned long long>(diagnostics.rejected_writes),
+			static_cast<unsigned long long>(diagnostics.purge_write_discarded_bytes),
+			static_cast<unsigned long long>(diagnostics.purge_requests));
+		if (!stream_buf_->Purge())
+			return -EIO;
 	}
 
 	return ret;

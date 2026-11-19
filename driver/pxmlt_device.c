@@ -24,6 +24,7 @@ struct pxmlt_stream_context {
 	struct ptx_chrdev *chrdev[PXMLT_CHRDEV_MAX_NUM];
 	u8 remain_buf[PXMLT_DEVICE_TS_SYNC_SIZE];
 	size_t remain_len;
+	bool locked;
 };
 
 static int pxmlt_chrdev_set_lnb_voltage(struct ptx_chrdev *chrdev, int voltage);
@@ -113,7 +114,7 @@ static int pxmlt_backend_term(struct pxmlt_device *pxmlt)
 }
 #endif
 
-static void pxmlt_device_stream_process(struct ptx_chrdev **chrdev,
+static void pxmlt_device_stream_process(struct pxmlt_stream_context *stream_ctx,
 				      u8 **buf, u32 *len)
 {
 	u8 *p = *buf;
@@ -121,20 +122,33 @@ static void pxmlt_device_stream_process(struct ptx_chrdev **chrdev,
 
 	while (likely(remain)) {
 		u32 i;
-		bool sync_remain = false;
 
-		for (i = 0; i < PXMLT_DEVICE_TS_SYNC_COUNT; i++) {
-			if (likely(((i + 1) * 188) <= remain)) {
-				if (unlikely(!px4_ts_has_tagged_sync(p[i * 188])))
-					break;
-			} else {
-				sync_remain = true;
+		if (stream_ctx->locked) {
+			u8 id;
+
+			if (remain < 188)
 				break;
+			if (!px4_ts_has_tagged_sync(p[0])) {
+				stream_ctx->locked = false;
+				continue;
 			}
+			id = (p[0] & 0x70) >> 4;
+			if (likely(id && id <= PXMLT_CHRDEV_MAX_NUM && stream_ctx->chrdev[id - 1])) {
+				p[0] = 0x47;
+				ptx_chrdev_put_stream(stream_ctx->chrdev[id - 1], p, 188);
+			}
+			p += 188;
+			remain -= 188;
+			continue;
 		}
 
-		if (unlikely(sync_remain))
+		if (remain < PXMLT_DEVICE_TS_SYNC_SIZE)
 			break;
+
+		for (i = 0; i < PXMLT_DEVICE_TS_SYNC_COUNT; i++) {
+			if (!px4_ts_has_tagged_sync(p[i * 188]))
+				break;
+		}
 
 		if (unlikely(i < PXMLT_DEVICE_TS_SYNC_COUNT)) {
 			p++;
@@ -142,17 +156,7 @@ static void pxmlt_device_stream_process(struct ptx_chrdev **chrdev,
 			continue;
 		}
 
-		while (likely(remain >= 188 && ((p[0] & 0x8f) == 0x07))) {
-			u8 id = (p[0] & 0x70) >> 4;
-
-			if (likely(id && id < 6)) {
-				p[0] = 0x47;
-				ptx_chrdev_put_stream(chrdev[id - 1], p, 188);
-			}
-
-			p += 188;
-			remain -= 188;
-		}
+		stream_ctx->locked = true;
 	}
 
 	*buf = p;
@@ -169,31 +173,30 @@ static int pxmlt_device_stream_handler(void *context, void *buf, u32 len)
 	u8 *p = buf;
 	u32 remain = len;
 
-	if (unlikely(ctx_remain_len)) {
-		if (likely((ctx_remain_len + len) >= PXMLT_DEVICE_TS_SYNC_SIZE)) {
-			u32 t = PXMLT_DEVICE_TS_SYNC_SIZE - ctx_remain_len;
+	while (unlikely(ctx_remain_len)) {
+		u32 need = stream_ctx->locked ? 188 : PXMLT_DEVICE_TS_SYNC_SIZE;
+		u32 take = need - ctx_remain_len;
+		u8 *tail = ctx_remain_buf;
 
-			memcpy(ctx_remain_buf + ctx_remain_len, p, t);
-			ctx_remain_len = PXMLT_DEVICE_TS_SYNC_SIZE;
-
-			pxmlt_device_stream_process(stream_ctx->chrdev,
-						  &ctx_remain_buf,
-						  &ctx_remain_len);
-			if (likely(!ctx_remain_len)) {
-				p += t;
-				remain -= t;
-			}
-
-			stream_ctx->remain_len = 0;
-		} else {
-			memcpy(ctx_remain_buf + ctx_remain_len, p, len);
-			stream_ctx->remain_len += len;
-
+		if (remain < take) {
+			memcpy(ctx_remain_buf + ctx_remain_len, p, remain);
+			stream_ctx->remain_len = ctx_remain_len + remain;
 			return 0;
 		}
-	}
 
-	pxmlt_device_stream_process(stream_ctx->chrdev, &p, &remain);
+		memcpy(ctx_remain_buf + ctx_remain_len, p, take);
+		ctx_remain_len = need;
+		pxmlt_device_stream_process(stream_ctx, &tail,
+					  &ctx_remain_len);
+		p += take;
+		remain -= take;
+		/* 同期候補が窓の途中にあれば、次の入力を足して検証する。 */
+		if (ctx_remain_len)
+			memmove(ctx_remain_buf, tail, ctx_remain_len);
+	}
+	stream_ctx->remain_len = 0;
+
+	pxmlt_device_stream_process(stream_ctx, &p, &remain);
 
 	if (unlikely(remain)) {
 		memcpy(stream_ctx->remain_buf, p, remain);
@@ -451,8 +454,10 @@ static int pxmlt_chrdev_tune(struct ptx_chrdev *chrdev,
 			struct pxmlt_chrdev *other = &pxmlt->chrdevm[i];
 
 			mutex_lock(&pxmlt->lock);
+			mutex_lock(other->tuner_lock);
 
 			if (other->cxd2858er.config.ter.rfin_matching) {
+				mutex_unlock(other->tuner_lock);
 				mutex_unlock(&pxmlt->lock);
 				continue;
 			}
@@ -461,11 +466,8 @@ static int pxmlt_chrdev_tune(struct ptx_chrdev *chrdev,
 
 			if (!atomic_read(&other->chrdev->open)) {
 				ret = cxd2856er_init(&other->cxd2856er);
-				if (!ret) {
-					mutex_lock(other->tuner_lock);
+				if (!ret)
 					ret = cxd2858er_init(&other->cxd2858er);
-					mutex_unlock(other->tuner_lock);
-				}
 				cxd2856er_term(&other->cxd2856er);
 
 				if (ret) {
@@ -478,6 +480,7 @@ static int pxmlt_chrdev_tune(struct ptx_chrdev *chrdev,
 				}
 			}
 
+			mutex_unlock(other->tuner_lock);
 			mutex_unlock(&pxmlt->lock);
 		}
 
@@ -693,6 +696,7 @@ static int pxmlt_chrdev_start_capture(struct ptx_chrdev *chrdev)
 		}
 
 		stream_ctx->remain_len = 0;
+		stream_ctx->locked = false;
 
 		ret = itedtv_bus_start_streaming(&pxmlt->it930x.bus,
 						 pxmlt_device_stream_handler,
@@ -853,7 +857,7 @@ static int pxmlt_device_load_config(struct pxmlt_device *pxmlt,
 		return ret;
 	} else if (!tmp) {
 		dev_warn(dev, "EEPROM error.\n");
-		return ret;
+		return -EIO;
 	}
 
 	for (i = 0; i < pxmlt->chrdevm_num; i++) {

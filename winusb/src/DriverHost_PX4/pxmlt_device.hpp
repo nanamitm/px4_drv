@@ -108,6 +108,8 @@ private:
 	};
 
 	struct StreamContext final {
+		std::mutex lock;
+		bool enabled[5] = {};
 		std::shared_ptr<px4::ReceiverBase::StreamBuffer> stream_buf[5];
 		/* 最初のコールバック前も未処理データなしの状態として初期化 */
 		std::uint8_t remain_buf[PXMLT_DEVICE_TS_SYNC_SIZE] = {};
@@ -120,6 +122,7 @@ private:
 		PxMltReceiver() = delete;
 		PxMltReceiver(PxMltDevice &parent, std::uintptr_t index);
 		~PxMltReceiver();
+		void WaitForClose();
 
 		// cannot copy
 		PxMltReceiver(const PxMltReceiver &) = delete;
@@ -158,6 +161,7 @@ private:
 		cxd2858er_tuner cxd2858er_;
 		px4::SystemType current_system_;
 		bool streaming_;
+		bool stream_buffer_started_ = false;
 		bool tsmf_;
 		bool null_packet_filter_;
 	};
@@ -172,7 +176,7 @@ private:
 	int StartCapture();
 	int StopCapture();
 
-	static void StreamProcess(std::shared_ptr<px4::ReceiverBase::StreamBuffer> stream_buf[], int num, std::uint8_t **buf, std::size_t &len, StreamStats &stats);
+	static void StreamProcess(StreamContext &stream_ctx, int num, std::uint8_t **buf, std::size_t &len);
 	void LogStreamStats(bool total);
 	static int StreamHandler(void *context, void *buf, std::uint32_t len);
 
