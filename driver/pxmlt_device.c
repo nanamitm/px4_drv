@@ -853,7 +853,7 @@ static int pxmlt_device_load_config(struct pxmlt_device *pxmlt,
 		return ret;
 	} else if (!tmp) {
 		dev_warn(dev, "EEPROM error.\n");
-		return ret;
+		return -EIO;
 	}
 
 	for (i = 0; i < pxmlt->chrdevm_num; i++) {
