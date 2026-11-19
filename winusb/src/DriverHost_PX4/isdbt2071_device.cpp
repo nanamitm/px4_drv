@@ -200,17 +200,20 @@ void Isdbt2071Device::Term()
 	if (!init_)
 		return;
 
-	receiver_manager_.Unregister(receiver_.get());
-
 	lock.unlock();
 
-	stream_ctx_.stream_buf = nullptr;
-	receiver_.reset();
+	/* 登録解除中に進行中の Open がデバイスロックを取得できるようにする。 */
+	receiver_manager_.Unregister(receiver_.get());
+	receiver_->WaitForClose();
 
 	lock.lock();
 
 	it930x_term(&it930x_);
 	itedtv_bus_term(&it930x_.bus);
+
+	/* 最後の USB コールバックが完了してから参照先を解放する。 */
+	stream_ctx_.stream_buf.reset();
+	receiver_.reset();
 
 	init_ = false;
 	return;
@@ -556,11 +559,15 @@ Isdbt2071Device::Isdbt2071Receiver::~Isdbt2071Receiver()
 {
 	dev_dbg(&parent_.dev_, "px4::Isdbt2071Device::Isdbt2071Receiver::~Isdbt2071Receiver(%u)\n", index_);
 
-	std::unique_lock<std::mutex> lock(lock_);
-
-	close_cond_.wait(lock, [this] { return !open_; });
+	WaitForClose();
 
 	dev_dbg(&parent_.dev_, "px4::Isdbt2071Device::Isdbt2071Receiver::~Isdbt2071Receiver(%u): exit\n", index_);
+}
+
+void Isdbt2071Device::Isdbt2071Receiver::WaitForClose()
+{
+	std::unique_lock<std::mutex> lock(lock_);
+	close_cond_.wait(lock, [this] { return !open_; });
 }
 
 int Isdbt2071Device::Isdbt2071Receiver::Init(bool sleep)
@@ -711,7 +718,6 @@ void Isdbt2071Device::Isdbt2071Receiver::Close()
 
 	open_ = false;
 
-	lock.unlock();
 	close_cond_.notify_all();
 
 	return;
