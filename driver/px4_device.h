@@ -46,6 +46,9 @@ struct px4_serial_number {
 
 struct px4_device {
 	struct mutex lock;
+	struct mutex backend_power_lock;
+	/* probe 中は GPIO を操作でき、USB 抜去後にだけ操作を止める。 */
+	bool backend_disconnected;
 	struct kref kref;
 	atomic_t available;
 	struct device *dev;

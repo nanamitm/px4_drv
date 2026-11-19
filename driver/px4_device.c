@@ -37,19 +37,22 @@ static int px4_backend_set_power(struct px4_device *px4, bool state)
 	dev_dbg(px4->dev,
 		"px4_backend_set_power: %s\n", (state) ? "true" : "false");
 
-	if (!state && !atomic_read(&px4->available))
-		return 0;
+	mutex_lock(&px4->backend_power_lock);
+	if (px4->backend_disconnected) {
+		ret = state ? -ENODEV : 0;
+		goto exit;
+	}
 
 	if (state) {
 		ret = it930x_write_gpio(it930x, 7, false);
 		if (ret)
-			return ret;
+			goto exit;
 
 		msleep(80);
 
 		ret = it930x_write_gpio(it930x, 2, true);
 		if (ret)
-			return ret;
+			goto exit;
 
 		msleep(20);
 	} else {
@@ -57,7 +60,9 @@ static int px4_backend_set_power(struct px4_device *px4, bool state)
 		it930x_write_gpio(it930x, 7, true);
 	}
 
-	return 0;
+exit:
+	mutex_unlock(&px4->backend_power_lock);
+	return ret;
 }
 
 static int px4_backend_init(struct px4_device *px4)
@@ -1286,6 +1291,8 @@ int px4_device_init(struct px4_device *px4, struct device *dev,
 	get_device(dev);
 
 	mutex_init(&px4->lock);
+	mutex_init(&px4->backend_power_lock);
+	px4->backend_disconnected = false;
 	kref_init(&px4->kref);
 	px4->dev = dev;
 	px4->mldev = NULL;
@@ -1507,6 +1514,7 @@ fail_bus:
 	kfree(px4->stream_ctx);
 
 fail:
+	mutex_destroy(&px4->backend_power_lock);
 	mutex_destroy(&px4->lock);
 	put_device(dev);
 
@@ -1527,6 +1535,7 @@ static void px4_device_release(struct kref *kref)
 
 	kfree(px4->stream_ctx);
 
+	mutex_destroy(&px4->backend_power_lock);
 	mutex_destroy(&px4->lock);
 	put_device(px4->dev);
 
@@ -1542,6 +1551,9 @@ void px4_device_term(struct px4_device *px4)
 	/* カードの操作と並行しても、登録の解除後にハードウェアへ触れないよう機種のロックの下で切り替える */
 	mutex_lock(&px4->lock);
 	atomic_xchg(&px4->available, 0);
+	mutex_lock(&px4->backend_power_lock);
+	px4->backend_disconnected = true;
+	mutex_unlock(&px4->backend_power_lock);
 	mutex_unlock(&px4->lock);
 
 	px4_card_unregister(px4->card);
