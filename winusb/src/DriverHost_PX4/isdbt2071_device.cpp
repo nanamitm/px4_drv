@@ -634,6 +634,8 @@ void Isdbt2071Device::Isdbt2071Receiver::Close()
 	std::lock_guard<std::recursive_mutex> dev_lock(parent_.lock_);
 
 	StopReceiverCapture();
+	stream_buf_->Stop();
+	stream_buffer_started_ = false;
 	parent_.receiver_->Term();
 	parent_.SetBackendPower(false);
 
@@ -772,21 +774,24 @@ int Isdbt2071Device::Isdbt2071Receiver::SetLnbVoltage(std::int32_t voltage)
 int Isdbt2071Device::Isdbt2071Receiver::StopReceiverCapture()
 {
 	/* TS ピンの解除が失敗しても USB ワーカーの終了を待つ。 */
-	if (streaming_) {
+	const bool was_streaming = streaming_;
+	if (was_streaming) {
 		parent_.StopCapture();
 		streaming_ = false;
-		stream_buf_->Stop();
 	}
 
+	int ret = 0;
 	if (ts_pin_cleanup_pending_ && parent_.available_) {
-		const int ret = tc90522_enable_ts_pins_t(&tc90522_t_, false);
-		if (ret) {
+		ret = tc90522_enable_ts_pins_t(&tc90522_t_, false);
+		if (ret)
 			dev_err(&parent_.dev_, "ISDBT2071: disabling TS pins failed (ret: %d)\n", ret);
-			return ret;
-		}
 	}
-	ts_pin_cleanup_pending_ = false;
-	return 0;
+	ts_pin_cleanup_pending_ = ret != 0;
+
+	/* 配信側を起こしたまま、停止前に蓄積した TS を破棄する。 */
+	if (was_streaming && !stream_buf_->Purge() && !ret)
+		ret = -EIO;
+	return ret;
 }
 
 int Isdbt2071Device::Isdbt2071Receiver::SetCapture(bool capture)
@@ -801,7 +806,7 @@ int Isdbt2071Device::Isdbt2071Receiver::SetCapture(bool capture)
 	if (!parent_.available_)
 		return -ENODEV;
 
-	if (!streaming_) {
+	if (!stream_buffer_started_) {
 		const auto packets = parent_.config_.device.receiver_max_packets;
 		if (!packets || packets > SIZE_MAX / PX4_TS_PACKET_SIZE)
 			return -EINVAL;
@@ -809,6 +814,8 @@ int Isdbt2071Device::Isdbt2071Receiver::SetCapture(bool capture)
 		if (!stream_buf_->Alloc(size))
 			return -ENOMEM;
 		stream_buf_->SetThresholdSize(size / 10);
+	} else if (!streaming_ && !stream_buf_->AdvanceEpoch()) {
+		return -EIO;
 	}
 
 	/* ピン有効化が途中で失敗した場合にも解除を試す。 */
@@ -818,20 +825,22 @@ int Isdbt2071Device::Isdbt2071Receiver::SetCapture(bool capture)
 		dev_err(&parent_.dev_, "ISDBT2071: enabling TS pins failed (ret: %d)\n", ret);
 	if (!ret)
 		ret = parent_.PrepareCapture();
-	if (!ret)
+	if (!ret) {
+		/* 最初の USB コールバックより前にバッファへの書き込みを許可する。 */
+		if (!stream_buffer_started_) {
+			stream_buf_->Start();
+			stream_buffer_started_ = true;
+		}
 		ret = parent_.StartCapture();
+	}
 	if (ret) {
 		StopReceiverCapture();
 		return ret;
 	}
 
-	if (!streaming_) {
-		stream_buf_->Start();
-		streaming_ = true;
-	} else if (!stream_buf_->Purge()) {
+	if (streaming_ && !stream_buf_->Purge())
 		return -EIO;
-	}
-
+	streaming_ = true;
 	return 0;
 }
 

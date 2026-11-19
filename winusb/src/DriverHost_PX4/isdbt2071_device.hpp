@@ -130,6 +130,7 @@ private:
 		px4::SystemType system_;
 		std::atomic_bool streaming_;
 		bool ts_pin_cleanup_pending_ = false;
+		bool stream_buffer_started_ = false;
 	};
 
 	void LoadConfig();
