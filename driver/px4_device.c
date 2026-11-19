@@ -29,13 +29,18 @@ struct px4_stream_context {
 static int px4_chrdev_set_lnb_voltage_s(struct ptx_chrdev *chrdev, int voltage);
 static void px4_device_release(struct kref *kref);
 
+static int px4_backend_power_off(struct it930x_bridge *it930x)
+{
+	int ret = it930x_write_gpio(it930x, 2, false);
+	int reset_ret = it930x_write_gpio(it930x, 7, true);
+
+	return ret ? ret : reset_ret;
+}
+
 static int px4_backend_set_power(struct px4_device *px4, bool state)
 {
 	int ret = 0;
 	struct it930x_bridge *it930x = &px4->it930x;
-
-	dev_dbg(px4->dev,
-		"px4_backend_set_power: %s\n", (state) ? "true" : "false");
 
 	mutex_lock(&px4->backend_power_lock);
 	if (px4->backend_disconnected) {
@@ -43,21 +48,31 @@ static int px4_backend_set_power(struct px4_device *px4, bool state)
 		goto exit;
 	}
 
-	if (state) {
-		ret = it930x_write_gpio(it930x, 7, false);
-		if (ret)
-			goto exit;
+	if (px4->backend_power_state ==
+	    (state ? PX4_BACKEND_POWER_ON : PX4_BACKEND_POWER_OFF))
+		goto exit;
 
+	/* 状態が不明な電源は、停止を確認してから再投入する。 */
+	if (!state || px4->backend_power_state == PX4_BACKEND_POWER_UNKNOWN) {
+		ret = px4_backend_power_off(it930x);
+		px4->backend_power_state = ret ? PX4_BACKEND_POWER_UNKNOWN :
+						 PX4_BACKEND_POWER_OFF;
+		if (ret || !state)
+			goto exit;
+	}
+
+	ret = it930x_write_gpio(it930x, 7, false);
+	if (!ret) {
 		msleep(80);
-
 		ret = it930x_write_gpio(it930x, 2, true);
-		if (ret)
-			goto exit;
-
+	}
+	if (!ret) {
 		msleep(20);
+		px4->backend_power_state = PX4_BACKEND_POWER_ON;
 	} else {
-		it930x_write_gpio(it930x, 2, false);
-		it930x_write_gpio(it930x, 7, true);
+		/* 部分的な給電を元に戻し、呼び出し元には最初の失敗を返す。 */
+		px4->backend_power_state = px4_backend_power_off(it930x) ?
+			PX4_BACKEND_POWER_UNKNOWN : PX4_BACKEND_POWER_OFF;
 	}
 
 exit:
@@ -1297,6 +1312,7 @@ int px4_device_init(struct px4_device *px4, struct device *dev,
 	mutex_init(&px4->lock);
 	mutex_init(&px4->backend_power_lock);
 	px4->backend_disconnected = false;
+	px4->backend_power_state = PX4_BACKEND_POWER_UNKNOWN;
 	kref_init(&px4->kref);
 	px4->dev = dev;
 	px4->mldev = NULL;
@@ -1412,11 +1428,7 @@ int px4_device_init(struct px4_device *px4, struct device *dev,
 	 * 通電なしへ揃える
 	 * 登録前に通電したままだと、相方の利用状況から決まる電源状態と食い違う
 	 */
-	ret = it930x_write_gpio(it930x, 2, false);
-	if (ret)
-		goto fail_device;
-
-	ret = it930x_write_gpio(it930x, 7, true);
+	ret = px4_backend_set_power(px4, false);
 	if (ret)
 		goto fail_device;
 

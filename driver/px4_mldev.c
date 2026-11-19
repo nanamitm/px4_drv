@@ -68,7 +68,6 @@ int px4_mldev_alloc(struct px4_mldev **mldev,  enum px4_mldev_mode mode,
 	m->serial_number = px4->serial.serial_number;
 	for (i = 0; i < 2; i++) {
 		m->dev[i] = (i == dev_id) ? px4 : NULL;
-		m->power_state[i] = false;
 		m->card_state[i] = false;
 		for (j = 0; j < 4; j++)
 			m->chrdev_state[i][j] = false;
@@ -122,7 +121,6 @@ int px4_mldev_add(struct px4_mldev *mldev, struct px4_device *px4)
 		goto exit;
 	}
 
-	mldev->power_state[dev_id] = false;
 	mldev->card_state[dev_id] = false;
 	for (i = 0; i < 4; i++)
 		mldev->chrdev_state[dev_id][i] = false;
@@ -131,8 +129,6 @@ int px4_mldev_add(struct px4_mldev *mldev, struct px4_device *px4)
 		ret = mldev->backend_set_power(px4, true);
 		if (ret)
 			goto exit;
-
-		mldev->power_state[dev_id] = true;
 	}
 
 	/* The reference acquired by px4_mldev_search() now belongs to this device */
@@ -167,21 +163,15 @@ int px4_mldev_remove(struct px4_mldev *mldev, struct px4_device *px4)
 		return -EINVAL;
 	}
 
-	if (mldev->power_state[dev_id])
-		mldev->backend_set_power(px4, false);
+	mldev->backend_set_power(px4, false);
 
 	mldev->dev[dev_id] = NULL;
-	mldev->power_state[dev_id] = false;
 	mldev->card_state[dev_id] = false;
 	for (i = 0; i < 4; i++)
 		mldev->chrdev_state[dev_id][i] = false;
 
-	if (mldev->dev[other_dev_id] &&
-	    !px4_mldev_has_power_user(mldev, other_dev_id) &&
-	    mldev->power_state[other_dev_id]) {
+	if (mldev->dev[other_dev_id] && !px4_mldev_has_power_user(mldev, other_dev_id))
 		mldev->backend_set_power(mldev->dev[other_dev_id], false);
-		mldev->power_state[other_dev_id] = false;
-	}
 
 	/*
 	 * px4_mldev_release() destroys this mutex,
@@ -237,86 +227,61 @@ int px4_mldev_set_power(struct px4_mldev *mldev, struct px4_device *px4,
 			unsigned int chrdev_id, bool state, bool *first)
 {
 	int ret = 0;
-	bool was_powered, first_receiver;
 	unsigned int dev_id = px4->serial.dev_id - 1;
-	unsigned int other_dev_id = (dev_id) ? 0 : 1;
+	unsigned int other_dev_id = dev_id ^ 1;
+	bool *receiver, peer_needs_power;
+	struct px4_device *peer;
 
 	if (dev_id > 1 || chrdev_id > 3)
 		return -EINVAL;
 
-	dev_dbg(px4->dev,
-		"px4_mldev_set_power: serial_number: %014llu, dev_id: %u, chrdev_id: %u state: %s\n",
-		mldev->serial_number, dev_id, chrdev_id,
-		(state) ? "true" : "false");
-	dev_dbg(px4->dev,
-		"px4_mldev_set_power: power_state: %s, %s\n",
-		(mldev->power_state[0]) ? "true" : "false",
-		(mldev->power_state[1]) ? "true" : "false");
-	dev_dbg(px4->dev,
-		"px4_mldev_set_power: chrdev_state[%u][%u]: %s\n",
-		dev_id, chrdev_id, 
-		(mldev->chrdev_state[dev_id][chrdev_id]) ? "true" : "false");
-
 	mutex_lock(&mldev->lock);
-
 	if (mldev->dev[dev_id] != px4) {
 		ret = -EINVAL;
 		goto exit;
 	}
 
-	if (mldev->chrdev_state[dev_id][chrdev_id] == state)
+	receiver = &mldev->chrdev_state[dev_id][chrdev_id];
+	if (*receiver == state)
 		goto exit;
 
-	/* 相方の給電に失敗した場合は、この要求で増えた電源と受信機の参照を戻す。 */
-	was_powered = mldev->power_state[dev_id];
-	first_receiver = !px4_mldev_get_chrdev_status(mldev, dev_id);
+	peer = mldev->dev[other_dev_id];
+	peer_needs_power = px4_mldev_is_power_interlocking_required(mldev, other_dev_id);
+	if (state) {
+		bool first_receiver = !px4_mldev_get_chrdev_status(mldev, dev_id);
 
-	if (!state)
-		mldev->chrdev_state[dev_id][chrdev_id] = false;
-
-	if (!px4_mldev_get_chrdev_status(mldev, dev_id)) {
-		if (mldev->power_state[dev_id] != state &&
-		    (state || (!mldev->card_state[dev_id] &&
-			       !px4_mldev_is_power_interlocking_required(mldev, other_dev_id)))) {
-			ret = mldev->backend_set_power(mldev->dev[dev_id],
-						       state);
-			if (ret && state)
+		if (first_receiver) {
+			ret = mldev->backend_set_power(px4, true);
+			if (ret)
 				goto exit;
-
-			mldev->power_state[dev_id] = state;
 		}
-	}
 
-	if (state)
-		mldev->chrdev_state[dev_id][chrdev_id] = true;
-
-	if (mldev->dev[other_dev_id]) {
-		bool interlocking = px4_mldev_is_power_interlocking_required(mldev, dev_id);
-
-		dev_dbg(px4->dev,
-			"px4_mldev_set_power: interlocking: %s\n",
-			(interlocking) ? "true" : "false");
-
-		if (interlocking == state &&
-		    mldev->power_state[other_dev_id] != interlocking &&
-		    (state || !px4_mldev_has_power_user(mldev, other_dev_id))) {
-			ret = mldev->backend_set_power(mldev->dev[other_dev_id],
-						       state);
-			if (ret && state) {
-				mldev->chrdev_state[dev_id][chrdev_id] = false;
-				if (!was_powered && mldev->power_state[dev_id]) {
+		/* 連動先にも給電できることを確かめてから、受信機の取得を成立させる。 */
+		*receiver = true;
+		if (peer && px4_mldev_is_power_interlocking_required(mldev, dev_id)) {
+			ret = mldev->backend_set_power(peer, true);
+			if (ret) {
+				*receiver = false;
+				if (!px4_mldev_has_power_user(mldev, dev_id) && !peer_needs_power)
 					mldev->backend_set_power(px4, false);
-					mldev->power_state[dev_id] = false;
-				}
 				goto exit;
 			}
-
-			mldev->power_state[other_dev_id] = state;
 		}
+		if (first && first_receiver)
+			*first = true;
+		goto exit;
 	}
 
-	if (state && first && first_receiver)
-		*first = true;
+	*receiver = false;
+	if (!px4_mldev_has_power_user(mldev, dev_id) && !peer_needs_power)
+		ret = mldev->backend_set_power(px4, false);
+	if (peer && !px4_mldev_has_power_user(mldev, other_dev_id) &&
+	    !px4_mldev_is_power_interlocking_required(mldev, dev_id)) {
+		int peer_ret = mldev->backend_set_power(peer, false);
+
+		if (!ret)
+			ret = peer_ret;
+	}
 
 exit:
 	mutex_unlock(&mldev->lock);
@@ -328,43 +293,28 @@ int px4_mldev_set_card_power(struct px4_mldev *mldev, struct px4_device *px4,
 {
 	int ret = 0;
 	unsigned int dev_id = px4->serial.dev_id - 1;
-	unsigned int other_dev_id = (dev_id) ? 0 : 1;
-	bool previous_state, should_power;
 
 	if (dev_id > 1)
 		return -EINVAL;
 
 	mutex_lock(&mldev->lock);
-
 	if (mldev->dev[dev_id] != px4) {
 		ret = -EINVAL;
 		goto exit;
 	}
-
 	if (mldev->card_state[dev_id] == state)
 		goto exit;
 
-	/* カードの要求を先に記録し、電源の投入に失敗したときだけ以前の状態へ戻す */
-	previous_state = mldev->card_state[dev_id];
-	mldev->card_state[dev_id] = state;
-
-	/* 受信機が使用中なら、電源は受信機側の参照で入ったままになっている */
-	if (px4_mldev_get_chrdev_status(mldev, dev_id))
-		goto exit;
-
-	/* カードを閉じても、相方の受信機が連動を必要としていれば電源を残す */
-	should_power = state ||
-		       px4_mldev_is_power_interlocking_required(mldev, other_dev_id);
-	if (mldev->power_state[dev_id] == should_power)
-		goto exit;
-
-	ret = mldev->backend_set_power(px4, should_power);
-	if (ret && should_power) {
-		mldev->card_state[dev_id] = previous_state;
-		goto exit;
+	if (state) {
+		ret = mldev->backend_set_power(px4, true);
+		if (ret)
+			goto exit;
 	}
 
-	mldev->power_state[dev_id] = should_power;
+	mldev->card_state[dev_id] = state;
+	if (!state && !px4_mldev_get_chrdev_status(mldev, dev_id) &&
+	    !px4_mldev_is_power_interlocking_required(mldev, dev_id ^ 1))
+		ret = mldev->backend_set_power(px4, false);
 
 exit:
 	mutex_unlock(&mldev->lock);

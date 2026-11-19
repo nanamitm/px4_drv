@@ -44,11 +44,18 @@ struct px4_serial_number {
 	unsigned int dev_id;
 };
 
+enum px4_backend_power_state {
+	PX4_BACKEND_POWER_UNKNOWN,
+	PX4_BACKEND_POWER_OFF,
+	PX4_BACKEND_POWER_ON,
+};
+
 struct px4_device {
 	struct mutex lock;
 	struct mutex backend_power_lock;
 	/* probe 中は GPIO を操作でき、USB 抜去後にだけ操作を止める。 */
 	bool backend_disconnected;
+	enum px4_backend_power_state backend_power_state;
 	struct kref kref;
 	atomic_t available;
 	struct device *dev;

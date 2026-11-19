@@ -485,37 +485,24 @@ int Px4Device::SetBackendPower(bool state)
 {
 	dev_dbg(&dev_, "px4::Px4Device::SetBackendPower: %s\n", (state) ? "true" : "false");
 
-	int ret = 0;
-	/* 連動する2基の親ロックを相互取得すると停止するため、GPIO 操作だけを専用ロックで直列化する */
+	/* 共有管理または親ロックが電源要求を調停し、ここでは GPIO の結果を記録する。 */
 	std::lock_guard<std::mutex> lock(backend_power_lock_);
-
-	if (!available_)
-		return state ? -ENODEV : 0;
-
-	if (state) {
-		ret = it930x_write_gpio(&it930x_, 7, false);
-		if (ret)
+	return backend_power_.Request(state, available_, 0, [this](bool on) {
+		if (on) {
+			int ret = it930x_write_gpio(&it930x_, 7, false);
+			if (ret)
+				return ret;
+			Sleep(80);
+			ret = it930x_write_gpio(&it930x_, 2, true);
+			if (!ret)
+				Sleep(20);
 			return ret;
+		}
 
-		Sleep(80);
-
-		ret = it930x_write_gpio(&it930x_, 2, true);
-		if (ret)
-			return ret;
-
-		Sleep(20);
-	} else {
-		ret = it930x_write_gpio(&it930x_, 2, false);
-		/*
-		 * GPIO2 の停止に失敗しても基板リセットは試し、終了処理で通電状態が残る範囲を狭める
-		 * 呼び出し元には最初の失敗を返し、初期化時の異常を成功扱いにしない
-		 */
-		int reset_ret = it930x_write_gpio(&it930x_, 7, true);
-		if (!ret)
-			ret = reset_ret;
-	}
-
-	return ret;
+		const int ret = it930x_write_gpio(&it930x_, 2, false);
+		const int reset_ret = it930x_write_gpio(&it930x_, 7, true);
+		return ret ? ret : reset_ret;
+	});
 }
 
 int Px4Device::SetLnbVoltage(std::int32_t voltage)
@@ -709,7 +696,6 @@ Px4Device::MultiDevice::MultiDevice(Px4MultiDeviceMode mode, std::uint64_t seria
 	serial_number_(serial_number),
 	mode_(mode),
 	dev_{ nullptr, nullptr },
-	power_state_{ false, false },
 	card_state_{ false, false },
 	receiver_state_{ { false, false, false, false }, { false, false, false, false } }
 {
@@ -773,7 +759,6 @@ int Px4Device::MultiDevice::Add(Px4Device &dev)
 	if (dev_[dev_id])
 		return -EALREADY;
 
-	power_state_[dev_id] = false;
 	card_state_[dev_id] = false;
 	for (int i = 0; i < 4; i++)
 		receiver_state_[dev_id][i] = false;
@@ -782,8 +767,6 @@ int Px4Device::MultiDevice::Add(Px4Device &dev)
 		ret = dev.SetBackendPower(true);
 		if (ret)
 			return ret;
-
-		power_state_[dev_id] = true;
 	}
 
 	dev_[dev_id] = &dev;
@@ -805,19 +788,15 @@ int Px4Device::MultiDevice::Remove(Px4Device &dev)
 	if (dev_[dev_id] != &dev)
 		return -EINVAL;
 
-	if (power_state_[dev_id])
-		dev.SetBackendPower(false);
+	dev.SetBackendPower(false);
 
 	dev_[dev_id] = nullptr;
-	power_state_[dev_id] = false;
 	card_state_[dev_id] = false;
 	for (int i = 0; i < 4; i++)
 		receiver_state_[dev_id][i] = false;
 
-	if (dev_[other_dev_id] && !HasPowerUser(other_dev_id) && power_state_[other_dev_id]) {
+	if (dev_[other_dev_id] && !HasPowerUser(other_dev_id))
 		dev_[other_dev_id]->SetBackendPower(false);
-		power_state_[other_dev_id] = false;
-	}
 
 	if (!GetDeviceCount()) {
 		std::lock_guard<std::mutex> mldev_list_lock(mldev_list_lock_);
@@ -873,98 +852,78 @@ bool Px4Device::MultiDevice::IsPowerIntelockingRequried(std::uint8_t dev_id) con
 
 int Px4Device::MultiDevice::SetPower(Px4Device &dev, std::uintptr_t index, bool state, bool *first)
 {
-	std::uint8_t dev_id = dev.serial_.dev_id - 1;
-	std::uint8_t other_dev_id = (dev_id) ? 0 : 1;
-
+	const unsigned int dev_id = dev.serial_.dev_id - 1;
 	if (dev_id > 1 || index > 3)
 		return -EINVAL;
 
-	int ret = 0;
+	const auto other_dev_id = dev_id ^ 1;
 	std::lock_guard<std::mutex> lock(lock_);
-
 	if (dev_[dev_id] != &dev)
 		return -EINVAL;
 
-	if (receiver_state_[dev_id][index] == state)
+	auto &receiver = receiver_state_[dev_id][index];
+	if (receiver == state)
 		return 0;
 
-	/* 相方の給電に失敗した場合は、この要求で増えた電源と受信機の参照を戻す。 */
-	const bool was_powered = power_state_[dev_id];
-	const bool first_receiver = !GetReceiverStatus(dev_id);
-
-	if (!state)
-		receiver_state_[dev_id][index] = false;
-
-	if (!GetReceiverStatus(dev_id)) {
-		if (power_state_[dev_id] != state &&
-			(state || (!card_state_[dev_id] && !IsPowerIntelockingRequried(other_dev_id)))) {
-			ret = dev.SetBackendPower(state);
-			if (ret && state)
+	const bool peer_needs_power = IsPowerIntelockingRequried(other_dev_id);
+	auto *peer = dev_[other_dev_id];
+	if (state) {
+		const bool first_receiver = !GetReceiverStatus(dev_id);
+		if (first_receiver) {
+			const int ret = dev.SetBackendPower(true);
+			if (ret)
 				return ret;
-
-			power_state_[dev_id] = state;
 		}
-	}
 
-	if (state)
-		receiver_state_[dev_id][index] = true;
-
-	if (dev_[other_dev_id]) {
-		bool interlocking = IsPowerIntelockingRequried(dev_id);
-
-		if (interlocking == state && power_state_[other_dev_id] != interlocking &&
-			(state || !HasPowerUser(other_dev_id))) {
-			ret = dev_[other_dev_id]->SetBackendPower(state);
-			if (ret && state) {
-				receiver_state_[dev_id][index] = false;
-				if (!was_powered && power_state_[dev_id]) {
+		/* 連動先にも給電できることを確かめてから、受信機の取得を成立させる。 */
+		receiver = true;
+		if (peer && IsPowerIntelockingRequried(dev_id)) {
+			const int ret = peer->SetBackendPower(true);
+			if (ret) {
+				receiver = false;
+				if (!HasPowerUser(dev_id) && !peer_needs_power)
 					dev.SetBackendPower(false);
-					power_state_[dev_id] = false;
-				}
 				return ret;
 			}
-
-			power_state_[other_dev_id] = state;
 		}
+		if (first && first_receiver)
+			*first = true;
+		return 0;
 	}
 
-	if (state && first && first_receiver)
-		*first = true;
-
-	return 0;
+	receiver = false;
+	int ret = 0;
+	if (!HasPowerUser(dev_id) && !peer_needs_power)
+		ret = dev.SetBackendPower(false);
+	if (peer && !HasPowerUser(other_dev_id) && !IsPowerIntelockingRequried(dev_id)) {
+		const int peer_ret = peer->SetBackendPower(false);
+		if (!ret)
+			ret = peer_ret;
+	}
+	return ret;
 }
 
 int Px4Device::MultiDevice::SetCardPower(Px4Device &dev, bool state)
 {
-	std::uint8_t dev_id = dev.serial_.dev_id - 1;
-	std::uint8_t other_dev_id = dev_id ? 0 : 1;
-
+	const unsigned int dev_id = dev.serial_.dev_id - 1;
 	if (dev_id > 1)
 		return -EINVAL;
 
 	std::lock_guard<std::mutex> lock(lock_);
-
 	if (dev_[dev_id] != &dev)
 		return -EINVAL;
 	if (card_state_[dev_id] == state)
 		return 0;
 
-	/* カード要求を先に記録し、電源投入失敗時だけ以前の状態へ戻す */
-	bool previous_state = card_state_[dev_id];
-	card_state_[dev_id] = state;
-
-	if (!GetReceiverStatus(dev_id)) {
-		bool should_power = state || IsPowerIntelockingRequried(other_dev_id);
-		if (power_state_[dev_id] != should_power) {
-			int ret = dev.SetBackendPower(should_power);
-			if (ret && should_power) {
-				card_state_[dev_id] = previous_state;
-				return ret;
-			}
-			power_state_[dev_id] = should_power;
-		}
+	if (state) {
+		const int ret = dev.SetBackendPower(true);
+		if (ret)
+			return ret;
 	}
 
+	card_state_[dev_id] = state;
+	if (!state && !GetReceiverStatus(dev_id) && !IsPowerIntelockingRequried(dev_id ^ 1))
+		return dev.SetBackendPower(false);
 	return 0;
 }
 

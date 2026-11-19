@@ -29,7 +29,6 @@ struct px4_mldev {
 	enum px4_mldev_mode mode;
 	unsigned long long serial_number;
 	struct px4_device *dev[2];
-	bool power_state[2];
 	bool chrdev_state[2][4];
 	/* 内蔵カードリーダーも基板電源の利用者として数え、受信機を閉じても電源を切らない */
 	bool card_state[2];
