@@ -612,7 +612,7 @@ static int isdbt2071_device_load_config(struct isdbt2071_device *isdbt2071,
 		return ret;
 	} else if (!tmp) {
 		dev_warn(dev, "EEPROM error.\n");
-		return ret;
+		return -EIO;
 	}
 
 	chrdev_config->system_cap = PTX_ISDB_T_SYSTEM;
