@@ -485,13 +485,15 @@ impl Ofdm {
         }
         let ph = self.sp_phase(m);
         // TMCC (中央セグメントの 4 本の DBPSK を多数決)
-        let mut accb = 0f32;
-        for (i, &k) in TMCC_K.iter().enumerate() {
-            accb += (z[k] * self.prev_tmcc[i].conj()).re;
-            self.prev_tmcc[i] = z[k];
+        if self.tmcc.is_none() {
+            let mut accb = 0f32;
+            for (i, &k) in TMCC_K.iter().enumerate() {
+                accb += (z[k] * self.prev_tmcc[i].conj()).re;
+                self.prev_tmcc[i] = z[k];
+            }
+            self.tmcc_bits.push(u8::from(accb < 0.0));
+            self.try_tmcc();
         }
-        self.tmcc_bits.push(u8::from(accb < 0.0));
-        if self.tmcc.is_none() { self.try_tmcc(); }
         self.out_count += 1;
         // 制御キャリア (TMCC 4 + AC 8 /セグメント) の検出
         if self.data_idx.is_none() {
@@ -571,10 +573,11 @@ impl Ofdm {
     /// 欠落を埋めた区間に掛かったシンボルの出力。フレーム内の位置と番号は通常のシンボルと同じく進め、
     /// 全キャリアを値 0・重み 0 の消失とする。TMCC・制御キャリアの検出と誤差統計は更新しない
     fn erased_output(&mut self, m: u64) -> Option<SymbolOut> {
-        // tmcc_bits の添字と out_count の対応を保つため、TMCC のビットは 0 として 1 つ進める。
-        // 差動の基準 (prev_tmcc) は欠落前のシンボルのまま残す
-        self.tmcc_bits.push(0);
-        if self.tmcc.is_none() { self.try_tmcc(); }
+        if self.tmcc.is_none() {
+            // 探索中は添字を合わせるため 0 を足し、差動の基準は欠落前のまま保つ。
+            self.tmcc_bits.push(0);
+            self.try_tmcc();
+        }
         self.out_count += 1;
         self.stats.erased_symbols += 1;
         if self.data_idx.is_none() {
@@ -644,6 +647,7 @@ impl Ofdm {
             self.stats.tmcc = Some(t);
             // p は B0 (差動復調の基準) のビットで、フレームの先頭のシンボルに当たる
             self.frame_origin = Some(self.tmcc_drained + p as u64);
+            self.tmcc_bits = Vec::new();
             return;
         }
         if b.len() > 4096 {
@@ -712,4 +716,29 @@ fn fit_phase(acc: &[Complex32], sh: i32) -> (f64, f64) {
     let c = (sy - a * sx) / sw;
     let c = (c + std::f64::consts::PI).rem_euclid(2.0 * std::f64::consts::PI) - std::f64::consts::PI;
     (a, c)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tmcc_history_is_released_after_frame_sync() {
+        let mut ofdm = Ofdm::new();
+        let origin = 3;
+        ofdm.tmcc_bits = vec![0; 428];
+        for (i, &bit) in SYNC_EVEN.iter().enumerate() {
+            ofdm.tmcc_bits[origin + 1 + i] = bit;
+            ofdm.tmcc_bits[origin + 205 + i] = 1 - bit;
+        }
+        ofdm.out_count = ofdm.tmcc_bits.len() as u64;
+        ofdm.try_tmcc();
+        assert_eq!(ofdm.frame_origin, Some(origin as u64));
+        assert!(ofdm.tmcc.is_some());
+        assert_eq!(ofdm.tmcc_bits.capacity(), 0);
+        for symbol in 0..512 {
+            ofdm.erased_output(symbol);
+        }
+        assert!(ofdm.tmcc_bits.is_empty());
+    }
 }

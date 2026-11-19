@@ -21,7 +21,7 @@ use windows_sys::Win32::Devices::Usb::{
     WinUsb_UnregisterIsochBuffer, USBD_ISO_PACKET_DESCRIPTOR, WINUSB_PIPE_INFORMATION_EX, WINUSB_SETUP_PACKET,
 };
 use windows_sys::Win32::Foundation::{
-    CloseHandle, GetLastError, ERROR_IO_PENDING, GENERIC_READ, GENERIC_WRITE, HANDLE, INVALID_HANDLE_VALUE,
+    CloseHandle, GetLastError, ERROR_INVALID_HANDLE, ERROR_IO_INCOMPLETE, ERROR_IO_PENDING, GENERIC_READ, GENERIC_WRITE, HANDLE, INVALID_HANDLE_VALUE,
     WAIT_OBJECT_0,
 };
 use windows_sys::Win32::Storage::FileSystem::{
@@ -153,6 +153,16 @@ impl Device {
     }
 }
 
+// 設定列の途中で失敗しても停止要求と ADC の休止を試す。
+struct CapturePower<'a>(&'a Device);
+
+impl Drop for CapturePower<'_> {
+    fn drop(&mut self) {
+        self.0.stop_streaming();
+        let _ = self.0.apply(&crate::regs::adc_stop());
+    }
+}
+
 impl Drop for Device {
     fn drop(&mut self) {
         unsafe {
@@ -230,6 +240,20 @@ impl Default for CaptureLimits {
     }
 }
 
+// イベントがシグナルされた後も、結果で完了を確認できるまで記述子に触れない。
+fn isoch_result(dev: &Device, overlapped: &OVERLAPPED) -> Result<(), u32> {
+    let mut transferred = 0;
+    if unsafe { WinUsb_GetOverlappedResult(dev.wh, overlapped, &mut transferred, 0) } != 0 {
+        Ok(())
+    } else {
+        Err(last_error())
+    }
+}
+
+fn isoch_completion_unconfirmed(error: u32) -> bool {
+    matches!(error, ERROR_IO_INCOMPLETE | ERROR_INVALID_HANDLE)
+}
+
 /// 設定列を送り、等時転送で取り込む。on_block が false を返すと正常に終了する。
 /// 終了時は停止要求、パイプの中止、期限付きの完了待ち、バッファーの登録解除を行う。
 pub fn capture(
@@ -239,6 +263,7 @@ pub fn capture(
     stats: &mut CaptureStats,
     mut on_block: impl FnMut(&[u8], &CaptureStats) -> bool,
 ) -> Result<(), UsbError> {
+    let power = CapturePower(dev);
     dev.apply(setup)?;
     let alt = 1u8;
     if unsafe { WinUsb_SetCurrentAlternateSetting(dev.wh, alt) } == 0 {
@@ -313,25 +338,31 @@ pub fn capture(
     'run: while result.is_ok() {
         // 完了待ちにも期限を設け、データ途絶を検出できるようにする
         let w = unsafe { WaitForSingleObject(ov[k].hEvent, 1000) };
-        let mut n = 0u32;
-        let ok = w == WAIT_OBJECT_0 && unsafe { WinUsb_GetOverlappedResult(dev.wh, &ov[k], &mut n, 0) } != 0;
-        if w == WAIT_OBJECT_0 {
+        let completion = (w == WAIT_OBJECT_0).then(|| isoch_result(dev, &ov[k]));
+        let completed = completion.is_some_and(|r| !r.is_err_and(isoch_completion_unconfirmed));
+        let ok = matches!(completion, Some(Ok(())));
+        if completed {
             inflight[k] = false;
         }
         stats.transfers += 1;
         if !ok {
-            stats.last_error = if w == WAIT_OBJECT_0 { last_error() as u64 } else { 0x1_0000_0000 | w as u64 };
-            // 連続する失敗の最初の数回だけ記録する (投入し直した後も失敗するかを見分ける)
+            stats.last_error = match completion {
+                Some(Err(error)) => u64::from(error),
+                _ => 0x1_0000_0000 | u64::from(w),
+            };
+            // 連続する失敗の最初の数回だけ記録する (投入し直した後も失敗するかを見分ける)。
             if consecutive_errors < 3 {
-                let bad = desc[k].iter().filter(|d| d.Status != 0).count();
-                // pending: この転送以外でドライバーへ投入済みの転送数 (TRANSFERS - 1 に近ければ先行分は残っていた)。
-                // since_last_submit: 直前の再投入からの経過。age: この転送を投入してからの経過 (通常は約 512 ms)。
-                // 先行分が残り、再投入も途切れていないのに失敗した場合は、helper ではなくドライバーより下の層の遅れを示す
                 let pending = inflight.iter().filter(|&&f| f).count();
-                eprintln!("[usb] transfer {k} failed: error=0x{:x} bad_packets_in_transfer={bad} first_status=0x{:x} pending={pending}/{} since_last_submit_ms={:.1} age_ms={:.1} max_submit_gap_ms={:.1}",
-                    stats.last_error, desc[k].iter().map(|d| d.Status).find(|&s| s != 0).unwrap_or(0),
-                    TRANSFERS - 1, last_submit.elapsed().as_secs_f64() * 1e3, submitted_at[k].elapsed().as_secs_f64() * 1e3,
-                    stats.max_submit_gap_us as f64 / 1e3);
+                let packet_info = if completed {
+                    let bad = desc[k].iter().filter(|d| d.Status != 0).count();
+                    let status = desc[k].iter().map(|d| d.Status).find(|&s| s != 0).unwrap_or(0);
+                    format!(" bad_packets_in_transfer={bad} first_status=0x{status:x}")
+                } else {
+                    String::new()
+                };
+                eprintln!("[usb] transfer {k} failed: error=0x{:x} pending={pending}/{} since_last_submit_ms={:.1} age_ms={:.1} max_submit_gap_ms={:.1}{packet_info}",
+                    stats.last_error, TRANSFERS, last_submit.elapsed().as_secs_f64() * 1e3,
+                    submitted_at[k].elapsed().as_secs_f64() * 1e3, stats.max_submit_gap_us as f64 / 1e3);
             }
             stats.transfer_errors += 1;
             consecutive_errors += 1;
@@ -343,7 +374,7 @@ pub fn capture(
                 result = Err(UsbError::Stalled(last_data.elapsed()));
                 break;
             }
-            if w != WAIT_OBJECT_0 {
+            if !completed {
                 // 完了していない転送のバッファーはドライバーが使っているため、投入し直さずに完了を待ち続ける
                 continue 'run;
             }
@@ -420,18 +451,15 @@ pub fn capture(
     unsafe { WinUsb_AbortPipe(dev.wh, pi.PipeId) };
     let mut pending = 0usize;
     for (o, _) in ov.iter().zip(inflight.iter()).filter(|(_, &f)| f) {
-        if unsafe { WaitForSingleObject(o.hEvent, 1000) } == WAIT_OBJECT_0 {
-            let mut n = 0u32;
-            unsafe { WinUsb_GetOverlappedResult(dev.wh, o, &mut n, 0) };
-        } else {
+        if unsafe { WaitForSingleObject(o.hEvent, 1000) } != WAIT_OBJECT_0
+            || isoch_result(dev, o).is_err_and(isoch_completion_unconfirmed)
+        {
             pending += 1;
         }
     }
     // 転送の停止から停止要求まで、Linux ドライバーと同じく 20 ms あける
     std::thread::sleep(Duration::from_millis(20));
-    dev.stop_streaming();
-    let _ = dev.apply(&crate::regs::adc_stop());
-    unsafe { WinUsb_UnregisterIsochBuffer(bh) };
+    drop(power);
     if pending > 0 {
         // 完了しない転送が後からバッファーとイベントへ書き込む可能性があるため、解放せずに残す
         eprintln!("[usb] {pending} transfers did not complete after abort; leaking their buffers");
@@ -439,6 +467,7 @@ pub fn capture(
         std::mem::forget(desc);
         std::mem::forget(ov);
     } else {
+        unsafe { WinUsb_UnregisterIsochBuffer(bh) };
         for o in ov.iter() {
             unsafe { CloseHandle(o.hEvent) };
         }
@@ -506,6 +535,7 @@ pub fn capture_bulk(
     stats: &mut CaptureStats,
     mut on_block: impl FnMut(&[u8], &CaptureStats) -> bool,
 ) -> Result<(), UsbError> {
+    let power = CapturePower(dev);
     dev.apply(setup)?;
     let alt = 3u8;
     if unsafe { WinUsb_SetCurrentAlternateSetting(dev.wh, alt) } == 0 {
@@ -668,8 +698,7 @@ pub fn capture_bulk(
         }
     }
     std::thread::sleep(Duration::from_millis(20));
-    dev.stop_streaming();
-    let _ = dev.apply(&crate::regs::adc_stop());
+    drop(power);
     if pending > 0 {
         eprintln!("[usb] {pending} bulk reads did not complete after abort; leaking their buffers");
         std::mem::forget(buf);

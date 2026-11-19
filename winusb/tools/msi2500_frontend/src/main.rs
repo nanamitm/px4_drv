@@ -619,6 +619,23 @@ impl Pipe {
     }
 }
 
+// 実測で地デジの初回 TS は約 2 秒。生ブロックキュー (約 3.1 秒) の滞留も見込んで待つ。
+const ISDBT_TS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+struct IsdbtTsWatchdog {
+    reset: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    last_progress: Option<Instant>,
+}
+
+impl IsdbtTsWatchdog {
+    fn check(&mut self, now: Instant) {
+        if self.last_progress.is_some_and(|last| now.duration_since(last) >= ISDBT_TS_TIMEOUT) {
+            self.reset.store(true, std::sync::atomic::Ordering::Relaxed);
+            self.last_progress = Some(now);
+        }
+    }
+}
+
 /// serve の出力。処理系からの OutMsg を hostproto のフレームで標準出力へ書き、250 ms ごとに状態フレームを出す。
 /// 標準出力へ書けなくなったら stop を立てる。(終了コード, DriverHost が拒むため取り除いたパケット数) を返す。
 /// mer は状態フレームの payload に載せる復調器の MER (dB、測れていなければ None)
@@ -628,6 +645,7 @@ fn serve_output(
     stop: &std::sync::atomic::AtomicBool,
     rs_counts: &dyn Fn() -> (u64, u64),
     mer: &dyn Fn() -> Option<f32>,
+    mut watchdog: Option<IsdbtTsWatchdog>,
 ) -> (i32, usize) {
     use msi2500_frontend::hostproto::{retain_valid_packets, status_payload, write_frame, Kind, MAX_TS};
     use std::sync::atomic::Ordering;
@@ -652,7 +670,12 @@ fn serve_output(
         };
         let (acc, rej) = rs_counts();
         match m {
-            Ok(OutMsg::Ready) => write(Kind::Ready, &[], 0, acc, rej),
+            Ok(OutMsg::Ready) => {
+                write(Kind::Ready, &[], 0, acc, rej);
+                if let Some(watchdog) = &mut watchdog {
+                    watchdog.last_progress = Some(Instant::now());
+                }
+            }
             Ok(OutMsg::Ts(mut ts)) => {
                 dropped += retain_valid_packets(&mut ts);
                 // DriverHost は TS のフレームの品質で信号レベルを更新し、BonDriver の利用側は最初の TS の時点で
@@ -676,6 +699,9 @@ fn serve_output(
                 }
                 if !ts.is_empty() {
                     last_ts = Some(Instant::now());
+                    if let Some(watchdog) = &mut watchdog {
+                        watchdog.last_progress = last_ts;
+                    }
                 }
             }
             Ok(OutMsg::Error(e)) => {
@@ -686,6 +712,11 @@ fn serve_output(
             }
             Ok(OutMsg::Done) | Err(RecvTimeoutError::Disconnected) => break,
             Err(RecvTimeoutError::Timeout) => {}
+        }
+        if !stop.load(Ordering::Relaxed) {
+            if let Some(watchdog) = &mut watchdog {
+                watchdog.check(Instant::now());
+            }
         }
         if last_status.elapsed() >= Duration::from_millis(250) {
             let (da, dr) = (acc - last_acc.min(acc), rej - last_rej.min(rej));
@@ -773,6 +804,10 @@ fn run_serve(mut it: impl Iterator<Item = String>) -> i32 {
     // 品質の元になる RS の成功数と失敗数 (ISDB-T は B 階層、J.83B は全 RS ブロック)
     // MER は ISDB-T は B 階層、J.83B は判定帰還中の復調器の値
     type MerFn = Box<dyn Fn() -> Option<f32>>;
+    let watchdog = (!a.j83b).then(|| IsdbtTsWatchdog {
+        reset: Arc::new(AtomicBool::new(false)),
+        last_progress: None,
+    });
     let (pipe, mut feeder, rs_counts, mer): (Pipe, _, Box<dyn Fn() -> (u64, u64)>, MerFn) = if a.j83b {
         let cfg = J83bLiveConfig { raw_queue: 256, symbol_queue: 512, pll_scale: a.pll, ts_out: Some(Box::new(ChannelWriter(otx.clone()))) };
         let (live, feeder) = J83bLive::start(cfg);
@@ -795,7 +830,8 @@ fn run_serve(mut it: impl Iterator<Item = String>) -> i32 {
             ts_out: [None, None],
             ts_mux: Some(Box::new(ChannelWriter(otx.clone()))),
         };
-        let (live, feeder) = Live::start(cfg);
+        let reset = watchdog.as_ref().map(|watchdog| watchdog.reset.clone());
+        let (live, feeder) = Live::start_with_reset(cfg, reset);
         let st = live.stats.clone();
         let counts = move || {
             let b = st.lock().unwrap().layer_total(1);
@@ -849,7 +885,7 @@ fn run_serve(mut it: impl Iterator<Item = String>) -> i32 {
     };
     drop(otx);
 
-    let (code, dropped) = serve_output(&mut stdout, orx, &stop, rs_counts.as_ref(), mer.as_ref());
+    let (code, dropped) = serve_output(&mut stdout, orx, &stop, rs_counts.as_ref(), mer.as_ref(), watchdog);
     let _ = capture_thread.join();
     if dropped > 0 {
         eprintln!("[serve] dropped {dropped} packets that DriverHost would reject (TEI or invalid adaptation field)");
@@ -961,7 +997,7 @@ fn run_serve_s1ud(mut it: impl Iterator<Item = String>) -> i32 {
         }).expect("spawn stdin thread")
     };
     drop(otx);
-    let (code, dropped) = serve_output(&mut stdout, orx, &stop, &rs_counts, &mer);
+    let (code, dropped) = serve_output(&mut stdout, orx, &stop, &rs_counts, &mer, None);
     let _ = input_thread.join();
     if dropped > 0 {
         eprintln!("[serve-s1ud] dropped {dropped} packets that DriverHost would reject (TEI or invalid adaptation field)");
@@ -1010,4 +1046,37 @@ fn main() {
         }
     };
     std::process::exit(code);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    #[test]
+    fn isdbt_watchdog_waits_for_input_and_limits_resync_frequency() {
+        let reset = Arc::new(AtomicBool::new(false));
+        let mut watchdog = IsdbtTsWatchdog { reset: reset.clone(), last_progress: None };
+        let start = Instant::now();
+        watchdog.check(start);
+        assert!(!reset.load(Ordering::Relaxed));
+
+        watchdog.last_progress = Some(start);
+        let deadline = start + ISDBT_TS_TIMEOUT;
+        watchdog.check(deadline - Duration::from_millis(1));
+        assert!(!reset.load(Ordering::Relaxed));
+        watchdog.check(deadline);
+        assert!(reset.swap(false, Ordering::Relaxed));
+        watchdog.check(deadline + Duration::from_secs(1));
+        assert!(!reset.load(Ordering::Relaxed));
+
+        let resumed = deadline + Duration::from_secs(5);
+        watchdog.last_progress = Some(resumed);
+        watchdog.check(deadline + ISDBT_TS_TIMEOUT);
+        assert!(!reset.load(Ordering::Relaxed));
+        watchdog.check(resumed + ISDBT_TS_TIMEOUT);
+        assert!(reset.load(Ordering::Relaxed));
+    }
 }
