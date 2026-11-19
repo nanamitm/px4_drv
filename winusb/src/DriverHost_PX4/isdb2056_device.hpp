@@ -97,6 +97,7 @@ private:
 		Isdb2056Receiver() = delete;
 		Isdb2056Receiver(Isdb2056Device &parent, std::uintptr_t index);
 		~Isdb2056Receiver();
+		void WaitForClose();
 
 		// cannot copy
 		Isdb2056Receiver(const Isdb2056Receiver &) = delete;
