@@ -118,6 +118,9 @@ private:
 		int SetStreamId() override;
 
 	private:
+		int SetTsPins(px4::SystemType system, bool enabled);
+		int DisableTsPins();
+
 		static struct tc90522_regbuf tc_init_t_[];
 		static struct tc90522_regbuf tc_init_s_[];
 
@@ -135,6 +138,7 @@ private:
 		r850_tuner r850_;
 		rt710_tuner rt710_;
 		px4::SystemType current_system_;
+		px4::SystemType ts_pin_system_ = px4::SystemType::UNSPECIFIED;
 		std::atomic_bool streaming_;
 	};
 
