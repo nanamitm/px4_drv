@@ -360,27 +360,25 @@ int Isdb2056Device::SetBackendPower(bool state)
 	int ret = 0;
 	std::lock_guard<std::recursive_mutex> lock(lock_);
 
-	if (!state && !available_)
-		return 0;
+	if (!available_)
+		return state ? -ENODEV : 0;
 
 	if (state) {
 		ret = it930x_write_gpio(&it930x_, 3, false);
-		if (ret)
-			return ret;
-
-		Sleep(100);
-
-		ret = it930x_write_gpio(&it930x_, 2, true);
-		if (ret)
-			return ret;
-
-		Sleep(20);
-	} else {
-		it930x_write_gpio(&it930x_, 2, false);
-		it930x_write_gpio(&it930x_, 3, true);
+		if (!ret) {
+			Sleep(100);
+			ret = it930x_write_gpio(&it930x_, 2, true);
+		}
+		if (!ret) {
+			Sleep(20);
+			return 0;
+		}
 	}
 
-	return 0;
+	/* 途中で失敗しても電源停止とリセットの両方を試し、最初のエラーを返す。 */
+	const int power_ret = it930x_write_gpio(&it930x_, 2, false);
+	const int reset_ret = it930x_write_gpio(&it930x_, 3, true);
+	return ret ? ret : (power_ret ? power_ret : reset_ret);
 }
 
 int Isdb2056Device::SetLnbVoltage(std::int32_t voltage)
