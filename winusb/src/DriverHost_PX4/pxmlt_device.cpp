@@ -522,8 +522,9 @@ int PxMltDevice::StopCapture()
 	return 0;
 }
 
-void PxMltDevice::StreamProcess(std::shared_ptr<px4::ReceiverBase::StreamBuffer> stream_buf[], int num, std::uint8_t **buf, std::size_t &len, StreamStats &stats)
+void PxMltDevice::StreamProcess(StreamContext &stream_ctx, int num, std::uint8_t **buf, std::size_t &len)
 {
+	StreamStats &stats = stream_ctx.stats;
 	std::uint8_t *p = *buf;
 	std::size_t remain = len;
 
@@ -579,11 +580,11 @@ void PxMltDevice::StreamProcess(std::shared_ptr<px4::ReceiverBase::StreamBuffer>
 		while (remain >= 188 && px4_ts_has_tagged_sync(p[0])) {
 			u8 id = (p[0] & 0x70) >> 4;
 
-			if (id && id <= num) {
+			if (id && id <= num && stream_ctx.enabled[id - 1]) {
 				std::size_t pkt_len = 188;
 
 				p[0] = 0x47;
-				stream_buf[id - 1]->Write(p, pkt_len);
+				stream_ctx.stream_buf[id - 1]->Write(p, pkt_len);
 			}
 
 			p += 188;
@@ -593,7 +594,8 @@ void PxMltDevice::StreamProcess(std::shared_ptr<px4::ReceiverBase::StreamBuffer>
 	}
 
 	for (int i = 0; i < num; i++)
-		stream_buf[i]->NotifyWrite();
+		if (stream_ctx.enabled[i])
+			stream_ctx.stream_buf[i]->NotifyWrite();
 
 	*buf = p;
 	len = remain;
@@ -606,6 +608,7 @@ int PxMltDevice::StreamHandler(void *context, void *buf, std::uint32_t len)
 	PxMltDevice &obj = *static_cast<PxMltDevice*>(context);
 	int receiver_num = obj.receiver_num_;
 	StreamContext &stream_ctx = obj.stream_ctx_;
+	std::unique_lock<std::mutex> lock(stream_ctx.lock);
 	std::uint8_t *p = static_cast<std::uint8_t*>(buf);
 	std::size_t remain = len;
 
@@ -623,7 +626,7 @@ int PxMltDevice::StreamHandler(void *context, void *buf, std::uint32_t len)
 
 		memcpy(stream_ctx.remain_buf + stream_ctx.remain_len, p, take);
 		stream_ctx.remain_len = need;
-		StreamProcess(stream_ctx.stream_buf, receiver_num, &tail, stream_ctx.remain_len, stream_ctx.stats);
+		StreamProcess(stream_ctx, receiver_num, &tail, stream_ctx.remain_len);
 		p += take;
 		remain -= take;
 		/* 同期候補が窓の途中にあれば、次の入力を足して検証する。 */
@@ -631,12 +634,16 @@ int PxMltDevice::StreamHandler(void *context, void *buf, std::uint32_t len)
 			memmove(stream_ctx.remain_buf, tail, stream_ctx.remain_len);
 	}
 
-	StreamProcess(stream_ctx.stream_buf, receiver_num, &p, remain, stream_ctx.stats);
+	StreamProcess(stream_ctx, receiver_num, &p, remain);
 
 	if (remain) {
-		dev_dbg(&obj.dev_, "px4::PxMltDevice::StreamHandler: remain: %lu\n", remain);
 		memcpy(stream_ctx.remain_buf, p, remain);
 		stream_ctx.remain_len = remain;
+	}
+	lock.unlock();
+
+	if (remain) {
+		dev_dbg(&obj.dev_, "px4::PxMltDevice::StreamHandler: remain: %lu\n", static_cast<unsigned long>(remain));
 	}
 
 	/* ログはファイルへ同期書き込みされるため、受信スレッドでの出力は
@@ -819,6 +826,9 @@ void PxMltDevice::PxMltReceiver::Close()
 
 	std::unique_lock<std::mutex> lock(lock_);
 	std::lock_guard<std::recursive_mutex> dev_lock(parent_.lock_);
+
+	stream_buf_->Stop();
+	stream_buffer_started_ = false;
 
 	assert(parent_.open_count_ > 0);
 
@@ -1110,34 +1120,49 @@ int PxMltDevice::PxMltReceiver::SetCapture(bool capture)
 		return -EALREADY;
 
 	if (capture) {
-		const auto packets = parent_.config_.device.receiver_max_packets;
-		if (!packets || packets > SIZE_MAX / 188)
-			return -EINVAL;
-		const std::size_t size = static_cast<std::size_t>(packets) * 188;
-		if (!stream_buf_->Alloc(size))
-			return -ENOMEM;
-		stream_buf_->SetThresholdSize(size / 10);
-		ret = parent_.StartCapture();
-	} else {
-		ret = parent_.StopCapture();
-	}
-
-	if (!ret) {
-		if (capture) {
-			stream_buf_->Start();
-		} else {
-			stream_buf_->Stop();
-			{
-				const auto diagnostics = stream_buf_->GetWriteDiagnostics();
-				dev_info(&parent_.dev_, "TS output diagnostics input=%u freq=%u receiver_max_packets=%u rejected_bytes=%llu rejected_writes=%llu purge_write_discarded_bytes=%llu purge_requests=%llu (capture interval, rejection may include inactive output)\n",
-					index_, params_.freq, parent_.config_.device.receiver_max_packets,
-					static_cast<unsigned long long>(diagnostics.rejected_bytes),
-					static_cast<unsigned long long>(diagnostics.rejected_writes),
-					static_cast<unsigned long long>(diagnostics.purge_write_discarded_bytes),
-					static_cast<unsigned long long>(diagnostics.purge_requests));
-			}
+		if (!stream_buffer_started_) {
+			const auto packets = parent_.config_.device.receiver_max_packets;
+			if (!packets || packets > SIZE_MAX / 188)
+				return -EINVAL;
+			const std::size_t size = static_cast<std::size_t>(packets) * 188;
+			if (!stream_buf_->Alloc(size))
+				return -ENOMEM;
+			stream_buf_->SetThresholdSize(size / 10);
+		} else if (!stream_buf_->AdvanceEpoch()) {
+			return -EIO;
 		}
-		streaming_ = capture;
+
+		ret = parent_.StartCapture();
+		if (ret)
+			return ret;
+		/* 初回はバッファを稼働させ、再開時も診断の計数を初期化する。 */
+		stream_buf_->Start();
+		stream_buffer_started_ = true;
+		{
+			std::lock_guard<std::mutex> stream_lock(parent_.stream_ctx_.lock);
+			parent_.stream_ctx_.enabled[index_] = true;
+		}
+		streaming_ = true;
+	} else {
+		{
+			/* 同じデータ接続の配信スレッドは待機させ、この入力への書き込みだけを止める。 */
+			std::lock_guard<std::mutex> stream_lock(parent_.stream_ctx_.lock);
+			parent_.stream_ctx_.enabled[index_] = false;
+		}
+		ret = parent_.StopCapture();
+		if (ret)
+			return ret;
+		streaming_ = false;
+
+		const auto diagnostics = stream_buf_->GetWriteDiagnostics();
+		dev_info(&parent_.dev_, "TS output diagnostics input=%u freq=%u receiver_max_packets=%u rejected_bytes=%llu rejected_writes=%llu purge_write_discarded_bytes=%llu purge_requests=%llu (capture interval)\n",
+			static_cast<unsigned>(index_), params_.freq, parent_.config_.device.receiver_max_packets,
+			static_cast<unsigned long long>(diagnostics.rejected_bytes),
+			static_cast<unsigned long long>(diagnostics.rejected_writes),
+			static_cast<unsigned long long>(diagnostics.purge_write_discarded_bytes),
+			static_cast<unsigned long long>(diagnostics.purge_requests));
+		if (!stream_buf_->Purge())
+			return -EIO;
 	}
 
 	return ret;
