@@ -237,6 +237,7 @@ int px4_mldev_set_power(struct px4_mldev *mldev, struct px4_device *px4,
 			unsigned int chrdev_id, bool state, bool *first)
 {
 	int ret = 0;
+	bool was_powered, first_receiver;
 	unsigned int dev_id = px4->serial.dev_id - 1;
 	unsigned int other_dev_id = (dev_id) ? 0 : 1;
 
@@ -266,6 +267,10 @@ int px4_mldev_set_power(struct px4_mldev *mldev, struct px4_device *px4,
 	if (mldev->chrdev_state[dev_id][chrdev_id] == state)
 		goto exit;
 
+	/* 相方の給電に失敗した場合は、この要求で増えた電源と受信機の参照を戻す。 */
+	was_powered = mldev->power_state[dev_id];
+	first_receiver = !px4_mldev_get_chrdev_status(mldev, dev_id);
+
 	if (!state)
 		mldev->chrdev_state[dev_id][chrdev_id] = false;
 
@@ -280,9 +285,6 @@ int px4_mldev_set_power(struct px4_mldev *mldev, struct px4_device *px4,
 
 			mldev->power_state[dev_id] = state;
 		}
-
-		if (state && first)
-			*first = true;
 	}
 
 	if (state)
@@ -300,10 +302,21 @@ int px4_mldev_set_power(struct px4_mldev *mldev, struct px4_device *px4,
 		    (state || !px4_mldev_has_power_user(mldev, other_dev_id))) {
 			ret = mldev->backend_set_power(mldev->dev[other_dev_id],
 						       state);
-			if (!ret || !state)
-				mldev->power_state[other_dev_id] = state;
+			if (ret && state) {
+				mldev->chrdev_state[dev_id][chrdev_id] = false;
+				if (!was_powered && mldev->power_state[dev_id]) {
+					mldev->backend_set_power(px4, false);
+					mldev->power_state[dev_id] = false;
+				}
+				goto exit;
+			}
+
+			mldev->power_state[other_dev_id] = state;
 		}
 	}
+
+	if (state && first && first_receiver)
+		*first = true;
 
 exit:
 	mutex_unlock(&mldev->lock);

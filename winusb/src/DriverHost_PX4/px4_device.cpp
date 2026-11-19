@@ -885,6 +885,10 @@ int Px4Device::MultiDevice::SetPower(Px4Device &dev, std::uintptr_t index, bool 
 	if (receiver_state_[dev_id][index] == state)
 		return 0;
 
+	/* 相方の給電に失敗した場合は、この要求で増えた電源と受信機の参照を戻す。 */
+	const bool was_powered = power_state_[dev_id];
+	const bool first_receiver = !GetReceiverStatus(dev_id);
+
 	if (!state)
 		receiver_state_[dev_id][index] = false;
 
@@ -897,9 +901,6 @@ int Px4Device::MultiDevice::SetPower(Px4Device &dev, std::uintptr_t index, bool 
 
 			power_state_[dev_id] = state;
 		}
-
-		if (state && first)
-			*first = true;
 	}
 
 	if (state)
@@ -911,12 +912,21 @@ int Px4Device::MultiDevice::SetPower(Px4Device &dev, std::uintptr_t index, bool 
 		if (interlocking == state && power_state_[other_dev_id] != interlocking &&
 			(state || !HasPowerUser(other_dev_id))) {
 			ret = dev_[other_dev_id]->SetBackendPower(state);
-			if (ret && state)
+			if (ret && state) {
+				receiver_state_[dev_id][index] = false;
+				if (!was_powered && power_state_[dev_id]) {
+					dev.SetBackendPower(false);
+					power_state_[dev_id] = false;
+				}
 				return ret;
+			}
 
 			power_state_[other_dev_id] = state;
 		}
 	}
+
+	if (state && first && first_receiver)
+		*first = true;
 
 	return 0;
 }
