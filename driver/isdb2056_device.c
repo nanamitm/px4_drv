@@ -946,7 +946,7 @@ static int isdb2056_device_load_config(struct isdb2056_device *isdb2056,
 		return ret;
 	} else if (!tmp) {
 		dev_warn(dev, "EEPROM error.\n");
-		return ret;
+		return -EIO;
 	}
 
 	chrdev_config->system_cap = (isdb2056->isdb2056_model == PXS1UR_MODEL)
