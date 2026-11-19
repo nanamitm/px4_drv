@@ -337,7 +337,10 @@ void Px4Device::SetAvailability(bool available)
 	bool release_card_power = available_ && !available && card_open_;
 	if (release_card_power)
 		card_open_ = false;
-	available_ = available;
+	{
+		std::lock_guard<std::mutex> power_lock(backend_power_lock_);
+		available_ = available;
+	}
 	if (release_card_power && mldev_) {
 		/* 抜去済み USB へ電源制御を送らず、2基連動モデルの共有要求だけを解放する */
 		mldev_->ReleaseCardPower(*this);
@@ -486,8 +489,8 @@ int Px4Device::SetBackendPower(bool state)
 	/* 連動する2基の親ロックを相互取得すると停止するため、GPIO 操作だけを専用ロックで直列化する */
 	std::lock_guard<std::mutex> lock(backend_power_lock_);
 
-	if (!state && !available_)
-		return 0;
+	if (!available_)
+		return state ? -ENODEV : 0;
 
 	if (state) {
 		ret = it930x_write_gpio(&it930x_, 7, false);
@@ -1248,6 +1251,8 @@ int Px4Device::Px4Receiver::Open()
 
 	if (open_)
 		return (!init_) ? -EINVAL : -EALREADY;
+	if (!parent_.available_)
+		return -ENODEV;
 
 	if (parent_.mldev_) {
 		ret = parent_.mldev_->SetPower(parent_, index_, true, &need_init);

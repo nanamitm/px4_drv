@@ -291,6 +291,10 @@ static int px4_chrdev_open(struct ptx_chrdev *chrdev)
 		"px4_chrdev_open %u:%u\n", chrdev_group->id, chrdev->id);
 
 	mutex_lock(&px4->lock);
+	if (!atomic_read(&px4->available)) {
+		ret = -ENODEV;
+		goto fail_backend_power;
+	}
 
 	if (px4->mldev) {
 		ret = px4_mldev_set_power(px4->mldev, px4, chrdev->id, true, &need_init);
@@ -1465,10 +1469,13 @@ int px4_device_init(struct px4_device *px4, struct device *dev,
 	chrdev_group_config.chrdev_num = 4;
 	chrdev_group_config.chrdev_config = chrdev_config;
 
+	mutex_lock(&px4->lock);
 	ret = ptx_chrdev_context_add_group(chrdev_ctx, dev,
 					   &chrdev_group_config, &chrdev_group);
-	if (ret)
-		goto fail_chrdev;
+	if (ret) {
+		mutex_unlock(&px4->lock);
+		goto fail_device;
+	}
 
 	px4->chrdev_group = chrdev_group;
 
@@ -1478,6 +1485,7 @@ int px4_device_init(struct px4_device *px4, struct device *dev,
 	}
 
 	atomic_set(&px4->available, 1);
+	mutex_unlock(&px4->lock);
 
 	/*
 	 * 2つの USB デバイスで1つの筐体を構成する機種では、カードスロットは dev_id 1 の側にだけあるとして登録する (Windows 版の HasCardReader() と同じ判定)
@@ -1498,8 +1506,6 @@ int px4_device_init(struct px4_device *px4, struct device *dev,
 			dev_warn(dev, "Card reader registration failed: %d\n", ret);
 	}
 	return 0;
-
-fail_chrdev:
 
 fail_device:
 	if (px4->mldev)
@@ -1527,9 +1533,6 @@ static void px4_device_release(struct kref *kref)
 
 	dev_dbg(px4->dev, "px4_device_release\n");
 
-	if (px4->mldev)
-		px4_mldev_remove(px4->mldev, px4);
-
 	it930x_term(&px4->it930x);
 	itedtv_bus_term(&px4->it930x.bus);
 
@@ -1554,6 +1557,12 @@ void px4_device_term(struct px4_device *px4)
 	mutex_lock(&px4->backend_power_lock);
 	px4->backend_disconnected = true;
 	mutex_unlock(&px4->backend_power_lock);
+
+	/* 開いたファイルが本体の寿命を延ばしても、連動給電からは抜去時点で外す。 */
+	if (px4->mldev) {
+		px4_mldev_remove(px4->mldev, px4);
+		px4->mldev = NULL;
+	}
 	mutex_unlock(&px4->lock);
 
 	px4_card_unregister(px4->card);
