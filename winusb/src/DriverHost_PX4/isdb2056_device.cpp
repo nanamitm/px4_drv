@@ -763,6 +763,8 @@ void Isdb2056Device::Isdb2056Receiver::Close()
 	std::unique_lock<std::mutex> lock(lock_);
 	std::lock_guard<std::recursive_mutex> dev_lock(parent_.lock_);
 
+	stream_buf_->Stop();
+	stream_buffer_started_ = false;
 	DisableTsPins();
 	parent_.receiver_->Term();
 	parent_.SetBackendPower(false);
@@ -1154,12 +1156,16 @@ int Isdb2056Device::Isdb2056Receiver::SetCapture(bool capture)
 
 	if (!capture) {
 		/* 選局状態や TS ピンの解除失敗にかかわらず USB 受信を停止する。 */
-		if (streaming_) {
+		const bool was_streaming = streaming_;
+		if (was_streaming) {
 			parent_.StopCapture();
 			streaming_ = false;
-			stream_buf_->Stop();
 		}
-		return DisableTsPins();
+		/* バッファの配信側は残し、同じ接続で再開できるようにする。 */
+		int ret = DisableTsPins();
+		if (was_streaming && !stream_buf_->Purge() && !ret)
+			ret = -EIO;
+		return ret;
 	}
 
 	/* Open 直後は、選局が完了するまで受信開始を保留する。 */
@@ -1168,7 +1174,7 @@ int Isdb2056Device::Isdb2056Receiver::SetCapture(bool capture)
 	if (!parent_.available_)
 		return -ENODEV;
 
-	if (!streaming_) {
+	if (!stream_buffer_started_) {
 		const auto packets = parent_.config_.device.receiver_max_packets;
 		if (!packets || packets > SIZE_MAX / 188)
 			return -EINVAL;
@@ -1176,6 +1182,8 @@ int Isdb2056Device::Isdb2056Receiver::SetCapture(bool capture)
 		if (!stream_buf_->Alloc(size))
 			return -ENOMEM;
 		stream_buf_->SetThresholdSize(size / 10);
+	} else if (!streaming_ && !stream_buf_->AdvanceEpoch()) {
+		return -EIO;
 	}
 
 	if (ts_pin_system_ != current_system_) {
@@ -1195,13 +1203,13 @@ int Isdb2056Device::Isdb2056Receiver::SetCapture(bool capture)
 		return ret;
 	}
 
-	if (!streaming_) {
+	if (!stream_buffer_started_) {
 		stream_buf_->Start();
-		streaming_ = true;
-	} else if (!stream_buf_->Purge()) {
-		return -EIO;
+		stream_buffer_started_ = true;
 	}
-
+	if (streaming_ && !stream_buf_->Purge())
+		return -EIO;
+	streaming_ = true;
 	return 0;
 }
 

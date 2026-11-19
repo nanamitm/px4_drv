@@ -140,6 +140,7 @@ private:
 		px4::SystemType current_system_;
 		px4::SystemType ts_pin_system_ = px4::SystemType::UNSPECIFIED;
 		std::atomic_bool streaming_;
+		bool stream_buffer_started_ = false;
 	};
 
 	void LoadConfig();
