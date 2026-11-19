@@ -913,6 +913,7 @@ int PxMltDevice::PxMltReceiver::SetFrequency()
 		for (int i = 0; i < parent_.receiver_num_; i++) {
 			PxMltReceiver &receiver = *parent_.receivers_[i];
 			std::lock_guard<std::recursive_mutex> dev_lock(parent_.lock_);
+			std::lock_guard<std::mutex> tuner_lock(*receiver.tuner_lock_);
 
 			if (receiver.cxd2858er_.config.ter.rfin_matching)
 				continue;
@@ -923,10 +924,8 @@ int PxMltDevice::PxMltReceiver::SetFrequency()
 				continue;
 
 			ret = cxd2856er_init(&receiver.cxd2856er_);
-			if (!ret) {
-				std::lock_guard<std::mutex> tuner_lock(*receiver.tuner_lock_);
+			if (!ret)
 				ret = cxd2858er_init(&receiver.cxd2858er_);
-			}
 			cxd2856er_term(&receiver.cxd2856er_);
 
 			if (ret) {

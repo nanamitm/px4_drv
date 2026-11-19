@@ -451,8 +451,10 @@ static int pxmlt_chrdev_tune(struct ptx_chrdev *chrdev,
 			struct pxmlt_chrdev *other = &pxmlt->chrdevm[i];
 
 			mutex_lock(&pxmlt->lock);
+			mutex_lock(other->tuner_lock);
 
 			if (other->cxd2858er.config.ter.rfin_matching) {
+				mutex_unlock(other->tuner_lock);
 				mutex_unlock(&pxmlt->lock);
 				continue;
 			}
@@ -461,11 +463,8 @@ static int pxmlt_chrdev_tune(struct ptx_chrdev *chrdev,
 
 			if (!atomic_read(&other->chrdev->open)) {
 				ret = cxd2856er_init(&other->cxd2856er);
-				if (!ret) {
-					mutex_lock(other->tuner_lock);
+				if (!ret)
 					ret = cxd2858er_init(&other->cxd2858er);
-					mutex_unlock(other->tuner_lock);
-				}
 				cxd2856er_term(&other->cxd2856er);
 
 				if (ret) {
@@ -478,6 +477,7 @@ static int pxmlt_chrdev_tune(struct ptx_chrdev *chrdev,
 				}
 			}
 
+			mutex_unlock(other->tuner_lock);
 			mutex_unlock(&pxmlt->lock);
 		}
 
