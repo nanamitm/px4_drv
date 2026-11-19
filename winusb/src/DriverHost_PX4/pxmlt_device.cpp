@@ -1109,17 +1109,21 @@ int PxMltDevice::PxMltReceiver::SetCapture(bool capture)
 	if ((capture && streaming_) || (!capture && !streaming_))
 		return -EALREADY;
 
-	if (capture)
+	if (capture) {
+		const auto packets = parent_.config_.device.receiver_max_packets;
+		if (!packets || packets > SIZE_MAX / 188)
+			return -EINVAL;
+		const std::size_t size = static_cast<std::size_t>(packets) * 188;
+		if (!stream_buf_->Alloc(size))
+			return -ENOMEM;
+		stream_buf_->SetThresholdSize(size / 10);
 		ret = parent_.StartCapture();
-	else
+	} else {
 		ret = parent_.StopCapture();
+	}
 
 	if (!ret) {
 		if (capture) {
-			std::size_t size = 188 * parent_.config_.device.receiver_max_packets;
-
-			stream_buf_->Alloc(size);
-			stream_buf_->SetThresholdSize(size / 10);
 			stream_buf_->Start();
 		} else {
 			stream_buf_->Stop();
