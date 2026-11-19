@@ -22,11 +22,9 @@
 #include "itedtv_bus.h"
 #include "tc90522.h"
 #include "r850.h"
+#include "ts_plain_framer.h"
 
 namespace px4 {
-
-#define ISDBT2071_DEVICE_TS_SYNC_COUNT	4U
-#define ISDBT2071_DEVICE_TS_SYNC_SIZE		(188U * ISDBT2071_DEVICE_TS_SYNC_COUNT)
 
 enum class Isdbt2071DeviceModel {
 	ISDBT2071 = 0,
@@ -83,9 +81,7 @@ public:
 private:
 	struct StreamContext final {
 		std::shared_ptr<px4::ReceiverBase::StreamBuffer> stream_buf;
-		/* 最初のコールバック前も未処理データなしの状態として初期化 */
-		std::uint8_t remain_buf[ISDBT2071_DEVICE_TS_SYNC_SIZE] = {};
-		std::size_t remain_len = 0;
+		px4_ts_plain_framer framer{};
 	};
 
 	class Isdbt2071Receiver final : public px4::ReceiverBase {
@@ -93,6 +89,7 @@ private:
 		Isdbt2071Receiver() = delete;
 		Isdbt2071Receiver(Isdbt2071Device &parent, std::uintptr_t index);
 		~Isdbt2071Receiver();
+		void WaitForClose();
 
 		// cannot copy
 		Isdbt2071Receiver(const Isdbt2071Receiver &) = delete;
@@ -117,6 +114,8 @@ private:
 		int SetStreamId() override;
 
 	private:
+		int StopReceiverCapture();
+
 		static struct tc90522_regbuf tc_init_t_[];
 
 		Isdbt2071Device &parent_;
@@ -130,6 +129,8 @@ private:
 		r850_tuner r850_;
 		px4::SystemType system_;
 		std::atomic_bool streaming_;
+		bool ts_pin_cleanup_pending_ = false;
+		bool stream_buffer_started_ = false;
 	};
 
 	void LoadConfig();
@@ -143,7 +144,6 @@ private:
 	int StartCapture();
 	int StopCapture();
 
-	static void StreamProcess(std::shared_ptr<px4::ReceiverBase::StreamBuffer> stream_buf, std::uint8_t **buf, std::size_t &len);
 	static int StreamHandler(void *context, void *buf, std::uint32_t len);
 
 	Isdbt2071DeviceModel model_;
