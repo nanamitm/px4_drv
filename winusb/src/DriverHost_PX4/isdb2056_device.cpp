@@ -1168,6 +1168,16 @@ int Isdb2056Device::Isdb2056Receiver::SetCapture(bool capture)
 	if (!parent_.available_)
 		return -ENODEV;
 
+	if (!streaming_) {
+		const auto packets = parent_.config_.device.receiver_max_packets;
+		if (!packets || packets > SIZE_MAX / 188)
+			return -EINVAL;
+		const std::size_t size = static_cast<std::size_t>(packets) * 188;
+		if (!stream_buf_->Alloc(size))
+			return -ENOMEM;
+		stream_buf_->SetThresholdSize(size / 10);
+	}
+
 	if (ts_pin_system_ != current_system_) {
 		int ret = DisableTsPins();
 		if (ret)
@@ -1186,9 +1196,6 @@ int Isdb2056Device::Isdb2056Receiver::SetCapture(bool capture)
 	}
 
 	if (!streaming_) {
-		std::size_t size = 188 * parent_.config_.device.receiver_max_packets;
-		stream_buf_->Alloc(size);
-		stream_buf_->SetThresholdSize(size / 10);
 		stream_buf_->Start();
 		streaming_ = true;
 	} else if (!stream_buf_->Purge()) {
