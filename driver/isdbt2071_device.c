@@ -27,33 +27,31 @@ static void isdbt2071_device_release(struct kref *kref);
 static int isdbt2071_backend_set_power(struct isdbt2071_device *isdbt2071,
 				      bool state)
 {
-	int ret = 0;
+	int ret = 0, power_ret, reset_ret;
 	struct it930x_bridge *it930x = &isdbt2071->it930x;
 
 	dev_dbg(isdbt2071->dev,
 		"isdbt2071_backend_set_power: %s\n", (state) ? "true" : "false");
 
-	if (!state && !atomic_read(&isdbt2071->available))
-		return 0;
+	if (!atomic_read(&isdbt2071->available))
+		return state ? -ENODEV : 0;
 
 	if (state) {
 		ret = it930x_write_gpio(it930x, 3, false);
-		if (ret)
-			return ret;
-
-		msleep(100);
-
-		ret = it930x_write_gpio(it930x, 2, true);
-		if (ret)
-			return ret;
-
-		msleep(20);
-	} else {
-		it930x_write_gpio(it930x, 2, false);
-		it930x_write_gpio(it930x, 3, true);
+		if (!ret) {
+			msleep(100);
+			ret = it930x_write_gpio(it930x, 2, true);
+		}
+		if (!ret) {
+			msleep(20);
+			return 0;
+		}
 	}
 
-	return 0;
+	/* 途中で失敗しても電源停止とリセットの両方を試し、最初のエラーを返す。 */
+	power_ret = it930x_write_gpio(it930x, 2, false);
+	reset_ret = it930x_write_gpio(it930x, 3, true);
+	return ret ? ret : (power_ret ? power_ret : reset_ret);
 }
 
 static int isdbt2071_backend_init(struct isdbt2071_device *isdbt2071)
