@@ -801,6 +801,16 @@ int Isdbt2071Device::Isdbt2071Receiver::SetCapture(bool capture)
 	if (!parent_.available_)
 		return -ENODEV;
 
+	if (!streaming_) {
+		const auto packets = parent_.config_.device.receiver_max_packets;
+		if (!packets || packets > SIZE_MAX / PX4_TS_PACKET_SIZE)
+			return -EINVAL;
+		const std::size_t size = static_cast<std::size_t>(packets) * PX4_TS_PACKET_SIZE;
+		if (!stream_buf_->Alloc(size))
+			return -ENOMEM;
+		stream_buf_->SetThresholdSize(size / 10);
+	}
+
 	/* ピン有効化が途中で失敗した場合にも解除を試す。 */
 	ts_pin_cleanup_pending_ = true;
 	int ret = tc90522_enable_ts_pins_t(&tc90522_t_, true);
@@ -816,9 +826,6 @@ int Isdbt2071Device::Isdbt2071Receiver::SetCapture(bool capture)
 	}
 
 	if (!streaming_) {
-		const std::size_t size = 188 * parent_.config_.device.receiver_max_packets;
-		stream_buf_->Alloc(size);
-		stream_buf_->SetThresholdSize(size / 10);
 		stream_buf_->Start();
 		streaming_ = true;
 	} else if (!stream_buf_->Purge()) {
