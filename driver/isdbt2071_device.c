@@ -67,13 +67,12 @@ static int isdbt2071_backend_init(struct isdbt2071_device *isdbt2071)
 		return ret;
 	}
 
-	tc90522_term(&chrdev2071->tc90522_s);
-
 	ret = r850_init(&chrdev2071->r850);
 	if (ret) {
 		dev_err(isdbt2071->dev,
 			"isdbt2071_backend_init: r850_init() failed. (ret: %d)\n",
 			ret);
+		tc90522_term(&chrdev2071->tc90522_t);
 		return ret;
 	}
 
@@ -86,7 +85,6 @@ static int isdbt2071_backend_term(struct isdbt2071_device *isdbt2071)
 
 	r850_term(&chrdev2071->r850);
 	tc90522_term(&chrdev2071->tc90522_t);
-	tc90522_term(&chrdev2071->tc90522_s);
 
 	return 0;
 }
@@ -554,11 +552,6 @@ static int isdbt2071_device_load_config(struct isdbt2071_device *isdbt2071,
 	chrdev2071->tc90522_t.i2c = &it930x->i2c_master[2];
 	chrdev2071->tc90522_t.i2c_addr = 0x10;
 	chrdev2071->tc90522_t.is_secondary = false;
-
-	chrdev2071->tc90522_s.dev = dev;
-	chrdev2071->tc90522_s.i2c = &it930x->i2c_master[2];
-	chrdev2071->tc90522_s.i2c_addr = 0x11;
-	chrdev2071->tc90522_s.is_secondary = false;
 
 	chrdev2071->r850.dev = dev;
 	chrdev2071->r850.i2c = &chrdev2071->tc90522_t.i2c_master;
