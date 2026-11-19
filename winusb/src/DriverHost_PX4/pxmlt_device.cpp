@@ -968,14 +968,14 @@ int PxMltDevice::PxMltReceiver::SetFrequency()
 		case px4::SystemType::ISDB_T:
 			ret = cxd2858er_set_params_t(&cxd2858er_, CXD2858ER_ISDB_T_SYSTEM, params_.freq, 6);
 			if (ret)
-				dev_err(&parent_.dev_, "px4::PxMltDevice::PxMltReceiver::SetFrequency(%u): cxd2858er_set_params_t(%u, 6) failed. (ret: %d)\n");
+				dev_err(&parent_.dev_, "px4::PxMltDevice::PxMltReceiver::SetFrequency(%u): cxd2858er_set_params_t(%u, 6) failed. (ret: %d)\n", static_cast<unsigned>(index_), params_.freq, ret);
 
 			break;
 
 		case px4::SystemType::ISDB_S:
 			ret = cxd2858er_set_params_s(&cxd2858er_, CXD2858ER_ISDB_S_SYSTEM, params_.freq, 28860);
 			if (ret)
-				dev_err(&parent_.dev_, "px4::PxMltDevice::PxMltReceiver::SetFrequency(%u): cxd2858er_set_params_s(%u, 28860) failed. (ret: %d)\n");
+				dev_err(&parent_.dev_, "px4::PxMltDevice::PxMltReceiver::SetFrequency(%u): cxd2858er_set_params_s(%u, 28860) failed. (ret: %d)\n", static_cast<unsigned>(index_), params_.freq, ret);
 
 			break;
 
@@ -997,7 +997,7 @@ int PxMltDevice::PxMltReceiver::SetFrequency()
 
 	ret = cxd2856er_post_tune(&cxd2856er_);
 	if (ret) {
-		dev_err(&parent_.dev_, "px4::PxMltDevice::PxMltReceiver::SetFrequency(%u): cxd2856er_post_tune() failed. (ret: %d)\n");
+		dev_err(&parent_.dev_, "px4::PxMltDevice::PxMltReceiver::SetFrequency(%u): cxd2856er_post_tune() failed. (ret: %d)\n", static_cast<unsigned>(index_), ret);
 		return ret;
 	}
 
