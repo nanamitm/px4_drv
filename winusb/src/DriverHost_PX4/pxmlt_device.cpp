@@ -527,59 +527,53 @@ void PxMltDevice::StreamProcess(std::shared_ptr<px4::ReceiverBase::StreamBuffer>
 	std::uint8_t *p = *buf;
 	std::size_t remain = len;
 
-	while (remain) {
-		std::size_t i;
-		bool sync_remain = false;
-
-		for (i = 0; i < PXMLT_DEVICE_TS_SYNC_COUNT; i++) {
-			if (((i + 1) * 188) <= remain) {
-				if (!px4_ts_has_tagged_sync(p[i * 188]))
-					break;
-			} else {
-				sync_remain = true;
+	while (remain >= 188) {
+		if (stats.aligned && !px4_ts_has_tagged_sync(p[0])) {
+			if (remain < PXMLT_DEVICE_TS_SYNC_SIZE)
 				break;
+
+			/* 既知の境界で bit7 付きのパケットを数え、再同期の位置は通常どおり探索する。 */
+			const std::uint8_t *q = p;
+			std::size_t r = remain;
+			int good_run = 0;
+			while (r >= 188 && good_run < PXMLT_DEVICE_TS_SYNC_COUNT) {
+				if (px4_ts_has_tagged_sync(q[0])) {
+					good_run++;
+				} else if ((q[0] & 0x0f) == 0x07) {
+					u8 id = (q[0] & 0x70) >> 4;
+
+					if (id && id <= num)
+						stats.error_flagged[id - 1]++;
+					good_run = 0;
+				} else {
+					break;
+				}
+				q += 188;
+				r -= 188;
 			}
+			stats.aligned = false;
 		}
 
-		if (sync_remain)
-			break;
+		if (!stats.aligned) {
+			if (remain < PXMLT_DEVICE_TS_SYNC_SIZE)
+				break;
 
-		if (i < PXMLT_DEVICE_TS_SYNC_COUNT) {
-			if (stats.aligned) {
-				/* 配信済みパケットの直後で同期を失ったため、ここはパケット境界と分かる。
-				 * 境界を保ったまま先読みし、bit7 以外は同期値と一致するパケットを
-				 * 誤りフラグ付きとして数える。読み飛ばし処理そのものは変えない。 */
-				const std::uint8_t *q = p;
-				std::size_t r = remain;
-				int good_run = 0;
-
-				while (r >= 188 && good_run < PXMLT_DEVICE_TS_SYNC_COUNT) {
-					if (px4_ts_has_tagged_sync(q[0])) {
-						good_run++;
-					} else if ((q[0] & 0x0f) == 0x07) {
-						u8 id = (q[0] & 0x70) >> 4;
-
-						if (id && id <= 5)
-							stats.error_flagged[id - 1]++;
-						good_run = 0;
-					} else {
-						break;
-					}
-					q += 188;
-					r -= 188;
+			std::size_t i;
+			for (i = 0; i < PXMLT_DEVICE_TS_SYNC_COUNT; i++) {
+				if (!px4_ts_has_tagged_sync(p[i * 188]))
+					break;
+			}
+			if (i < PXMLT_DEVICE_TS_SYNC_COUNT) {
+				if (!stats.in_resync) {
+					stats.in_resync = true;
+					stats.resync_events++;
 				}
-
-				stats.aligned = false;
+				stats.skipped_bytes++;
+				p++;
+				remain--;
+				continue;
 			}
-			if (!stats.in_resync) {
-				stats.in_resync = true;
-				stats.resync_events++;
-			}
-			stats.skipped_bytes++;
-
-			p++;
-			remain--;
-			continue;
+			stats.aligned = true;
 		}
 
 		while (remain >= 188 && px4_ts_has_tagged_sync(p[0])) {
@@ -594,7 +588,6 @@ void PxMltDevice::StreamProcess(std::shared_ptr<px4::ReceiverBase::StreamBuffer>
 
 			p += 188;
 			remain -= 188;
-			stats.aligned = true;
 			stats.in_resync = false;
 		}
 	}
@@ -616,36 +609,26 @@ int PxMltDevice::StreamHandler(void *context, void *buf, std::uint32_t len)
 	std::uint8_t *p = static_cast<std::uint8_t*>(buf);
 	std::size_t remain = len;
 
-	if (stream_ctx.remain_len) {
-		if ((stream_ctx.remain_len + len) >= PXMLT_DEVICE_TS_SYNC_SIZE) {
-			std::uint8_t * remain_buf = stream_ctx.remain_buf;
-			std::size_t t = PXMLT_DEVICE_TS_SYNC_SIZE - stream_ctx.remain_len;
+	while (stream_ctx.remain_len) {
+		const std::size_t need = stream_ctx.stats.aligned && px4_ts_has_tagged_sync(stream_ctx.remain_buf[0])
+			? 188 : PXMLT_DEVICE_TS_SYNC_SIZE;
+		const std::size_t take = need - stream_ctx.remain_len;
+		std::uint8_t *tail = stream_ctx.remain_buf;
 
-			memcpy(remain_buf + stream_ctx.remain_len, p, t);
-			std::size_t prev_len = stream_ctx.remain_len;
-			std::uint64_t prev_skipped = stream_ctx.stats.skipped_bytes;
-
-			stream_ctx.remain_len = PXMLT_DEVICE_TS_SYNC_SIZE;
-
-			StreamProcess(stream_ctx.stream_buf, receiver_num, &remain_buf, stream_ctx.remain_len, stream_ctx.stats);
-			if (!stream_ctx.remain_len) {
-				p += t;
-				remain -= t;
-			} else {
-				/* 同期できなかった場合、前回の端数は捨てられ、今回の先頭 t バイトは
-				 * 下の処理で読み直される。読み直す分を二重に数えないよう、
-				 * 捨てられる前回の端数だけを読み飛ばし数とする。 */
-				stream_ctx.stats.skipped_bytes = prev_skipped + prev_len;
-				stream_ctx.stats.aligned = false;
-			}
-
-			stream_ctx.remain_len = 0;
-		} else {
-			memcpy(stream_ctx.remain_buf + stream_ctx.remain_len, p, len);
-			stream_ctx.remain_len += len;
-
+		if (remain < take) {
+			memcpy(stream_ctx.remain_buf + stream_ctx.remain_len, p, remain);
+			stream_ctx.remain_len += remain;
 			return 0;
 		}
+
+		memcpy(stream_ctx.remain_buf + stream_ctx.remain_len, p, take);
+		stream_ctx.remain_len = need;
+		StreamProcess(stream_ctx.stream_buf, receiver_num, &tail, stream_ctx.remain_len, stream_ctx.stats);
+		p += take;
+		remain -= take;
+		/* 同期候補が窓の途中にあれば、次の入力を足して検証する。 */
+		if (stream_ctx.remain_len)
+			memmove(stream_ctx.remain_buf, tail, stream_ctx.remain_len);
 	}
 
 	StreamProcess(stream_ctx.stream_buf, receiver_num, &p, remain, stream_ctx.stats);
