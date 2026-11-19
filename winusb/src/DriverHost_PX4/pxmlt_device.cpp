@@ -75,7 +75,6 @@ PxMltDevice::PxMltDevice(const std::wstring &path, const px4::DeviceDefinition &
 	LoadConfig();
 
 	memset(&it930x_, 0, sizeof(it930x_));
-	memset(&stream_ctx_, 0, sizeof(stream_ctx_));
 }
 
 PxMltDevice::~PxMltDevice()
@@ -276,15 +275,19 @@ void PxMltDevice::Term()
 
 	lock.unlock();
 
-	for (int i = 0; i < receiver_num_; i++) {
-		stream_ctx_.stream_buf[i] = nullptr;
-		receivers_[i].reset();
-	}
+	/* Close() と USB ワーカーの参照先を、終了が確定するまで保持する。 */
+	for (int i = 0; i < receiver_num_; i++)
+		receivers_[i]->WaitForClose();
 
 	lock.lock();
 
 	it930x_term(&it930x_);
 	itedtv_bus_term(&it930x_.bus);
+
+	for (int i = 0; i < receiver_num_; i++) {
+		stream_ctx_.stream_buf[i].reset();
+		receivers_[i].reset();
+	}
 
 	init_ = false;
 	return;
@@ -706,11 +709,15 @@ PxMltDevice::PxMltReceiver::~PxMltReceiver()
 {
 	dev_dbg(&parent_.dev_, "px4::PxMltDevice::PxMltReceiver::~PxMltReceiver(%u)\n", index_);
 
-	std::unique_lock<std::mutex> lock(lock_);
-
-	close_cond_.wait(lock, [this] { return !open_; });
+	WaitForClose();
 
 	dev_dbg(&parent_.dev_, "px4::PxMltDevice::PxMltReceiver::~PxMltReceiver(%u): exit\n", index_);
+}
+
+void PxMltDevice::PxMltReceiver::WaitForClose()
+{
+	std::unique_lock<std::mutex> lock(lock_);
+	close_cond_.wait(lock, [this] { return !open_; });
 }
 
 int PxMltDevice::PxMltReceiver::Open()

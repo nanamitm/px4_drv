@@ -120,6 +120,7 @@ private:
 		PxMltReceiver() = delete;
 		PxMltReceiver(PxMltDevice &parent, std::uintptr_t index);
 		~PxMltReceiver();
+		void WaitForClose();
 
 		// cannot copy
 		PxMltReceiver(const PxMltReceiver &) = delete;
