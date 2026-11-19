@@ -31,6 +31,7 @@ struct px4_chrdev {
 	struct ptx_chrdev *chrdev;
 	struct px4_device *parent;
 	bool lnb_power;
+	bool ts_pin_cleanup_pending;
 	struct tc90522_demod tc90522;
 	union {
 		struct r850_tuner r850;

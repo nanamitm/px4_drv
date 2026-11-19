@@ -55,7 +55,7 @@ void TestConcurrentOpen()
 	const auto begin = std::chrono::steady_clock::now();
 	px4::command::ReceiverInfo result{};
 	std::uint32_t id = 0;
-	Require(manager.SearchAndOpen(other_key, result, id) == &other && manager.SearchByDataId(id) == &other,
+	Require(manager.SearchAndOpen(other_key, result, id) == &other && manager.BindStream(id) == other.GetStreamBuffer(),
 		"other receiver could not open and bind a stream");
 	Require(std::chrono::steady_clock::now() - begin < 2s, "slow Open blocked the manager");
 	Require(!manager.SearchAndOpen(slow_key, result, id), "slow receiver was opened twice");
@@ -75,6 +75,27 @@ void TestConcurrentOpen()
 	Require(opening.get() == nullptr && removal.get() && !slow.open, "detached receiver was published or left open");
 	other.Close();
 	manager.ClearDataId(&other);
+}
+
+// データ接続は制御接続が受信機を破棄した後も、自身の配信バッファを使って閉じる。
+void TestStreamBindingLifetime()
+{
+	px4::ReceiverManager manager;
+	auto receiver = std::make_unique<Receiver>();
+	px4::command::ReceiverInfo info{}, key{}, result{};
+	std::uint32_t id = 0;
+	Require(manager.Register(info, receiver.get()), "register receiver for stream binding");
+	Require(manager.SearchAndOpen(key, result, id) == receiver.get(), "open receiver for stream binding");
+	std::weak_ptr<px4::ReceiverBase::StreamBuffer> weak = receiver->GetStreamBuffer();
+	auto stream = manager.BindStream(id);
+	Require(stream && !manager.BindStream(id), "stream binding must be single-use");
+	receiver->Close();
+	Require(manager.Unregister(receiver.get()), "unregister bound receiver");
+	receiver.reset();
+	Require(!weak.expired() && stream->Purge(), "bound stream must outlive its receiver");
+	stream->StopRequest();
+	stream.reset();
+	Require(weak.expired(), "stream binding must release the buffer on close");
 }
 
 // 抜去した機器の受信機が開いたまま残っても、同じパスで挿し直した機器の受信機だけが検索される
@@ -140,6 +161,7 @@ void TestRemovedDevice()
 int main() try
 {
 	TestConcurrentOpen();
+	TestStreamBindingLifetime();
 	TestRemovedDevice();
 	px4::ReceiverManager manager;
 	Receiver first, sibling, second;

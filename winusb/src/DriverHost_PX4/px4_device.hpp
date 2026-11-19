@@ -92,10 +92,13 @@ private:
 		std::uint8_t dev_id;
 	};
 	struct StreamContext final {
+		std::mutex lock;
+		bool enabled[4] = {};
 		std::shared_ptr<px4::ReceiverBase::StreamBuffer> stream_buf[4];
 		/* 最初のコールバック前も未処理データなしの状態として初期化 */
 		std::uint8_t remain_buf[PX4_DEVICE_TS_SYNC_SIZE] = {};
 		std::size_t remain_len = 0;
+		bool locked = false;
 	};
 
 	class MultiDevice final {
@@ -155,6 +158,7 @@ private:
 
 		int Init(bool sleep);
 		void Term();
+		void WaitForClose();
 
 		int Open() override;
 		void Close() override;
@@ -192,6 +196,7 @@ private:
 			rt710_tuner rt710_;
 		};
 		std::atomic_bool streaming_;
+		bool stream_buffer_started_ = false;
 		std::atomic_bool ts_pin_cleanup_pending_;
 	};
 
@@ -207,7 +212,7 @@ private:
 	int StartCapture();
 	int StopCapture();
 
-	static void StreamProcess(std::shared_ptr<px4::ReceiverBase::StreamBuffer> stream_buf[], std::uint8_t **buf, std::size_t &len);
+	static void StreamProcess(StreamContext &stream_ctx, std::uint8_t **buf, std::size_t &len);
 	static int StreamHandler(void *context, void *buf, std::uint32_t len);
 
 	Px4DeviceConfig config_;

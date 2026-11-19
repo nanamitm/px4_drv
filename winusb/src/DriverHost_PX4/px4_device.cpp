@@ -41,7 +41,6 @@ Px4Device::Px4Device(const std::wstring &path, const px4::DeviceDefinition &devi
 	ParseSerialNumber();
 
 	memset(&it930x_, 0, sizeof(it930x_));
-	memset(&stream_ctx_, 0, sizeof(stream_ctx_));
 }
 
 Px4Device::~Px4Device()
@@ -307,10 +306,9 @@ void Px4Device::Term()
 
 	lock.unlock();
 
-	for (int i = 0; i < 4; i++) {
-		stream_ctx_.stream_buf[i] = nullptr;
-		receivers_[i].reset();
-	}
+	/* Close() は他の受信機と共有バッファを参照するため、すべて閉じるまで保持する。 */
+	for (const auto &receiver : receivers_)
+		receiver->WaitForClose();
 
 	lock.lock();
 
@@ -322,6 +320,12 @@ void Px4Device::Term()
 
 	it930x_term(&it930x_);
 	itedtv_bus_term(&it930x_.bus);
+
+	/* USB ワーカーの終了を待ってからコールバックの参照先を外す。 */
+	for (int i = 0; i < 4; i++) {
+		stream_ctx_.stream_buf[i].reset();
+		receivers_[i].reset();
+	}
 
 	init_ = false;
 	return;
@@ -566,6 +570,7 @@ int Px4Device::StartCapture()
 		it930x_.bus.usb.streaming.no_raw_io = config_.usb.no_raw_io;
 
 		stream_ctx_.remain_len = 0;
+		stream_ctx_.locked = false;
 
 		ret = itedtv_bus_start_streaming(&it930x_.bus, StreamHandler, this);
 		if (ret) {
@@ -599,27 +604,41 @@ int Px4Device::StopCapture()
 	return 0;
 }
 
-void Px4Device::StreamProcess(std::shared_ptr<px4::ReceiverBase::StreamBuffer> stream_buf[], std::uint8_t **buf, std::size_t &len)
+void Px4Device::StreamProcess(StreamContext &stream_ctx, std::uint8_t **buf, std::size_t &len)
 {
 	std::uint8_t *p = *buf;
 	std::size_t remain = len;
 
 	while (remain) {
 		std::size_t i;
-		bool sync_remain = false;
 
-		for (i = 0; i < PX4_DEVICE_TS_SYNC_COUNT; i++) {
-			if (((i + 1) * 188) <= remain) {
-				if (!px4_ts_has_tagged_sync(p[i * 188]))
-					break;
-			} else {
-				sync_remain = true;
+		if (stream_ctx.locked) {
+			u8 id;
+
+			if (remain < 188)
 				break;
+			if (!px4_ts_has_tagged_sync(p[0])) {
+				stream_ctx.locked = false;
+				continue;
 			}
+			id = (p[0] & 0x70) >> 4;
+			if (id && id < 5 && stream_ctx.enabled[id - 1]) {
+				p[0] = 0x47;
+				std::size_t pkt_len = 188;
+				stream_ctx.stream_buf[id - 1]->Write(p, pkt_len);
+			}
+			p += 188;
+			remain -= 188;
+			continue;
 		}
 
-		if (sync_remain)
+		if (remain < PX4_DEVICE_TS_SYNC_SIZE)
 			break;
+
+		for (i = 0; i < PX4_DEVICE_TS_SYNC_COUNT; i++) {
+			if (!px4_ts_has_tagged_sync(p[i * 188]))
+				break;
+		}
 
 		if (i < PX4_DEVICE_TS_SYNC_COUNT) {
 			p++;
@@ -627,23 +646,12 @@ void Px4Device::StreamProcess(std::shared_ptr<px4::ReceiverBase::StreamBuffer> s
 			continue;
 		}
 
-		while (remain >= 188 && px4_ts_has_tagged_sync(p[0])) {
-			u8 id = (p[0] & 0x70) >> 4;
-
-			if (id && id < 5) {
-				std::size_t pkt_len = 188;
-
-				p[0] = 0x47;
-				stream_buf[id - 1]->Write(p, pkt_len);
-			}
-
-			p += 188;
-			remain -= 188;
-		}
+		stream_ctx.locked = true;
 	}
 
 	for (int i = 0; i < 4; i++)
-		stream_buf[i]->NotifyWrite();
+		if (stream_ctx.enabled[i])
+			stream_ctx.stream_buf[i]->NotifyWrite();
 
 	*buf = p;
 	len = remain;
@@ -655,33 +663,32 @@ int Px4Device::StreamHandler(void *context, void *buf, std::uint32_t len)
 {
 	Px4Device &obj = *static_cast<Px4Device*>(context);
 	StreamContext &stream_ctx = obj.stream_ctx_;
+	std::lock_guard<std::mutex> lock(stream_ctx.lock);
 	std::uint8_t *p = static_cast<std::uint8_t*>(buf);
 	std::size_t remain = len;
 
-	if (stream_ctx.remain_len) {
-		if ((stream_ctx.remain_len + len) >= PX4_DEVICE_TS_SYNC_SIZE) {
-			std::uint8_t * remain_buf = stream_ctx.remain_buf;
-			std::size_t t = PX4_DEVICE_TS_SYNC_SIZE - stream_ctx.remain_len;
+	while (stream_ctx.remain_len) {
+		std::size_t need = stream_ctx.locked ? 188 : PX4_DEVICE_TS_SYNC_SIZE;
+		std::size_t take = need - stream_ctx.remain_len;
+		std::uint8_t *tail = stream_ctx.remain_buf;
 
-			memcpy(remain_buf + stream_ctx.remain_len, p, t);
-			stream_ctx.remain_len = PX4_DEVICE_TS_SYNC_SIZE;
-
-			StreamProcess(stream_ctx.stream_buf, &remain_buf, stream_ctx.remain_len);
-			if (!stream_ctx.remain_len) {
-				p += t;
-				remain -= t;
-			}
-
-			stream_ctx.remain_len = 0;
-		} else {
-			memcpy(stream_ctx.remain_buf + stream_ctx.remain_len, p, len);
-			stream_ctx.remain_len += len;
-
+		if (remain < take) {
+			memcpy(stream_ctx.remain_buf + stream_ctx.remain_len, p, remain);
+			stream_ctx.remain_len += remain;
 			return 0;
 		}
+
+		memcpy(stream_ctx.remain_buf + stream_ctx.remain_len, p, take);
+		stream_ctx.remain_len = need;
+		StreamProcess(stream_ctx, &tail, stream_ctx.remain_len);
+		p += take;
+		remain -= take;
+		/* 同期候補が窓の途中にあれば、次の入力を足して検証する。 */
+		if (stream_ctx.remain_len)
+			memmove(stream_ctx.remain_buf, tail, stream_ctx.remain_len);
 	}
 
-	StreamProcess(stream_ctx.stream_buf, &p, remain);
+	StreamProcess(stream_ctx, &p, remain);
 
 	if (remain) {
 		memcpy(stream_ctx.remain_buf, p, remain);
@@ -1056,11 +1063,15 @@ Px4Device::Px4Receiver::~Px4Receiver()
 {
 	dev_dbg(&parent_.dev_, "px4::Px4Device::Px4Receiver::~Px4Receiver(%u)\n", index_);
 
-	std::unique_lock<std::mutex> lock(lock_);
-
-	close_cond_.wait(lock, [this] { return !open_; });
+	WaitForClose();
 
 	dev_dbg(&parent_.dev_, "px4::Px4Device::Px4Receiver::~Px4Receiver(%u): exit\n", index_);
+}
+
+void Px4Device::Px4Receiver::WaitForClose()
+{
+	std::unique_lock<std::mutex> lock(lock_);
+	close_cond_.wait(lock, [this] { return !open_; });
 }
 
 int Px4Device::Px4Receiver::Init(bool sleep)
@@ -1355,6 +1366,9 @@ void Px4Device::Px4Receiver::Close()
 	std::unique_lock<std::mutex> lock(lock_);
 	std::lock_guard<std::recursive_mutex> dev_lock(parent_.lock_);
 
+	stream_buf_->Stop();
+	stream_buffer_started_ = false;
+
 	assert(parent_.open_count_ > 0);
 
 	parent_.open_count_--;
@@ -1629,15 +1643,31 @@ int Px4Device::Px4Receiver::SetCapture(bool capture)
 		return -EALREADY;
 
 	if (capture) {
+		if (!stream_buffer_started_) {
+			const auto packets = parent_.config_.device.receiver_max_packets;
+			if (!packets || packets > SIZE_MAX / 188)
+				return -EINVAL;
+			const std::size_t size = static_cast<std::size_t>(packets) * 188;
+			if (!stream_buf_->Alloc(size))
+				return -ENOMEM;
+			stream_buf_->SetThresholdSize(size / 10);
+		} else if (!stream_buf_->AdvanceEpoch()) {
+			return -EIO;
+		}
+
 		ret = parent_.PrepareCapture();
 		if (ret)
 			return ret;
 	} else if (streaming_) {
+		{
+			/* 配信側を閉じず、処理中の USB 転送からの書き込みだけを止める。 */
+			std::lock_guard<std::mutex> stream_lock(parent_.stream_ctx_.lock);
+			parent_.stream_ctx_.enabled[index_] = false;
+		}
 		ret = parent_.StopCapture();
 		if (ret)
 			return ret;
 
-		stream_buf_->Stop();
 		streaming_ = false;
 	}
 
@@ -1649,8 +1679,11 @@ int Px4Device::Px4Receiver::SetCapture(bool capture)
 	if (ret)
 		return ret;
 
-	if (!capture)
+	if (!capture) {
 		ts_pin_cleanup_pending_ = false;
+		if (stream_buffer_started_ && !stream_buf_->Purge())
+			return -EIO;
+	}
 
 	if (capture) {
 		ret = parent_.StartCapture();
@@ -1662,12 +1695,14 @@ int Px4Device::Px4Receiver::SetCapture(bool capture)
 			return ret;
 		}
 
-		std::size_t size = 188 * parent_.config_.device.receiver_max_packets;
-
-		stream_buf_->Alloc(size);
-		stream_buf_->SetThresholdSize(size / 10);
-		stream_buf_->Start();
-
+		if (!stream_buffer_started_) {
+			stream_buf_->Start();
+			stream_buffer_started_ = true;
+		}
+		{
+			std::lock_guard<std::mutex> stream_lock(parent_.stream_ctx_.lock);
+			parent_.stream_ctx_.enabled[index_] = true;
+		}
 		streaming_ = true;
 	}
 

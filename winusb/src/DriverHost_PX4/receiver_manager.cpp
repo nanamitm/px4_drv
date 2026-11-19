@@ -146,16 +146,16 @@ px4::ReceiverBase* ReceiverManager::SearchAndOpen(px4::command::ReceiverInfo &ke
 	return nullptr;
 }
 
-px4::ReceiverBase* ReceiverManager::SearchByDataId(std::uint32_t data_id)
+std::shared_ptr<px4::ReceiverBase::StreamBuffer> ReceiverManager::BindStream(std::uint32_t data_id)
 {
 	std::unique_lock<std::shared_mutex> lock(mtx_);
 
 	for (auto it = data_.begin(); it != data_.end(); ++it) {
-		if (it->second.info.data_id != data_id || !it->second.valid_data_id || it->second.unregistering)
+		if (it->second.info.data_id != data_id || !it->second.valid_data_id || it->second.unregistering || it->second.removed)
 			continue;
 
 		it->second.valid_data_id = false;
-		return it->first;
+		return it->first->GetStreamBuffer();
 	}
 
 	return nullptr;

@@ -23,6 +23,7 @@ struct px4_stream_context {
 	struct ptx_chrdev *chrdev[PX4_CHRDEV_NUM];
 	u8 remain_buf[PX4_DEVICE_TS_SYNC_SIZE];
 	size_t remain_len;
+	bool locked;
 };
 
 static int px4_chrdev_set_lnb_voltage_s(struct ptx_chrdev *chrdev, int voltage);
@@ -132,7 +133,7 @@ static int px4_backend_term(struct px4_device *px4)
 	return 0;
 }
 
-static void px4_device_stream_process(struct ptx_chrdev **chrdev,
+static void px4_device_stream_process(struct px4_stream_context *stream_ctx,
 				      u8 **buf, u32 *len)
 {
 	u8 *p = *buf;
@@ -140,20 +141,33 @@ static void px4_device_stream_process(struct ptx_chrdev **chrdev,
 
 	while (likely(remain)) {
 		u32 i;
-		bool sync_remain = false;
 
-		for (i = 0; i < PX4_DEVICE_TS_SYNC_COUNT; i++) {
-			if (likely(((i + 1) * 188) <= remain)) {
-				if (unlikely(!px4_ts_has_tagged_sync(p[i * 188])))
-					break;
-			} else {
-				sync_remain = true;
+		if (stream_ctx->locked) {
+			u8 id;
+
+			if (remain < 188)
 				break;
+			if (!px4_ts_has_tagged_sync(p[0])) {
+				stream_ctx->locked = false;
+				continue;
 			}
+			id = (p[0] & 0x70) >> 4;
+			if (likely(id && id < 5)) {
+				p[0] = 0x47;
+				ptx_chrdev_put_stream(stream_ctx->chrdev[id - 1], p, 188);
+			}
+			p += 188;
+			remain -= 188;
+			continue;
 		}
 
-		if (unlikely(sync_remain))
+		if (remain < PX4_DEVICE_TS_SYNC_SIZE)
 			break;
+
+		for (i = 0; i < PX4_DEVICE_TS_SYNC_COUNT; i++) {
+			if (!px4_ts_has_tagged_sync(p[i * 188]))
+				break;
+		}
 
 		if (unlikely(i < PX4_DEVICE_TS_SYNC_COUNT)) {
 			p++;
@@ -161,17 +175,7 @@ static void px4_device_stream_process(struct ptx_chrdev **chrdev,
 			continue;
 		}
 
-		while (likely(remain >= 188 && ((p[0] & 0x8f) == 0x07))) {
-			u8 id = (p[0] & 0x70) >> 4;
-
-			if (likely(id && id < 5)) {
-				p[0] = 0x47;
-				ptx_chrdev_put_stream(chrdev[id - 1], p, 188);
-			}
-
-			p += 188;
-			remain -= 188;
-		}
+		stream_ctx->locked = true;
 	}
 
 	*buf = p;
@@ -188,31 +192,30 @@ static int px4_device_stream_handler(void *context, void *buf, u32 len)
 	u8 *p = buf;
 	u32 remain = len;
 
-	if (unlikely(ctx_remain_len)) {
-		if (likely((ctx_remain_len + len) >= PX4_DEVICE_TS_SYNC_SIZE)) {
-			u32 t = PX4_DEVICE_TS_SYNC_SIZE - ctx_remain_len;
+	while (unlikely(ctx_remain_len)) {
+		u32 need = stream_ctx->locked ? 188 : PX4_DEVICE_TS_SYNC_SIZE;
+		u32 take = need - ctx_remain_len;
+		u8 *tail = ctx_remain_buf;
 
-			memcpy(ctx_remain_buf + ctx_remain_len, p, t);
-			ctx_remain_len = PX4_DEVICE_TS_SYNC_SIZE;
-
-			px4_device_stream_process(stream_ctx->chrdev,
-						  &ctx_remain_buf,
-						  &ctx_remain_len);
-			if (likely(!ctx_remain_len)) {
-				p += t;
-				remain -= t;
-			}
-
-			stream_ctx->remain_len = 0;
-		} else {
-			memcpy(ctx_remain_buf + ctx_remain_len, p, len);
-			stream_ctx->remain_len += len;
-
+		if (remain < take) {
+			memcpy(ctx_remain_buf + ctx_remain_len, p, remain);
+			stream_ctx->remain_len = ctx_remain_len + remain;
 			return 0;
 		}
-	}
 
-	px4_device_stream_process(stream_ctx->chrdev, &p, &remain);
+		memcpy(ctx_remain_buf + ctx_remain_len, p, take);
+		ctx_remain_len = need;
+		px4_device_stream_process(stream_ctx, &tail,
+					  &ctx_remain_len);
+		p += take;
+		remain -= take;
+		/* 同期候補が窓の途中にあれば、次の入力を足して検証する。 */
+		if (ctx_remain_len)
+			memmove(ctx_remain_buf, tail, ctx_remain_len);
+	}
+	stream_ctx->remain_len = 0;
+
+	px4_device_stream_process(stream_ctx, &p, &remain);
 
 	if (unlikely(remain)) {
 		memcpy(stream_ctx->remain_buf, p, remain);
@@ -528,6 +531,32 @@ fail_backend_power:
 	return ret;
 }
 
+/* px4->lock を保持し、解除に失敗した場合は次の開始または close で再試行する。 */
+static int px4_chrdev_disable_ts_pins(struct ptx_chrdev *chrdev)
+{
+	struct px4_chrdev *chrdev4 = chrdev->priv;
+	struct px4_device *px4 = chrdev4->parent;
+	int ret = 0;
+
+	if (atomic_read(&px4->available)) {
+		switch (chrdev->system_cap) {
+		case PTX_ISDB_T_SYSTEM:
+			ret = tc90522_enable_ts_pins_t(&chrdev4->tc90522, false);
+			break;
+		case PTX_ISDB_S_SYSTEM:
+			ret = tc90522_enable_ts_pins_s(&chrdev4->tc90522, false);
+			break;
+		default:
+			break;
+		}
+	}
+	chrdev4->ts_pin_cleanup_pending = !!ret;
+	if (ret)
+		dev_warn(px4->dev, "TS pin disable failed for receiver %u: %d\n",
+			 chrdev->id, ret);
+	return ret;
+}
+
 static int px4_chrdev_release(struct ptx_chrdev *chrdev)
 {
 	struct ptx_chrdev_group *chrdev_group = chrdev->parent;
@@ -546,6 +575,9 @@ static int px4_chrdev_release(struct ptx_chrdev *chrdev)
 		mutex_unlock(&px4->lock);
 		return -EALREADY;
 	}
+
+	if (chrdev4->ts_pin_cleanup_pending)
+		px4_chrdev_disable_ts_pins(chrdev);
 
 	px4->open_count--;
 	if (!px4->open_count) {
@@ -940,6 +972,16 @@ static int px4_chrdev_start_capture(struct ptx_chrdev *chrdev)
 
 	mutex_lock(&px4->lock);
 
+	if (!atomic_read(&px4->available)) {
+		ret = -ENODEV;
+		goto fail;
+	}
+	if (chrdev4->ts_pin_cleanup_pending) {
+		ret = px4_chrdev_disable_ts_pins(chrdev);
+		if (ret)
+			goto fail;
+	}
+
 	if (!px4->streaming_count) {
 		ret = it930x_purge_psb(&px4->it930x,
 				       px4_device_params.psb_purge_timeout);
@@ -975,12 +1017,13 @@ static int px4_chrdev_start_capture(struct ptx_chrdev *chrdev)
 	}
 
 	if (ret)
-		goto fail;
+		goto fail_pins;
 
 	if (!px4->streaming_count) {
 		struct px4_stream_context *stream_ctx = px4->stream_ctx;
 
 		stream_ctx->remain_len = 0;
+		stream_ctx->locked = false;
 
 		ret = itedtv_bus_start_streaming(&px4->it930x.bus,
 						 px4_device_stream_handler,
@@ -989,7 +1032,7 @@ static int px4_chrdev_start_capture(struct ptx_chrdev *chrdev)
 			dev_err(px4->dev,
 				"px4_chrdev_start_capture %u:%u: itedtv_bus_start_streaming() failed. (ret: %d)\n",
 				chrdev_group->id, chrdev->id, ret);
-				goto fail_bus;
+				goto fail_pins;
 		}
 	}
 
@@ -1002,19 +1045,9 @@ static int px4_chrdev_start_capture(struct ptx_chrdev *chrdev)
 	mutex_unlock(&px4->lock);
 	return 0;
 
-fail_bus:
-	switch (chrdev->system_cap) {
-	case PTX_ISDB_T_SYSTEM:
-		tc90522_enable_ts_pins_t(tc90522, false);
-		break;
-
-	case PTX_ISDB_S_SYSTEM:
-		tc90522_enable_ts_pins_s(tc90522, false);
-		break;
-
-	default:
-		break;
-	}
+fail_pins:
+	/* 有効化の複数レジスタ書き込みは途中まで成功していることがある。 */
+	px4_chrdev_disable_ts_pins(chrdev);
 
 fail:
 	mutex_unlock(&px4->lock);
@@ -1026,7 +1059,6 @@ static int px4_chrdev_stop_capture(struct ptx_chrdev *chrdev)
 	struct ptx_chrdev_group *chrdev_group = chrdev->parent;
 	struct px4_chrdev *chrdev4 = chrdev->priv;
 	struct px4_device *px4 = chrdev4->parent;
-	struct tc90522_demod *tc90522 = &chrdev4->tc90522;
 
 	dev_dbg(px4->dev,
 		"px4_chrdev_stop_capture %u:%u\n",
@@ -1051,23 +1083,9 @@ static int px4_chrdev_stop_capture(struct ptx_chrdev *chrdev)
 			chrdev_group->id, chrdev->id, px4->streaming_count);
 	}
 
+	/* 共有 USB の停止は完了済み。TS ピンの解除だけを次回に持ち越す。 */
+	px4_chrdev_disable_ts_pins(chrdev);
 	mutex_unlock(&px4->lock);
-
-	if (!atomic_read(&px4->available))
-		return 0;
-
-	switch (chrdev->system_cap) {
-	case PTX_ISDB_T_SYSTEM:
-		tc90522_enable_ts_pins_t(tc90522, false);
-		break;
-
-	case PTX_ISDB_S_SYSTEM:
-		tc90522_enable_ts_pins_s(tc90522, false);
-		break;
-
-	default:
-		break;
-	}
 
 	return 0;
 }
@@ -1284,6 +1302,7 @@ int px4_device_init(struct px4_device *px4, struct device *dev,
 		chrdev4->chrdev = NULL;
 		chrdev4->parent = px4;
 		chrdev4->lnb_power = false;
+		chrdev4->ts_pin_cleanup_pending = false;
 	}
 
 	ret = px4_parse_serial_number(&px4->serial, dev_serial);
