@@ -11,6 +11,7 @@
 
 #include "device_definition_set.hpp"
 #include "device_base.hpp"
+#include "backend_power_state.hpp"
 #include "receiver_base.hpp"
 #include "receiver_manager.hpp"
 #include "ringbuffer.hpp"
@@ -137,7 +138,6 @@ private:
 		std::uint64_t serial_number_;
 		Px4MultiDeviceMode mode_;
 		Px4Device *dev_[2];
-		bool power_state_[2];
 		bool card_state_[2];
 		bool receiver_state_[2][4];
 	};
@@ -218,6 +218,7 @@ private:
 	Px4DeviceConfig config_;
 	std::recursive_mutex lock_;
 	std::mutex backend_power_lock_;
+	BackendPowerState backend_power_;
 	std::atomic_bool available_;
 	SerialNumber serial_;
 	std::shared_ptr<MultiDevice> mldev_;

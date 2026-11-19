@@ -29,35 +29,55 @@ struct px4_stream_context {
 static int px4_chrdev_set_lnb_voltage_s(struct ptx_chrdev *chrdev, int voltage);
 static void px4_device_release(struct kref *kref);
 
+static int px4_backend_power_off(struct it930x_bridge *it930x)
+{
+	int ret = it930x_write_gpio(it930x, 2, false);
+	int reset_ret = it930x_write_gpio(it930x, 7, true);
+
+	return ret ? ret : reset_ret;
+}
+
 static int px4_backend_set_power(struct px4_device *px4, bool state)
 {
 	int ret = 0;
 	struct it930x_bridge *it930x = &px4->it930x;
 
-	dev_dbg(px4->dev,
-		"px4_backend_set_power: %s\n", (state) ? "true" : "false");
-
-	if (!state && !atomic_read(&px4->available))
-		return 0;
-
-	if (state) {
-		ret = it930x_write_gpio(it930x, 7, false);
-		if (ret)
-			return ret;
-
-		msleep(80);
-
-		ret = it930x_write_gpio(it930x, 2, true);
-		if (ret)
-			return ret;
-
-		msleep(20);
-	} else {
-		it930x_write_gpio(it930x, 2, false);
-		it930x_write_gpio(it930x, 7, true);
+	mutex_lock(&px4->backend_power_lock);
+	if (px4->backend_disconnected) {
+		ret = state ? -ENODEV : 0;
+		goto exit;
 	}
 
-	return 0;
+	if (px4->backend_power_state ==
+	    (state ? PX4_BACKEND_POWER_ON : PX4_BACKEND_POWER_OFF))
+		goto exit;
+
+	/* 状態が不明な電源は、停止を確認してから再投入する。 */
+	if (!state || px4->backend_power_state == PX4_BACKEND_POWER_UNKNOWN) {
+		ret = px4_backend_power_off(it930x);
+		px4->backend_power_state = ret ? PX4_BACKEND_POWER_UNKNOWN :
+						 PX4_BACKEND_POWER_OFF;
+		if (ret || !state)
+			goto exit;
+	}
+
+	ret = it930x_write_gpio(it930x, 7, false);
+	if (!ret) {
+		msleep(80);
+		ret = it930x_write_gpio(it930x, 2, true);
+	}
+	if (!ret) {
+		msleep(20);
+		px4->backend_power_state = PX4_BACKEND_POWER_ON;
+	} else {
+		/* 部分的な給電を元に戻し、呼び出し元には最初の失敗を返す。 */
+		px4->backend_power_state = px4_backend_power_off(it930x) ?
+			PX4_BACKEND_POWER_UNKNOWN : PX4_BACKEND_POWER_OFF;
+	}
+
+exit:
+	mutex_unlock(&px4->backend_power_lock);
+	return ret;
 }
 
 static int px4_backend_init(struct px4_device *px4)
@@ -286,6 +306,10 @@ static int px4_chrdev_open(struct ptx_chrdev *chrdev)
 		"px4_chrdev_open %u:%u\n", chrdev_group->id, chrdev->id);
 
 	mutex_lock(&px4->lock);
+	if (!atomic_read(&px4->available)) {
+		ret = -ENODEV;
+		goto fail_backend_power;
+	}
 
 	if (px4->mldev) {
 		ret = px4_mldev_set_power(px4->mldev, px4, chrdev->id, true, &need_init);
@@ -1286,6 +1310,9 @@ int px4_device_init(struct px4_device *px4, struct device *dev,
 	get_device(dev);
 
 	mutex_init(&px4->lock);
+	mutex_init(&px4->backend_power_lock);
+	px4->backend_disconnected = false;
+	px4->backend_power_state = PX4_BACKEND_POWER_UNKNOWN;
 	kref_init(&px4->kref);
 	px4->dev = dev;
 	px4->mldev = NULL;
@@ -1401,11 +1428,7 @@ int px4_device_init(struct px4_device *px4, struct device *dev,
 	 * 通電なしへ揃える
 	 * 登録前に通電したままだと、相方の利用状況から決まる電源状態と食い違う
 	 */
-	ret = it930x_write_gpio(it930x, 2, false);
-	if (ret)
-		goto fail_device;
-
-	ret = it930x_write_gpio(it930x, 7, true);
+	ret = px4_backend_set_power(px4, false);
 	if (ret)
 		goto fail_device;
 
@@ -1458,10 +1481,13 @@ int px4_device_init(struct px4_device *px4, struct device *dev,
 	chrdev_group_config.chrdev_num = 4;
 	chrdev_group_config.chrdev_config = chrdev_config;
 
+	mutex_lock(&px4->lock);
 	ret = ptx_chrdev_context_add_group(chrdev_ctx, dev,
 					   &chrdev_group_config, &chrdev_group);
-	if (ret)
-		goto fail_chrdev;
+	if (ret) {
+		mutex_unlock(&px4->lock);
+		goto fail_device;
+	}
 
 	px4->chrdev_group = chrdev_group;
 
@@ -1471,6 +1497,7 @@ int px4_device_init(struct px4_device *px4, struct device *dev,
 	}
 
 	atomic_set(&px4->available, 1);
+	mutex_unlock(&px4->lock);
 
 	/*
 	 * 2つの USB デバイスで1つの筐体を構成する機種では、カードスロットは dev_id 1 の側にだけあるとして登録する (Windows 版の HasCardReader() と同じ判定)
@@ -1492,8 +1519,6 @@ int px4_device_init(struct px4_device *px4, struct device *dev,
 	}
 	return 0;
 
-fail_chrdev:
-
 fail_device:
 	if (px4->mldev)
 		px4_mldev_remove(px4->mldev, px4);
@@ -1507,6 +1532,7 @@ fail_bus:
 	kfree(px4->stream_ctx);
 
 fail:
+	mutex_destroy(&px4->backend_power_lock);
 	mutex_destroy(&px4->lock);
 	put_device(dev);
 
@@ -1519,14 +1545,12 @@ static void px4_device_release(struct kref *kref)
 
 	dev_dbg(px4->dev, "px4_device_release\n");
 
-	if (px4->mldev)
-		px4_mldev_remove(px4->mldev, px4);
-
 	it930x_term(&px4->it930x);
 	itedtv_bus_term(&px4->it930x.bus);
 
 	kfree(px4->stream_ctx);
 
+	mutex_destroy(&px4->backend_power_lock);
 	mutex_destroy(&px4->lock);
 	put_device(px4->dev);
 
@@ -1542,6 +1566,15 @@ void px4_device_term(struct px4_device *px4)
 	/* カードの操作と並行しても、登録の解除後にハードウェアへ触れないよう機種のロックの下で切り替える */
 	mutex_lock(&px4->lock);
 	atomic_xchg(&px4->available, 0);
+	mutex_lock(&px4->backend_power_lock);
+	px4->backend_disconnected = true;
+	mutex_unlock(&px4->backend_power_lock);
+
+	/* 開いたファイルが本体の寿命を延ばしても、連動給電からは抜去時点で外す。 */
+	if (px4->mldev) {
+		px4_mldev_remove(px4->mldev, px4);
+		px4->mldev = NULL;
+	}
 	mutex_unlock(&px4->lock);
 
 	px4_card_unregister(px4->card);
