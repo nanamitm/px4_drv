@@ -18,6 +18,9 @@
 namespace px4::dt295 {
 namespace {
 using Clock=std::chrono::steady_clock;
+// C/Nの読み出しはSERVICEと同じ制御ロックを使い、1回で最大約0.2秒TSの送出を待たせる。
+// アプリが信号レベルを短い間隔で求めても、読み出しはこの間隔に1回までとし、間の要求には前回の値を返す。
+constexpr auto CnMinInterval=std::chrono::milliseconds(1000);
 constexpr wchar_t LegacyDirectFirmwarePath[]=L"firmware\\dt295-direct-fr.bin";
 constexpr wchar_t LegacyDirectFirmwareSha256[]=L"ba6496cf022cc3ebb1626446484b072f83fbba019d11700c1d08c1c7b75d204a";
 constexpr wchar_t LegacySourceFirmwarePath[]=L"firmware\\dt295-source-fr.bin";
@@ -115,6 +118,7 @@ public:
         // CNの読み出しはI²Cの制御転送でSERVICEを待たせる。失敗後は応答が残る可能性があるため、
         // 受信を止めずに次の選局まで読み出しを止め、TS配信を統計取得より優先する。
         if(cn_failed_)return -EIO;
+        if(cn_cached_ && Clock::now()-cn_read_at_<CnMinInterval){value=cn_value_;return 0;}
         bool satellite=false;uint32_t raw=0;
         {
             ++command_waiters_;
@@ -127,6 +131,7 @@ public:
             if(rc){cn_failed_=true;return rc;}
         }
         value=px4::tc90522::CnrMilliDb(satellite,raw);
+        cn_value_=value;cn_read_at_=Clock::now();cn_cached_=true;
         return 0;
     }
     // 内蔵カードUARTの操作。受信の有無に関係なく、TSと同じ制御ロックと転送路を使う。
@@ -194,7 +199,7 @@ protected:
         int rc=StopReader();tuned_=false;
         if(rc){failed_=true;return rc;}
         if(!stream_buf_->AdvanceEpoch())return -EIO;
-        stream_buf_->ResetInputPacketCount();worker_error_=0;cn_failed_=false;
+        stream_buf_->ResetInputPacketCount();worker_error_=0;cn_failed_=false;cn_cached_=false;
         uint32_t tsid=0;
         {
             std::lock_guard<std::mutex> command(command_mutex_);
@@ -501,7 +506,9 @@ private:
     std::thread worker_,service_worker_;
     std::atomic_bool deliver_{false};
     std::atomic_int worker_error_{0};
-    bool open_=false,capture_=false,tuned_=false,failed_=false,armed_=false,initialized_=false,restore_failed_=false,cn_failed_=false;
+    bool open_=false,capture_=false,tuned_=false,failed_=false,armed_=false,initialized_=false,restore_failed_=false,cn_failed_=false,cn_cached_=false;
+    // 選局ごとに破棄する直近のC/Nと読み出し時刻 (mutex_で保護)
+    std::int32_t cn_value_=0;Clock::time_point cn_read_at_{};
 };
 
 Device::Device(const std::wstring &path,const px4::DeviceDefinition &definition,std::uintptr_t index,px4::ReceiverManager &manager)
