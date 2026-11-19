@@ -78,5 +78,11 @@ Close 時の SourceFirmware の復元も同じロックの下で行い、カー�
 ## 未確認の条件
 
 x86 版、BS / 110度CS の受信と並行した通信、実際の番組の復号（`live_b25_reliability` や TVTest）、カードの抜き差し、USB の抜去、複数アプリケーションからの共有、数時間の録画は未確認です。
+
+この節の記録の後に、PIX-DT295 を 2 台つないで 2 つの x64 版 TVTest で地上波を受信し、B-CAS カードを挿した側の USB を抜き差しする試験を行いました。
+2 つの TVTest は同じ内蔵カードリーダーを共有し、受信は挿し直した後に再開しました。
+2021 年 2 月版の TVCAS_B25 では、抜いている間に ECM の処理が起きた TVTest がカードの再接続を 1 回で終えて復号を再開せず、
+TvCas の `fb3e24b` 以降の TVCAS_B25 では両方の TVTest が復号を再開しました。
+経緯は [WinSCard_PX4 の README](../src/WinSCard_PX4/README.md) の「受信中の USB の抜き差しと上位層の再接続」と、[抜去後の受信機のつなぎ直し](receiver-reconnect-after-removal.md) にあります。
 19200 bps への切り替えは torne と同じ値を使っており、PIX-DT295 での値の妥当性は APDU の成功以外では確認していません。
 受信していない状態の APDU は1回あたり最大約 0.4 秒かかります。
