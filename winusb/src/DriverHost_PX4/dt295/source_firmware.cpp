@@ -630,6 +630,55 @@ bool SourceFirmware::IsLocked()
     return !(status & 0x28) && (I2c(Gr, {0xb0}, 1)[0] & 15) >= 8;
 }
 
+int SourceFirmware::SatelliteTuneRelative(uint32_t khz, uint32_t index)
+{
+    // driver/isdb2056_device.c がTC90532XBGへ行う手順と同じく、TSIDを0のまま周波数を合わせ、
+    // 搬送波のロック (0xc3 bit4) を待ってから、TMCCのTSID一覧 (0xceから2 bytesずつ) を読む。
+    // IsLocked()は0xe6とtsid_の一致を条件に含むため、TSIDが決まるまでは0xc3だけで判定する。
+    const char *backend = direct_ ? "direct-fr" : "source-fr";
+    SatelliteTune(khz, 0);
+    const auto start = io_.now_ms(io_.opaque);
+    while (I2c(Sat, {0xc3}, 1)[0] & 0x10) {
+        if (io_.now_ms(io_.opaque) - start >= 4000) {
+            msg_info("PIX-DT295 %s: no lock system=ISDB-S IF_kHz=%u relative=%u\n", backend, khz, index);
+            return -ENOLINK;
+        }
+        Delay(100);
+    }
+    // ロック直後のTMCCは0を返すことがあるため、Linux版と同じく10 ms間隔で最大1秒読み直す。
+    // PIX-DT295では使われていない番号が0xffffと読める (BS15で 40f1 40f2 48f3 ffff ...)。
+    // 0xffffをTSIDとして書くと0xe6も0xffffを返して選局が成功してしまうため、0と同じく存在しない番号として扱う。
+    uint32_t tsid = 0;
+    for (int i = 0; i < 100; ++i) {
+        tsid = Be(I2c(Sat, {static_cast<uint8_t>(0xce + index * 2)}, 2).data(), 2);
+        if (tsid && tsid != 0xffff)
+            break;
+        Delay(10);
+    }
+    // 一覧は選局の切り分けに使うためログへ残す。実機で確認済みの2 bytesずつの読み出しを使う。
+    uint32_t table[RelativeStreamCount];
+    for (uint32_t i = 0; i < RelativeStreamCount; ++i)
+        table[i] = Be(I2c(Sat, {static_cast<uint8_t>(0xce + i * 2)}, 2).data(), 2);
+    msg_info("PIX-DT295 %s: TMCC TSID IF_kHz=%u relative=%u table=%04x %04x %04x %04x %04x %04x %04x %04x\n",
+        backend, khz, index, table[0], table[1], table[2], table[3], table[4], table[5], table[6], table[7]);
+    // 存在しない相対TS番号は、PX4系、ISDB2056系の受信機と同じく-EAGAINを返す。
+    if (!tsid || tsid == 0xffff)
+        return -EAGAIN;
+    Reg(Sat, 0x8f, static_cast<uint8_t>(tsid >> 8));
+    Reg(Sat, 0x90, static_cast<uint8_t>(tsid));
+    tsid_ = tsid;
+    for (int i = 0; i < 100; ++i) {
+        if (IsLocked()) {
+            tuned_ = true;
+            msg_info("PIX-DT295 %s: locked system=ISDB-S IF_kHz=%u relative=%u TSID=%u\n", backend, khz, index, tsid);
+            return 0;
+        }
+        Delay(10);
+    }
+    msg_info("PIX-DT295 %s: TSID not selected IF_kHz=%u relative=%u TSID=%u\n", backend, khz, index, tsid);
+    return -EAGAIN;
+}
+
 int SourceFirmware::Tune(bool satellite, uint32_t khz, uint32_t tsid)
 {
     // 地デジはUHF 13〜62chの中心周波数を受け付ける。上限の770 MHzと700 MHz以上のRF設定はpix-userlandの
@@ -644,6 +693,10 @@ int SourceFirmware::Tune(bool satellite, uint32_t khz, uint32_t tsid)
             if (!satellite_)
                 TerrestrialSleep();
             satellite_ = true;
+            if (tsid < RelativeStreamCount) {
+                tsid_ = 0;
+                return SatelliteTuneRelative(khz, tsid);
+            }
             SatelliteTune(khz, static_cast<uint16_t>(tsid));
         } else {
             if (satellite_)

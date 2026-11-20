@@ -16,6 +16,9 @@ public:
     bool Direct() const { return direct_; }
     int LoadEmbedded();
     int Start(dt295_io io);
+    // 衛星のtsidが0〜7のときは相対TS番号として扱い、TMCCから実際のTSIDを求める。
+    // PX4系、ISDB2056系の受信機と同じ契約で、8以上はTSIDそのものとして扱う。
+    static constexpr uint32_t RelativeStreamCount = 8;
     int Tune(bool satellite, uint32_t khz, uint32_t tsid);
     int Locked(int &locked);
     int ReadCn(bool &satellite, uint32_t &raw);
@@ -66,6 +69,7 @@ private:
     void SatelliteSleep();
     void TerrestrialTune(uint32_t khz);
     void SatelliteTune(uint32_t khz, uint16_t tsid);
+    int SatelliteTuneRelative(uint32_t khz, uint32_t index);
     bool IsLocked();
     void StopRing();
     void Restore();

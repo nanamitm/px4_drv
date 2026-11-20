@@ -209,8 +209,9 @@ protected:
             tsid=satellite?params_.stream_id:0;
             msg_info("PIX-DT295: tune frequency_khz=%u tsid=%x\n",params_.freq,tsid);
             rc=source_->Tune(satellite,params_.freq,tsid);
-            // 引数不正と無信号(-ENOLINK)は機器状態を壊さないため、次の選局を受け付ける。それ以外は転送異常として扱う。
-            if(rc && rc!=-EINVAL && rc!=-ENOLINK)failed_=true;
+            // 引数不正、無信号(-ENOLINK)、存在しない相対TS番号やTSIDの不一致(-EAGAIN)は機器状態を壊さないため、
+            // 次の選局を受け付ける。それ以外は転送異常として扱う。
+            if(rc && rc!=-EINVAL && rc!=-ENOLINK && rc!=-EAGAIN)failed_=true;
             transport_.ReportTiming("tune");
         }
         if(!rc){tuned_=true;if(capture_)rc=StartReader();}
