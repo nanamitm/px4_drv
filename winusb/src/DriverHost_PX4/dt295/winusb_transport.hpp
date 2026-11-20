@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
 #pragma once
+#include "control_transport.hpp"
 #include "runtime.h"
 #include <windows.h>
 #include <winusb.h>
@@ -20,21 +21,21 @@ public:
     void Cancel(HANDLE,OVERLAPPED &) noexcept override;
 };
 // 1個体の制御ロック下で使用。TSのOVERLAPPEDは別スレッドが所有する。
-class Transport {
+class Transport final : public ControlTransport {
 public:
     using Clock=std::chrono::steady_clock;
     Transport(HANDLE file,WINUSB_INTERFACE_HANDLE usb,HANDLE removed,ControlIo *io=nullptr)
         :file_(file),removed_(removed),usb_(usb),io_(io?*io:native_) {}
-    void Begin(unsigned milliseconds) { deadline_=Clock::now()+std::chrono::milliseconds(milliseconds); }
+    void Begin(unsigned milliseconds) override { deadline_=Clock::now()+std::chrono::milliseconds(milliseconds); }
     // 失敗した要求を再送せず、保存済み前像を戻すときだけ通信を再開する。
-    void BeginRestore(unsigned milliseconds) { failed_=0; Begin(milliseconds); }
-    int Failed() const { return failed_; }
+    void BeginRestore(unsigned milliseconds) override { failed_=0; Begin(milliseconds); }
+    int Failed() const override { return failed_; }
     // カード操作のように、失敗した要求の結果へ後続が依存しない操作の終わりに、呼び出し元が失敗を解除する。
     // 失敗した要求そのものは再送しない。
-    void ClearFailure() { failed_=0; }
-    dt295_io Callbacks();
-    DWORD LastError() const { return last_error_; }
-    void ReportTiming(const char *stage);
+    void ClearFailure() override { failed_=0; }
+    dt295_io Callbacks() override;
+    unsigned long LastError() const override { return last_error_; }
+    void ReportTiming(const char *stage) override;
 private:
     static int Control(void *,uint8_t,uint8_t,uint16_t,uint16_t,void *,uint16_t,unsigned);
     static uint32_t Now(void *);

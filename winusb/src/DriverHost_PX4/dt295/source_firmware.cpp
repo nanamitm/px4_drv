@@ -1,15 +1,11 @@
 // SPDX-License-Identifier: GPL-2.0-only
 #include "source_firmware.hpp"
 #include "frontend_init.hpp"
-#include "../resource.h"
+#include "platform.hpp"
 #include "msg.h"
-#include <windows.h>
-#include <bcrypt.h>
 #include <algorithm>
 #include <cerrno>
 #include <string>
-
-#pragma comment(lib, "bcrypt.lib")
 
 namespace px4::dt295 {
 namespace {
@@ -59,8 +55,7 @@ Bytes Encode(uint32_t value, unsigned width = 4)
 std::string Digest(const Bytes &bytes)
 {
     std::array<uint8_t, 32> digest{};
-    if (BCryptHash(BCRYPT_SHA256_ALG_HANDLE, nullptr, 0, const_cast<PUCHAR>(bytes.data()),
-                   static_cast<ULONG>(bytes.size()), digest.data(), static_cast<ULONG>(digest.size())) < 0)
+    if (!platform::Sha256(bytes.data(), bytes.size(), digest))
         return {};
     constexpr char hex[] = "0123456789abcdef";
     std::string result;
@@ -80,14 +75,10 @@ int SourceFirmware::Failure(const char *stage, int code) const
 
 int SourceFirmware::LoadEmbedded()
 {
-    const auto module = GetModuleHandleW(nullptr);
-    const auto id = direct_ ? IDR_DT295_DIRECT_FIRMWARE : IDR_DT295_SOURCE_FIRMWARE;
-    const auto resource = FindResourceW(module, MAKEINTRESOURCEW(id), RT_RCDATA);
-    if (!resource)
+    const uint8_t *bytes = nullptr;
+    size_t size = 0;
+    if (!platform::EmbeddedBundle(direct_, bytes, size))
         return Failure("embedded bundle", -ENOENT);
-    const auto handle = LoadResource(module, resource);
-    const auto *bytes = handle ? static_cast<const uint8_t *>(LockResource(handle)) : nullptr;
-    const auto size = SizeofResource(module, resource);
     if (!bytes || size < 16 || size > 32768)
         return Failure("bundle size", -EINVAL);
     // DTP3/4はDriverHostの組み込み初期化列を使う。
