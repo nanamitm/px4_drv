@@ -1,0 +1,30 @@
+[Unit]
+Description=PIX-DT295 CUSE daemon (px4-dt295d)
+Documentation=https://github.com/nanamitm/px4_drv
+After=systemd-udevd.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/sbin/px4-dt295d
+Restart=on-failure
+RestartSec=5
+# /dev/cuse は任意の名前のデバイスファイルを作れるため、ログインユーザーへは開放せず root で動かす。
+# root の特権 (capability) は持たせず、所有者として /dev/cuse と USB 機器を開くだけにする。
+CapabilityBoundingSet=
+AmbientCapabilities=
+NoNewPrivileges=yes
+DevicePolicy=closed
+DeviceAllow=/dev/cuse rw
+DeviceAllow=char-usb_device rw
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+# libusb は接続の通知をカーネルの uevent (netlink) で受け取り、uevent は初期のネットワーク名前空間にしか届かない。
+# PrivateNetwork=yes にすると、切断は検出できても再接続した機器を認識しないため、通信先の種類を限るだけにする。
+RestrictAddressFamilies=AF_UNIX AF_NETLINK
+# IFD ハンドラーへ渡す、USB 機器とカードのデバイスファイルの対応表 (/run/px4-dt295/readers)
+RuntimeDirectory=px4-dt295
+RuntimeDirectoryMode=0755
+
+[Install]
+WantedBy=multi-user.target
