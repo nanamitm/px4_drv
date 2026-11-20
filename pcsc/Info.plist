@@ -34,6 +34,7 @@
 		<string>0x0511</string>
 		<string>0x0511</string>
 		<string>0x06b8</string>
+		<string>0x06b8</string>
 	</array>
 
 	<key>ifdProductID</key>
@@ -55,6 +56,7 @@
 		<string>0x0855</string>
 		<string>0x0052</string>
 		<string>0x106b</string>
+		<string>0x103b</string>
 	</array>
 
 	<key>ifdFriendlyName</key>
@@ -76,6 +78,7 @@
 		<string>PLEX PX-S1UR Smart Card Reader</string>
 		<string>e-Better DTV03A-1TU Smart Card Reader</string>
 		<string>PIXELA XIT-SQR100 Smart Card Reader</string>
+		<string>PIXELA PIX-DT295 Smart Card Reader</string>
 	</array>
 </dict>
 </plist>

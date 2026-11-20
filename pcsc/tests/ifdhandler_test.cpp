@@ -292,6 +292,22 @@ static void TestResolver()
 		assert(px4::ResolveCardDevice("usb:0511/084a:libudev:0:/dev/bus/usb/003/009",
 			path, (root / "class").string(), "/dev", (root / "usb").string()) == expected);
 	}
+	/* PIX-DT295 のカードは CUSE のデーモンが作り、sysfs の px4card クラスに現れないため、デーモンの対応表で照合する */
+	const auto readers = (root / "readers").string();
+	const auto dt295 = "usb:06b8/103b:libudev:0:/dev/bus/usb/001/003";
+	assert(px4::ResolveCardDevice(dt295, path, (root / "class").string(), "/dev", (root / "usb").string(),
+		readers) == -ENODEV);
+	std::ofstream(readers) << "# bus device path\n2 3 /dev/px4card/0000000000000002\n1 3 /dev/px4card/5B4DF9668F23C39D\n";
+	assert(px4::ResolveCardDevice(dt295, path, (root / "class").string(), "/dev", (root / "usb").string(),
+		readers) == 0 && path == "/dev/px4card/5B4DF9668F23C39D");
+	assert(px4::ResolveCardDevice("usb:06b8/103b:libudev:0:/dev/bus/usb/001/004", path, (root / "class").string(),
+		"/dev", (root / "usb").string(), readers) == -ENODEV);
+	/* 表の内容でも /dev/px4card/ の外は開かない */
+	for (const char *entry : {"/tmp/card", "/dev/px4card/../sda", "px4card/x", "/dev/px4card/a/b"}) {
+		std::ofstream(readers) << "1 3 " << entry << "\n";
+		assert(px4::ResolveCardDevice(dt295, path, (root / "class").string(), "/dev", (root / "usb").string(),
+			readers) == -EINVAL);
+	}
 	std::filesystem::remove_all(root);
 }
 
