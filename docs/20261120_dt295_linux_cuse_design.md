@@ -74,7 +74,7 @@ SHA-256 の計算は、外部ライブラリへの依存を増やさないよう
 | `PTX_SET_CHANNEL` | 既存の周波数の換算式で選局 | 地デジは UHF 13〜62ch と CATV、衛星は `freq_no` 0〜23 |
 | `PTX_START_STREAMING`、`PTX_STOP_STREAMING` | 二重の開始・停止は `-EALREADY` | |
 | `PTX_GET_CNR` | 選局時と受信中に 1 秒ごとに読んだ値を返す | 換算式は WinUSB 版と同じ |
-| `PTX_ENABLE_LNB_POWER` | LNB 電源を持たない既存機種と同じ戻り値 | 戻り値は実装時に確認 |
+| `PTX_ENABLE_LNB_POWER` | `arg` が 0 なら成功、0 以外なら `-ENOSYS` | `set_lnb_voltage` を持たない機種へのカーネルの応答と同じ |
 | `PTX_SET_SYSTEM_MODE`、`PTX_GET_LOCK_STATUS` | 既存の意味で応答 | |
 | `PTX_GET_TMCC_*`、`PTXT_*` | 対応しない機能は既存機種と同じ `-EOPNOTSUPP` か `-ENOSYS` | 必要な利用者の有無を確認してから追加 |
 | `read` | 受信中は 0 を返さずに待ち、`O_NONBLOCK` では `-EAGAIN`。停止後は EOF | 利用側は 0 を EOF と解釈して受信を終えるため |
@@ -106,6 +106,11 @@ CUSE の ioctl は、コマンド番号の方向と大きさからカーネル�
 下記の試作で、カーネルが利用者へ複写するのはデーモンが応答した長さだけであることを確かめました。  
 デーモンが 8 バイトを応答すると `int` の直後の 4 バイトが上書きされるため、`PTX_GET_CNR` の応答は必ず `sizeof(int)` にします。  
 ポインタを含む `PTXT_GET_INFO` などに対応する場合は、CUSE の制限なしの ioctl (`CUSE_UNRESTRICTED_IOCTL`) が必要です。
+
+`PTX_ENABLE_LNB_POWER` と `PTX_SET_SYSTEM_MODE` は `_IOW` で定義されていますが、カーネルモジュールは `arg` をアドレスではなく値として読みます。  
+recpt1 も `LNB_ENABLE` の電圧を値で渡すため、制限付きの ioctl ではカーネルがその値をアドレスとして複写しようとして失敗します。  
+このため、デーモンは制限なしの ioctl で動かし、`PTX_SET_CHANNEL`・`PTX_GET_CNR`・`PTX_GET_LOCK_STATUS` のようにアドレスを渡す ioctl だけを `fuse_reply_ioctl_retry()` で読み書きします。  
+`PTX_GET_CNR` の再要求ではカーネルと同じ 4 バイトだけを指定するため、利用者のメモリーの `int` の直後は変わりません。
 
 `include/ptx_ioctl.h` は `<linux/ioctl.h>` を読み込まないため、ユーザー空間で使う場合は先に `<sys/ioctl.h>` を読み込みます。
 
@@ -186,6 +191,40 @@ WinUSB 版の記録では、SERVICE の間隔は地上波で平均約 9 ms で�
 未送信量は最大 526 バイトで、機器内のリング (6 MiB) にはほとんど溜まっていません。  
 SERVICE の間に待機を入れれば CPU 時間を減らせる可能性がありますが、待機の長さは BS・CS の受信量とカード通信の負荷で測ってから決める必要があり、未決の事項として扱います。
 
+### CUSE と PIX-DT295 を結合した試作の結果
+
+上記の 2 つの試作を 1 つのデーモンにまとめ、`/dev/dt295video0` を recpt1 (stz2012 版、rev.72) から `--device` で開いて受信しました。  
+デーモンは制限なしの ioctl で動かし、TS は Bulk IN の完了ごとにデーモン内の 188 × 65,536 バイトのリングへ入れ、`read` で渡しました。  
+地デジでは、選局がロックした後に 350 ms 待ってから `PTX_SET_CHANNEL` を完了させます。  
+TS の取り込みは `PTX_START_STREAMING` から始まるため、ロック直後の TS は利用者へ渡りません。  
+デバイスファイルを閉じるたびに `SourceFirmware::Close()` で起動前の状態へ戻し、次の選局で初期化し直します。  
+これは WinUSB 版の受信機の `Close` と同じ扱いです。
+
+デーモンは root ではなく、ログインユーザーで動かしました。  
+次の udev の規則で、PIX-DT295 の USB 機器と `/dev/cuse` を `plugdev` グループへ、作成したデバイスファイルを `video` グループの 664 にしました。
+
+```
+SUBSYSTEM=="usb", ATTR{idVendor}=="06b8", ATTR{idProduct}=="103b", MODE="0660", GROUP="plugdev"
+KERNEL=="cuse", MODE="0660", GROUP="plugdev"
+KERNEL=="dt295video*", MODE="0664", GROUP="video"
+```
+
+recpt1 の出力ファイルは、`ts_continuity.hpp` の計数で同期、TEI、CC の飛び、形式不正を数えました。  
+デーモン側の計数 (Bulk IN から取り出した時点) とファイル側のパケット数が一致すれば、CUSE の受け渡しで TS が欠けていないことになります。
+
+| 試験 | 結果 |
+|---|---|
+| 13ch を 60 秒録画 | 222,666,636 バイト、1,184,397 パケット、同期・TEI・CC の飛び・形式不正は 0 件。デーモン側のパケット数と一致し、リングのあふれは 0 件。recpt1 の C/N の表示は 31.14 dB |
+| 16ch を 10 秒録画 | 191,248 パケット、異常は 0 件 |
+| 14ch の録画中に 5 秒で recpt1 を SIGTERM で終了 | recpt1 は終了コード 0 で終わり、75,863 パケットに異常は 0 件。デバイスファイルを閉じたときの復元は成功 |
+| BS15_0 (相対 TS 番号) | `PTX_SET_CHANNEL` が `-EOPNOTSUPP` を返し、recpt1 は選局できないと表示した (想定どおり) |
+| 続けて 13ch を 10 秒録画 | 183,797 パケット、異常は 0 件。再初期化と復元は成功 |
+| デーモンの終了 | デバイスファイルが消え、終了時の復元は成功 |
+
+ロック後に 350 ms 待つようにしてからは、受信開始直後の TEI は記録されていません。  
+1 回の SERVICE の所要時間は最大 2.3 ms でした。  
+録画の時間は最長 60 秒で、長時間の録画、BS・110度CS、カードとの同時動作、受信中の USB の抜き差しは未確認です。
+
 ## デバイスファイルの契約 (内蔵カードリーダー)
 
 px4-drv-pcsc は `/dev/px4card/<ID>` を開き、`include/px4_card_ioctl.h` の ioctl でカード検出、電源、UART を操作します。  
@@ -259,7 +298,7 @@ BS の TS は 1 時間で約 10 GB になり、SD カードへの書き込みは
 - 切断後の CUSE のセッションの終え方
 - px4-drv-pcsc がデバイスファイルを探す方法の拡張
 - PIX-DT295 のカード UART の 1 回の送受信の上限
-- デーモンの実行ユーザーと権限
+- デーモンの実行ユーザーと権限 (udev の規則でログインユーザーから動かせることは試作で確認済み。配布時の専用ユーザーの要否は未決)
 - Docker コンテナからの利用
 - Raspberry Pi 4 の USB コントローラー (VL805) で、カード通信と同時に受信したときに制御転送の間隔を保てるか (地デジの受信だけなら試作で確認済み)
 - SERVICE のループへ待機を入れるかどうかと、その長さ (検証環境では CPU 時間の約 26% を占める)
