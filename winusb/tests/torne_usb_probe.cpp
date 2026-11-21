@@ -9,15 +9,11 @@
 #include <cstdint>
 #include <iostream>
 #include <string>
-#include <sstream>
 #include <cstring>
 #include <vector>
 
 #include "../src/DriverHost_PX4/torne/winusb_control.hpp"
 #include "../src/DriverHost_PX4/torne/dib8096_registers.hpp"
-#include "torne_reference_client.hpp"
-#include "torne_capture.hpp"
-#include "torne_receiver_adapter.hpp"
 #include "../src/DriverHost_PX4/torne/device_identity.hpp"
 #include "../src/DriverHost_PX4/torne/mb86h47_card.hpp"
 #include "../src/WinSCard_PX4/bcas_atr.hpp"
@@ -27,7 +23,7 @@
 
 static constexpr GUID torne_interface = {0xb8f4b677, 0xe19a, 0x4beb, {0xa6, 0x0c, 0xc0, 0xa7, 0xac, 0x2d, 0x0f, 0x6b}};
 
-static bool Inspect(const wchar_t *path, unsigned initialization_timeout, bool identify, bool frontend, bool receive, const std::vector<unsigned> &channels, unsigned duration_ms, bool receiver_mode, bool receiver_fault, bool card_status, bool card_atr)
+static bool Inspect(const wchar_t *path, unsigned initialization_timeout, bool identify, bool card_status, bool card_atr)
 {
 	std::wcout << L"Interface: " << path << L'\n';
 	std::cout << "Interface ID: " << px4::torne::InterfaceId(path) << '\n';
@@ -155,74 +151,6 @@ static bool Inspect(const wchar_t *path, unsigned initialization_timeout, bool i
 					ok = identified == px4::torne::I2cResult::ok && recognized;
 				}
 				std::cout << (ok ? "DEMOD IDENTIFICATION PASSED (full demod initialization, tuning and TS untested)\n" : "DEMOD IDENTIFICATION FAILED\n");
-				if (ok && frontend) {
-					wchar_t executable[32768]{};
-					const DWORD executable_length = GetModuleFileNameW(nullptr, executable, 32768);
-					std::wstring helper(executable);
-					helper = helper.substr(0, helper.find_last_of(L"\\/") + 1) + L"TorneFrontendDiagnostic.exe";
-					TorneReferenceClient reference(bus, cancel);
-					ok = executable_length && executable_length < 32768 && reference.Start(helper);
-					std::vector<std::uint8_t> response;
-					const auto init_begin = px4::torne::WinUsbControl::Clock::now();
-					ok = ok && reference.Command(0x10, {}, response, deadline) && response.empty();
-					std::cout << "FRONTEND INITIALIZE ok=" << ok << " elapsed_ms="
-						<< std::chrono::duration_cast<std::chrono::milliseconds>(px4::torne::WinUsbControl::Clock::now() - init_begin).count()
-						<< " i2c_requests=" << reference.I2cRequests() << " error=" << reference.Error() << '\n';
-					// 選局の比較条件をcoaxボードと同じparallel gatedへ揃える。
-					if (ok) ok = reference.Command(0x12, {1}, response, deadline);
-					bool all_locked = true;
-					if (ok && receiver_mode) ok = TestTorneReceiver(file, usb, memory, bootstrap, reference, deadline, channels, duration_ms ? duration_ms : 2000, receiver_fault);
-					for (const auto channel : (receiver_mode ? std::vector<unsigned>{} : channels)) {
-						if (!ok) break;
-						// coaxのkHz正規化に合わせた日本UHF 6MHz・1/7MHzオフセット。
-						const std::uint32_t frequency = 473143000u + (channel - 13u) * 6000000u;
-						std::vector<std::uint8_t> tune(4);
-						for (unsigned byte = 0; byte < 4; ++byte) tune[byte] = static_cast<std::uint8_t>(frequency >> (byte * 8));
-						const auto tune_begin = px4::torne::WinUsbControl::Clock::now();
-						ok = reference.Command(0x11, tune, response, deadline);
-						if (ok) ok = reference.Command(0x13, {}, response, deadline) && response.size() == 24;
-						bool locked = ok && response[0] == 1;
-						const auto lock_deadline = (std::min)(deadline, tune_begin + std::chrono::milliseconds(5000));
-						// 参照Tuneの終了はLOCKを保証しない。操作開始から5秒以内で状態を観測する。
-						while (ok && !locked && px4::torne::WinUsbControl::Clock::now() < lock_deadline) {
-							ok = control.Pause(20) == ERROR_SUCCESS;
-							if (!ok || px4::torne::WinUsbControl::Clock::now() >= lock_deadline) break;
-							ok = reference.Command(0x13, {}, response, deadline) && response.size() == 24;
-							locked = ok && response[0] == 1;
-						}
-						all_locked = all_locked && locked;
-						std::uint16_t lock_register = 0;
-						const auto lock_read = registers.Read(568, lock_register, deadline);
-						ok = ok && lock_read == px4::torne::I2cResult::ok;
-						double cnr = 0;
-						if (ok) std::memcpy(&cnr, response.data() + 8, sizeof(cnr));
-						std::cout << "TUNE channel=" << channel << " frequency_hz=" << frequency << " ok=" << ok << " locked=" << locked
-							<< " raw_lock=0x" << std::hex << lock_register << std::dec
-							<< " cnr_db=" << cnr << " elapsed_ms="
-							<< std::chrono::duration_cast<std::chrono::milliseconds>(px4::torne::WinUsbControl::Clock::now() - tune_begin).count()
-							<< " i2c_requests=" << reference.I2cRequests() << " error=" << reference.Error() << '\n';
-						if (ok && locked && receive) {
-							px4::torne::StreamEngine engine(memory, bootstrap);
-							TorneCaptureStats capture;
-							const bool captured = CaptureFirstTs(file, usb, cancel, engine, deadline, capture, duration_ms);
-							std::cout << "FIRST TS channel=" << channel << " ok=" << captured << " raw_bytes=" << capture.raw_bytes
-								<< " packets=" << capture.packets << " tei=" << capture.tei << " discarded_bytes=" << capture.discarded_bytes
-								<< " elapsed_ms=" << capture.elapsed_ms << " max_read_gap_ms=" << capture.max_read_gap_ms
-								<< " cc_anomalies=" << capture.cc_anomalies << " malformed=" << capture.malformed
-								<< " reads=" << capture.reads << " first_ts_ms=" << capture.first_ts_ms << " io_error=" << capture.error
-								<< " prepare=" << static_cast<unsigned>(capture.prepare) << " start=" << static_cast<unsigned>(capture.start)
-								<< " stop=" << static_cast<unsigned>(capture.stop) << " address=0x" << std::hex << engine.LastAddress() << std::dec << '\n';
-							ok = captured;
-						}
-					}
-					// 成功経路でも出力をHigh-Zに戻してから子プロセスを回収する。
-					if (ok) {
-						ok = reference.Command(0x14, {}, response, deadline);
-						std::cout << "FRONTEND SLEEP ok=" << ok << " error=" << reference.Error() << '\n';
-					}
-					ok = ok && all_locked;
-					std::cout << (ok ? (receive ? "REFERENCE CAPTURE TEST PASSED (see duration and quality counters; production integration untested)\n" : "REFERENCE FRONTEND TEST PASSED (TS reception untested)\n") : "REFERENCE FRONTEND TEST FAILED\n");
-				}
 			}
 			CloseHandle(cancel);
 		}
@@ -244,27 +172,20 @@ int main(int argc, char **argv)
 		argc -= 2;
 	}
 	unsigned initialization_timeout = 0;
-	unsigned duration_ms = 0;
 	bool identify = false;
-	bool frontend = false;
-	bool receive = false;
-	bool receiver_mode = false;
-	bool receiver_fault = false;
 	bool card_status = false;
 	bool card_atr = false;
-	std::vector<unsigned> channels;
+	// 復調器の初期化、選局、TS の受信の診断は、Go の診断ヘルパーと一緒に削除した。
+	// 選局と受信は DriverHost_PX4 の通常の経路 (channel_switch_stress など) で確かめる。
 	if (argc != 1) {
-		if ((argc != 4 && argc != 6 && argc != 8) || (std::string(argv[1]) != "--card-atr" && std::string(argv[1]) != "--card-status" && std::string(argv[1]) != "--initialize" && std::string(argv[1]) != "--identify" && std::string(argv[1]) != "--frontend" && std::string(argv[1]) != "--receive" && std::string(argv[1]) != "--receiver" && std::string(argv[1]) != "--receiver-recovery") || std::string(argv[2]) != "--timeout-ms") {
-			std::cerr << "Usage: torne_usb_probe.exe [--initialize|--identify|--frontend|--receive|--receiver|--receiver-recovery --timeout-ms <positive-budget> [--channels 13,14,... [--duration-ms N]]]\n";
+		const std::string mode = argv[1];
+		if (argc != 4 || (mode != "--card-atr" && mode != "--card-status" && mode != "--initialize" && mode != "--identify") || std::string(argv[2]) != "--timeout-ms") {
+			std::cerr << "Usage: torne_usb_probe.exe [--initialize|--identify|--card-status|--card-atr --timeout-ms <positive-budget>] [--device-id <16 hex digits>]\n";
 			return 2;
 		}
-		receiver_fault = std::string(argv[1]) == "--receiver-recovery";
-		card_atr = std::string(argv[1]) == "--card-atr";
-		card_status = card_atr || std::string(argv[1]) == "--card-status";
-		receiver_mode = receiver_fault || std::string(argv[1]) == "--receiver";
-		receive = receiver_mode || std::string(argv[1]) == "--receive";
-		frontend = receive || std::string(argv[1]) == "--frontend";
-		identify = frontend || std::string(argv[1]) == "--identify";
+		card_atr = mode == "--card-atr";
+		card_status = card_atr || mode == "--card-status";
+		identify = mode == "--identify";
 		try {
 			const std::string value = argv[3];
 			std::size_t parsed = 0;
@@ -272,34 +193,10 @@ int main(int argc, char **argv)
 			if (value.empty() || value[0] == '-' || parsed != value.size() || !timeout || timeout >= MAXDWORD)
 				throw std::invalid_argument("timeout");
 			initialization_timeout = static_cast<unsigned>(timeout);
-			if (argc == 8) {
-				if (!receive || std::string(argv[6]) != "--duration-ms") throw std::invalid_argument("duration mode");
-				const std::string text = argv[7];
-				std::size_t used = 0;
-				const auto duration = std::stoul(text, &used);
-				if (text.empty() || text[0] == '-' || used != text.size() || !duration || duration >= timeout) throw std::invalid_argument("duration");
-				duration_ms = static_cast<unsigned>(duration);
-			}
-			if (argc >= 6) {
-				if (!frontend || std::string(argv[4]) != "--channels") throw std::invalid_argument("channels mode");
-				std::stringstream list(argv[5]);
-				std::string item;
-				while (std::getline(list, item, ',')) {
-					std::size_t used = 0;
-					const auto channel = std::stoul(item, &used);
-					if (used != item.size() || channel < 13 || channel > 62 || channels.size() >= 128) throw std::invalid_argument("channel");
-					channels.push_back(static_cast<unsigned>(channel));
-				}
-				if (channels.empty()) throw std::invalid_argument("empty channel list");
-			}
 		} catch (...) {
 			std::cerr << "Invalid initialization timeout\n";
 			return 2;
 		}
-	}
-	if (receive && channels.empty()) {
-		std::cerr << "--receive requires an explicit --channels list\n";
-		return 2;
 	}
 	HDEVINFO info = SetupDiGetClassDevsW(&torne_interface, nullptr, nullptr, DIGCF_PRESENT | DIGCF_DEVICEINTERFACE);
 	if (info == INVALID_HANDLE_VALUE)
@@ -346,7 +243,7 @@ int main(int argc, char **argv)
 	if (initialization_timeout)
 		std::cout << "INITIALIZATION MODE: caller must have stopped BonDriverCoax/coax on this device.\n";
 	for (const auto &path : paths) {
-		const bool device_ok = Inspect(path.c_str(), initialization_timeout, identify, frontend, receive, channels, duration_ms, receiver_mode, receiver_fault, card_status, card_atr);
+		const bool device_ok = Inspect(path.c_str(), initialization_timeout, identify, card_status, card_atr);
 		ok = ok && device_ok;
 	}
 	std::cout << "Present interfaces: " << count << '\n';

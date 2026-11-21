@@ -37,6 +37,8 @@ private:
 	std::unique_ptr<Receiver> receiver_;
 	std::atomic_bool available_{true};
 	HANDLE cancel_ = nullptr;
+	// 受信機の停止要求。共有セッションの作成時に渡すため、受信機ではなく機器が持つ。
+	HANDLE receive_stop_ = nullptr;
 	std::string id_;
 	bool registered_ = false;
 	bool output_error_packets_ = false, batch_i2c_writes_ = false, bulk_i2c_ = false;

@@ -1,6 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-only
 #include "frontend_native_client.hpp"
-#include "frontend_wait.hpp"
 
 namespace px4::torne {
 dibnative::Bus::MemoryResult NativeFrontendClient::TMCC(std::uint32_t kind,const std::vector<std::uint32_t>& parameters) {
@@ -31,18 +30,18 @@ std::tuple<std::int64_t,std::int64_t,bool,dibnative::Error> NativeFrontendClient
     return {best,diff,true,nullptr};
 }
 dibnative::Error NativeFrontendClient::CheckState() {
-    const HANDLE events[]{cancel_,stop_};
-    const auto state=WaitForMultipleObjects(stop_?2:1,events,FALSE,0);
-    if (stop_ && state == WAIT_OBJECT_0 + 1)
+    int failure=0;
+    const auto state=signal_.Poll(stoppable_,failure);
+    if (state == FrontendSignal::State::stopped)
         stopped_cleanly_ = true;
-    if(state!=WAIT_TIMEOUT)return dibnative::MakeError("native frontend cancelled/wait error",state==WAIT_FAILED?GetLastError():ERROR_OPERATION_ABORTED);
+    if(state!=FrontendSignal::State::clear)return dibnative::MakeError("native frontend cancelled/wait error",state==FrontendSignal::State::failed?failure:signal_.AbortError());
     if(std::chrono::steady_clock::now()>=deadline_)return dibnative::MakeError("native frontend deadline expired");
     return nullptr;
 }
 std::tuple<dibnative::Slice<std::uint8_t>,dibnative::Error> NativeFrontendClient::WriteRead(
     std::uint8_t address,dibnative::Slice<std::uint8_t> write,std::int64_t length){
-    if(auto err=CheckState())return {{},err};
-    if(address&1||write.size()>32||length<0||length>32||(!write.size()&&!length))return {{},dibnative::MakeError("invalid native I2C request")};
+    if(auto err=CheckState())return {dibnative::Slice<std::uint8_t>(),err};
+    if(address&1||write.size()>32||length<0||length>32||(!write.size()&&!length))return {dibnative::Slice<std::uint8_t>(),dibnative::MakeError("invalid native I2C request")};
     const bool tuner = address == 0xc0 && write.size() == 3;
     const bool demod = address == 0x12 && write.size() == 4 && write[0] <= 7;
     if(batch_writes_ && !length && (tuner || demod)) {
@@ -50,18 +49,18 @@ std::tuple<dibnative::Slice<std::uint8_t>,dibnative::Error> NativeFrontendClient
         const auto offset = tuner ? 1 : 2;
         const auto value = static_cast<std::uint16_t>((write[offset] << 8) | write[offset + 1]);
         pending_[pending_count_++] = {number,value,tuner};
-        if(pending_count_ == pending_.size())return {{},FlushWrites()};
-        return {{},nullptr};
+        if(pending_count_ == pending_.size())return {dibnative::Slice<std::uint8_t>(),FlushWrites()};
+        return {dibnative::Slice<std::uint8_t>(),nullptr};
     }
-    if(auto error=FlushWrites())return {{},error};
+    if(auto error=FlushWrites())return {dibnative::Slice<std::uint8_t>(),error};
     std::array<std::uint8_t,32> output{},input{};
     for(std::size_t i=0;i<write.size();++i)output[i]=write[i];
     const auto result=bus_.Transfer(address,output.data(),write.size(),input.data(),static_cast<std::size_t>(length),deadline_);
     if(result!=I2cResult::ok) {
         io_failed_ = true;
-        return {{},dibnative::MakeError("native I2C failure",static_cast<unsigned>(result),static_cast<unsigned>(bus_.LastMemoryResult()),bus_.LastSystemError())};
+        return {dibnative::Slice<std::uint8_t>(),dibnative::MakeError("native I2C failure",static_cast<unsigned>(result),static_cast<unsigned>(bus_.LastMemoryResult()),bus_.LastSystemError())};
     }
-    if(auto err=CheckState())return {{},err};
+    if(auto err=CheckState())return {dibnative::Slice<std::uint8_t>(),err};
     dibnative::Slice<std::uint8_t> response(static_cast<std::size_t>(length));
     for(std::int64_t i=0;i<length;++i)response[i]=input[static_cast<std::size_t>(i)];
     return {response,nullptr};
@@ -83,8 +82,8 @@ dibnative::Error NativeFrontendClient::Wait(std::int64_t duration){
     if(auto error=FlushWrites())return error;
     // 直前の書込みは同期I2C完了時に届いている。待機だけを切り詰め、
     // 操作全体の期限を延長せず、抜去時には同じイベントで中断する。
-    const auto result=WaitFrontendDelay(cancel_,deadline_,duration,stop_);
-    if (result == ERROR_OPERATION_ABORTED) {
+    const auto result=signal_.Sleep(stoppable_,deadline_,duration);
+    if (signal_.Aborted(result)) {
         if (auto error = CheckState()) return error;
     }
     return result?dibnative::MakeError("native frontend wait failed",result):nullptr;

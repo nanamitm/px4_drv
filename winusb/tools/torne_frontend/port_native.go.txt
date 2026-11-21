@@ -165,6 +165,9 @@ func emitStruct(name string){if emitted[name]||structs[name]==nil{return};emitte
 }
 type localImporter struct{fallback types.Importer;i2c *types.Package}
 func (i localImporter)Import(path string)(*types.Package,error){if path=="github.com/Till0196/coax/pkg/i2c"{return i.i2c,nil};return i.fallback.Import(path)}
+// globalInit: namespace-scope lambdas cannot have a capture-default (GCC rejects [&], MSVC accepts it).
+// Package-level initializers never refer to locals, so [] has the same meaning.
+func globalInit(s string) string { return strings.ReplaceAll(s, "[&]()", "[]()") }
 func main(){
  if len(os.Args)!=3{panic("source-dir output")};dir:=os.Args[1];pkgs,err:=parser.ParseDir(fs,dir,func(f os.FileInfo)bool{return strings.HasSuffix(f.Name(),".go")&&!strings.HasSuffix(f.Name(),"_test.go")},parser.ParseComments);if err!=nil{panic(err)}
  var files []*ast.File;var paths []string;for p:=range pkgs["dib8096"].Files{paths=append(paths,p)};sort.Strings(paths);for _,p:=range paths{files=append(files,pkgs["dib8096"].Files[p])}
@@ -181,7 +184,7 @@ func main(){
  for _,f:=range files{for _,d:=range f.Decls{if f,ok:=d.(*ast.FuncDecl);ok&&!skip(f){line(signature(f)+";")}}}
  line("Error m_Demod_setFrontend(T_Demod*, std::uint32_t); void m_tuner_captrimOnMaster(T_tuner*, std::uint16_t);")
  line("void m_dib8000_modifyWord(T_dib8000*, std::uint16_t, std::uint16_t, std::uint16_t);")
- for _,f:=range files{for _,d:=range f.Decls{if g,ok:=d.(*ast.GenDecl);ok&&g.Tok==token.VAR{for _,spec:=range g.Specs{v:=spec.(*ast.ValueSpec);for i,n:=range v.Names{line(typ(info.Defs[n].Type())+" "+id(n.Name)+" = "+expr(v.Values[i])+";")}}}}}
+ for _,f:=range files{for _,d:=range f.Decls{if g,ok:=d.(*ast.GenDecl);ok&&g.Tok==token.VAR{for _,spec:=range g.Specs{v:=spec.(*ast.ValueSpec);for i,n:=range v.Names{line(typ(info.Defs[n].Type())+" "+id(n.Name)+" = "+globalInit(expr(v.Values[i]))+";")}}}}}
  for _,file:=range files{line("// Source: "+filepath.Base(fs.Position(file.Pos()).Filename));for _,d:=range file.Decls{f,ok:=d.(*ast.FuncDecl);if !ok||skip(f){continue};if f.Doc!=nil{for _,text:=range strings.Split(strings.TrimSpace(f.Doc.Text()),"\n"){line("// "+text)}};line(signature(f));line("{");results=info.Defs[f.Name].Type().(*types.Signature).Results();resultNames=nil;for i:=0;i<results.Len();i++{r:=results.At(i);resultNames=append(resultNames,id(r.Name()));if r.Name()!=""&&r.Name()!="_"{line(typ(r.Type())+" "+id(r.Name())+"{};")}};for _,s:=range f.Body.List{stmt(s)};line("}")}}
  line("} // namespace px4::torne::dibnative")
  if err:=os.WriteFile(os.Args[2],[]byte(out.String()),0644);err!=nil{panic(err)}
