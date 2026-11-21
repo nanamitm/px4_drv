@@ -81,7 +81,7 @@ PX-Q3 系は2つの USB デバイスが同じ PID を持ち、カーネルモジ
 pcscd は起動時の USB の列挙を終えてからクライアントを受け付けるため、待つと pcscd が起動するたびに最初の接続が遅れます。  
 この判定を実機で確かめられているのは PX-Q3U4 だけです。
 
-PIX-DT295 と Sony torne CECH-ZD1J のカードリーダーは、カーネルモジュールではなくユーザー空間のデーモン [`px4-cused`](../cuse/README.md) が CUSE で `/dev/px4card/<ID>` を作ります。  
+PIX-DT295、Sony torne CECH-ZD1J、I-O DATA GV-MVP/XZ3 のカードリーダーは、カーネルモジュールではなくユーザー空間のデーモン [`px4-cused`](../cuse/README.md) が CUSE で `/dev/px4card/<ID>` を作ります。  
 CUSE のデバイスは USB 機器を親に持たず、sysfs の `px4card` クラスにも現れないため、IFD ハンドラーはデーモンが書く `/run/px4-cused/readers` の「バス番号 デバイス番号 パス」の行で照合します。  
 名前を変える前のデーモン (`px4-dt295d`) が動いている環境でも使えるよう、以前の表 `/run/px4-dt295/readers` も読みます。  
 この表の行も `/dev/px4card/` の直下のファイルだけを開き、表にない間はカーネルモジュールの機種と同じく登録を待ちます。

@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-2.0-only
-# px4-cused: PIX-DT295 と Sony torne CECH-ZD1J の CUSE デーモン。
+# px4-cused: PIX-DT295、Sony torne CECH-ZD1J、I-O DATA GV-MVP/XZ3 の CUSE デーモン。
 # WinUSB 版と共有するコードは winusb/src/DriverHost_PX4 から参照する。
 CC ?= cc
 CXX ?= c++
@@ -9,6 +9,7 @@ ROOT := ..
 SHARED := $(ROOT)/winusb/src/DriverHost_PX4
 DT295 := $(SHARED)/dt295
 TORNE := $(SHARED)/torne
+XZ3 := $(SHARED)/xz3
 UPSTREAM := $(DT295)/upstream
 FIRMWARE := $(ROOT)/winusb/pkg/DriverHost_PX4/firmware
 
@@ -32,14 +33,16 @@ SHARED_OBJS := $(BUILD)/shared/source_firmware.o $(BUILD)/shared/frontend_init.o
 # torne の共有コード。DiB8096 の生成コードは coax の Go 実装から生成したもの (winusb/tools/torne_frontend)。
 TORNE_OBJS := $(BUILD)/torne/session.o $(BUILD)/torne/frontend_native_client.o $(BUILD)/torne/dib8096_native.o \
 	$(BUILD)/torne/mb86h47_bootstrap.o $(BUILD)/torne/mb86h47_i2c.o $(BUILD)/torne/mb86h47_stream.o
+# GV-MVP/XZ3 の共有コード。xz3/card_uart.cpp は dt295/card_uart.cpp と名前が重なるため、出力先を分ける。
+XZ3_OBJS := $(BUILD)/xz3/session.o $(BUILD)/xz3/frontend.o $(BUILD)/xz3/card_uart.o
 PLATFORM_OBJS := $(BUILD)/platform_linux.o $(BUILD)/firmware.o
 DAEMON_OBJS := $(BUILD)/main.o $(BUILD)/device.o $(BUILD)/video_node.o $(BUILD)/card_node.o \
-	$(BUILD)/dt295_device.o $(BUILD)/torne_device.o $(BUILD)/torne_port.o \
+	$(BUILD)/dt295_device.o $(BUILD)/torne_device.o $(BUILD)/torne_port.o $(BUILD)/xz3_device.o \
 	$(BUILD)/cuse_session.o $(BUILD)/usb_transport.o $(BUILD)/log.o
 
 all: $(BUILD)/px4-cused
 
-$(BUILD) $(BUILD)/shared $(BUILD)/upstream $(BUILD)/torne $(BUILD)/torne-trace:
+$(BUILD) $(BUILD)/shared $(BUILD)/upstream $(BUILD)/torne $(BUILD)/torne-trace $(BUILD)/xz3:
 	mkdir -p $@
 
 $(BUILD)/upstream/%.o: $(UPSTREAM)/core/%.c | $(BUILD)/upstream
@@ -55,14 +58,18 @@ $(BUILD)/torne/dib8096_native.o: $(TORNE)/dib8096_native.cpp $(TORNE)/dib8096_na
 $(BUILD)/torne/%.o: $(TORNE)/%.cpp $(TORNE)/*.hpp | $(BUILD)/torne
 	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -c $< -o $@
 
+$(BUILD)/xz3/%.o: $(XZ3)/%.cpp $(XZ3)/*.hpp | $(BUILD)/xz3
+	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -c $< -o $@
+
 $(BUILD)/%.o: src/%.cpp src/*.hpp | $(BUILD)
 	$(CXX) $(CPPFLAGS) $(DEPS_CFLAGS) $(CXXFLAGS) -c $< -o $@
 
 # 埋め込むファームウェアが変わったら作り直す
-$(BUILD)/firmware.o: src/firmware.S $(FIRMWARE)/dt295-direct-fr.bin $(FIRMWARE)/dt295-source-fr.bin | $(BUILD)
+$(BUILD)/firmware.o: src/firmware.S $(FIRMWARE)/dt295-direct-fr.bin $(FIRMWARE)/dt295-source-fr.bin \
+		$(FIRMWARE)/xz3-bootstrap.bin $(FIRMWARE)/xz3-runtime.bin $(FIRMWARE)/xz3-hook.bin | $(BUILD)
 	$(CC) -c -Wa,-I$(FIRMWARE) $< -o $@
 
-$(BUILD)/px4-cused: $(DAEMON_OBJS) $(SHARED_OBJS) $(TORNE_OBJS) $(PLATFORM_OBJS) $(UPSTREAM_OBJS)
+$(BUILD)/px4-cused: $(DAEMON_OBJS) $(SHARED_OBJS) $(TORNE_OBJS) $(XZ3_OBJS) $(PLATFORM_OBJS) $(UPSTREAM_OBJS)
 	$(CXX) $(CXXFLAGS) $(LDFLAGS) $^ $(DEPS_LIBS) -o $@
 
 # 自動試験 (USB と CUSE を使わない)
@@ -83,14 +90,23 @@ $(BUILD)/torne_session_test: $(ROOT)/winusb/tests/torne_session_test.cpp $(TORNE
 $(BUILD)/torne_native_frontend_test: $(ROOT)/winusb/tests/torne_native_frontend_test.cpp $(BUILD)/torne/dib8096_native.o
 	$(CXX) $(CPPFLAGS) $(CXXFLAGS) $^ -o $@
 
+# GV-MVP/XZ3 の共有コード (WinUSB 版と同じ試験)
+$(BUILD)/xz3_card_test: $(ROOT)/winusb/tests/xz3_card_test.cpp $(BUILD)/xz3/card_uart.o $(BUILD)/shared/card_uart.o
+	$(CXX) $(CPPFLAGS) $(CXXFLAGS) $^ -o $@
+
+$(BUILD)/xz3_stream_test: $(ROOT)/winusb/tests/xz3_stream_test.cpp | $(BUILD)
+	$(CXX) $(CPPFLAGS) $(CXXFLAGS) $< -o $@
+
 check: $(BUILD)/control_channel_test $(BUILD)/channel_test $(BUILD)/platform_test $(BUILD)/torne_session_test \
-		$(BUILD)/torne_native_frontend_test | $(BUILD)/torne-trace
+		$(BUILD)/torne_native_frontend_test $(BUILD)/xz3_card_test $(BUILD)/xz3_stream_test | $(BUILD)/torne-trace
 	$(BUILD)/control_channel_test
 	$(BUILD)/channel_test
 	$(BUILD)/platform_test
 	$(BUILD)/torne_session_test
 	$(BUILD)/torne_native_frontend_test
 	$(BUILD)/torne_native_frontend_test --golden $(ROOT)/winusb/tests/data/torne_native $(BUILD)/torne-trace
+	$(BUILD)/xz3_card_test
+	$(BUILD)/xz3_stream_test
 
 install: $(BUILD)/px4-cused
 	install -D -m 0755 $(BUILD)/px4-cused $(DESTDIR)$(SBINDIR)/px4-cused

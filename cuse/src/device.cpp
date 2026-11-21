@@ -5,6 +5,27 @@
 #include <cstdio>
 
 namespace px4::cuse {
+bool PortCardId(libusb_device_handle *handle, const char *usb_id, std::string &id)
+{
+    libusb_device *usb = libusb_get_device(handle);
+    std::uint8_t ports[8];
+    const int count = libusb_get_port_numbers(usb, ports, sizeof(ports));
+    if (count <= 0)
+        return false;
+    std::string path = std::string(usb_id) + "@" + std::to_string(libusb_get_bus_number(usb)) + "-";
+    for (int i = 0; i < count; ++i)
+        path += (i ? "." : "") + std::to_string(ports[i]);
+    std::uint64_t hash = 14695981039346656037ULL;
+    for (const char c : path) {
+        hash ^= static_cast<unsigned char>(c);
+        hash *= 1099511628211ULL;
+    }
+    char out[17];
+    std::snprintf(out, sizeof(out), "%016llX", static_cast<unsigned long long>(hash));
+    id = out;
+    return true;
+}
+
 namespace {
 std::string MakeLabel(const char *model, std::uint8_t bus, std::uint8_t address)
 {

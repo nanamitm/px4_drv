@@ -5,6 +5,7 @@
 #include "cuse_session.hpp"
 #include "dt295_device.hpp"
 #include "torne_device.hpp"
+#include "xz3_device.hpp"
 #include "msg.h"
 #include <libusb.h>
 #include <algorithm>
@@ -45,6 +46,7 @@ std::shared_ptr<Device> Make(libusb_device_handle *handle, std::uint8_t bus, std
 const Model Models[] = {
     {Dt295Device::Vendor, Dt295Device::Product, "PIX-DT295", Make<Dt295Device>},
     {TorneDevice::Vendor, TorneDevice::Product, "CECH-ZD1J", Make<TorneDevice>},
+    {Xz3Device::Vendor, Xz3Device::Product, "GV-MVP/XZ3", Make<Xz3Device>},
 };
 
 // 機器の追加と削除、デバイスファイルの解放、終了の要求を、1 つのスレッドで順に処理する。

@@ -11,6 +11,11 @@
 #include <string>
 
 namespace px4::cuse {
+// USB のシリアル番号を持たない機種のカードリーダーの ID を、USB の接続位置 (バス番号とポートの経路) から求める。
+// usb_id は "054c:04b2" のような VID:PID。同じポートへ挿し直すと同じ ID になり、Windows 版の ID
+// (デバイスインスタンスのパスから求める) とは一致しない。
+bool PortCardId(libusb_device_handle *handle, const char *usb_id, std::string &id);
+
 // 接続された 1 台の機器。受信のデバイスファイル (/dev/<prefix>N) とカードのデバイスファイル
 // (/dev/px4card/<ID>) を CUSE で公開し、機種ごとの処理は派生クラスが VideoBackend と CardBackend で受け持つ。
 //
