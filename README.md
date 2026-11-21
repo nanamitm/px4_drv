@@ -105,7 +105,7 @@ PLEX PX-S1UD（USB ID `3275:0080`）向けに、WinUSB を直接使う地デジ1
 - PIXELA PIX-DT295 (`06b8:103b`) と Sony torne CECH-ZD1J (`054c:04b2`) に実験的に対応
   - カーネルモジュールではなく、libusb で機器を動かして CUSE でデバイスファイルを作るユーザー空間のデーモン `px4-cused` で対応し、カーネルのヘッダーと DKMS は不要
   - 受信は `/dev/dt295videoN` と `/dev/tornevideoN` で、既存の機種と同じ PTX の ioctl で recpt1 などから選局できる。内蔵カードリーダーは `px4-drv-pcsc` から利用できる
-  - Raspberry Pi 4 (arm64) で、PIX-DT295 の地デジ・BS・110度CS (各3〜6時間の受信を含む)、CECH-ZD1J の地デジ (UHF のみ)、両機種の内蔵カードリーダー、2台の同時受信、USB の抜き差しを確認済み。x86_64 の Linux は未確認
+  - Raspberry Pi 4 (arm64) で、PIX-DT295 の地デジ・BS・110度CS (各3〜6時間の受信を含む)、CECH-ZD1J の地デジ (UHF のみ、2時間の受信を含む)、両機種の内蔵カードリーダー、2台の同時受信、USB の抜き差しを確認済み。x86_64 の Linux は未確認
   - 導入方法は [cuse/README.md](cuse/README.md)、設計と検証範囲は [PIX-DT295](docs/20261120_dt295_linux_cuse_design.md) と [CECH-ZD1J](docs/20261121_torne_linux_cuse_design.md) の設計文書を参照
 - 各機種の内蔵 B-CAS カードリーダーを利用するためのドライバを追加 (v0.7.0 以降)
   - 別途 `px4-drv-pcsc` ドライバをインストールすることで、pcscd から内蔵カードリーダーを認識・利用できるようになる
