@@ -12,6 +12,7 @@ extern "C" {
 #include <filesystem>
 #include <fstream>
 #include <limits>
+#include <vector>
 #include <fcntl.h>
 #include <sys/ioctl.h>
 #include <unistd.h>
@@ -207,24 +208,30 @@ int ResolveCardDevice(const std::string &name, std::string &path,
 		}
 	}
 	/*
-	 * CUSE のデーモン (px4-dt295d) が作るカードのデバイスは sysfs で USB 機器をたどれないため、
+	 * CUSE のデーモン (px4-cused) が作るカードのデバイスは sysfs で USB 機器をたどれないため、
 	 * デーモンが書く「バス番号 デバイス番号 パス」の行で照合する。表にない間は、デーモンの登録を待つ ENODEV にする
+	 * 名前を変える前のデーモン (px4-dt295d) が動いている環境のため、既定の表では旧パスの表も読む
 	 */
-	std::ifstream table(readers);
-	std::string line;
-	while (std::getline(table, line)) {
-		unsigned int b, d;
-		char device_path[256];
-		if (line.empty() || line[0] == '#' ||
-		    std::sscanf(line.c_str(), "%u %u %255s", &b, &d, device_path) != 3 || b != bus || d != device)
-			continue;
-		const std::filesystem::path card(device_path);
-		/* 表の内容でも /dev/px4card/ の外のファイルは開かない */
-		if (!card.is_absolute() || card.parent_path() != std::filesystem::path(devdir) / "px4card" ||
-		    card.filename() == "..")
-			return -EINVAL;
-		path = card.string();
-		return 0;
+	std::vector<std::string> tables{readers};
+	if (readers == CardReaderMap)
+		tables.emplace_back(LegacyCardReaderMap);
+	for (const auto &file : tables) {
+		std::ifstream table(file);
+		std::string line;
+		while (std::getline(table, line)) {
+			unsigned int b, d;
+			char device_path[256];
+			if (line.empty() || line[0] == '#' ||
+			    std::sscanf(line.c_str(), "%u %u %255s", &b, &d, device_path) != 3 || b != bus || d != device)
+				continue;
+			const std::filesystem::path card(device_path);
+			/* 表の内容でも /dev/px4card/ の外のファイルは開かない */
+			if (!card.is_absolute() || card.parent_path() != std::filesystem::path(devdir) / "px4card" ||
+			    card.filename() == "..")
+				return -EINVAL;
+			path = card.string();
+			return 0;
+		}
 	}
 	/* 登録を待つ ENODEV と区別し、カードリーダーを持たない側は ENXIO ですぐに失敗させる */
 	return LacksCardSlot(vendor, product, bus, device, usbsys) ? -ENXIO : -ENODEV;

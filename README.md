@@ -16,9 +16,9 @@ PLEX 社の [Webサイト](http://plex-net.co.jp) にて配布されている公
 - SDRplay RSP1 の互換機（Mirics MSi2500 + MSi001、USB ID `1DF7:2500`）向けに、ソフトウェアで OFDM 復調・誤り訂正・A/B 階層の再多重を行う helper を使うフルセグ BonDriver を追加（Windows WinUSB 版のみ、実験的。USB ドライバーは SDRplay のものか、同梱の WinUSB INF を使用）。USB の等時転送の失敗が数分〜十数分に 1 回起きることがあり、地上デジタル放送では約 290 ms 以下、J.83B では約 473 ms 以下の欠落を復調をやり直さずに埋めます。それより長い欠落では、地上デジタル放送で約 2 秒、J.83B で約 20 ms 分の TS が欠落の時間に加えて欠けます。32 ビット版は BonDriver 経由の 30 秒ずつの受信、64 ビット版は TVTest での 2 時間の受信を確認済みです。受信中の USB の抜き差しからの復帰も確認済みです。BS・CS の IF 信号が混ざった入力では MER が大きく下がるため、地上波の帯域だけを入力してください。[導入手順](docs/msi2500-install.md)と[技術資料・検証記録](winusb/docs/msi2500-fullseg-design.md)を参照。
 - 同じ `BonDriver_MSI2500` に、スカパー！プレミアムサービス光の ITU-T J.83 Annex B（256QAM、5.6 Msps）をソフトウェアで復調するチューニング空間を追加（実験的）。検証環境では H007・H008 を受信でき、MER が約 23 dB の H004・H005 と UHF の搬送波は受信できる帯域として扱っていません (UHF の搬送波は、BS・CS の信号を除いた入力で MER 約 28.5 dB、RS の訂正不能 0.01〜0.04% まで改善しましたが、まだ誤りが残ります)。64 ビット版の TVTest での選局と視聴、32 ビット版の BonDriver 経由の選局と受信を確認済みで、長時間の視聴は未確認です。[導入手順](docs/msi2500-install.md#j83b-の受信)と[技術資料・検証記録](winusb/docs/msi2500-j83b-design.md)を参照。
 - PLEX PX-BCUD に実験的に対応（Windows WinUSB版のみ、アンテナへの外部給電が必要）。通常配布に専用BonDriverとINFを同梱します。BS/CS受信、チャンネル切り替え、TVTestでのチャンネルスキャン・視聴、USBの抜き差しを確認済み。長時間録画とスリープ復帰後の動作は未確認です。導入方法と検証範囲は[PX-BCUD対応の詳細](docs/px-bcud-winusb.md)を参照。
-- Sony torne CECH-ZD1J に実験的に対応（Windows WinUSB版のみ）。復調と内蔵カードリーダーの制御を `DriverHost_PX4.exe` に統合。現行の統合版と配布設定の組み合わせで、専用INFで導入したx64版により地デジを約2時間21分受信し、TSの異常は0件でした（[長時間受信の記録](winusb/docs/torne-long-run.md)）。x64版TVTestでの地デジの受信中のUSBの抜き差しからの復帰を確認済み。TVTestでの映像復号、長時間録画は未確認です。過去の別設定・旧実装での実測結果とは区別し、検証範囲と導入方法は[統合手順](winusb/docs/cech-zd1j-integration.md)を参照。
+- Sony torne CECH-ZD1J に実験的に対応（WinUSB 版。Linux 版はユーザー空間のデーモン `px4-cused` で対応し、[変更点 (Linux 版)](#変更点-linux-版) を参照）。復調と内蔵カードリーダーの制御を `DriverHost_PX4.exe` に統合。現行の統合版と配布設定の組み合わせで、専用INFで導入したx64版により地デジを約2時間21分受信し、TSの異常は0件でした（[長時間受信の記録](winusb/docs/torne-long-run.md)）。x64版TVTestでの地デジの受信中のUSBの抜き差しからの復帰を確認済み。TVTestでの映像復号、長時間録画は未確認です。過去の別設定・旧実装での実測結果とは区別し、検証範囲と導入方法は[統合手順](winusb/docs/cech-zd1j-integration.md)を参照。
 - I-O DATA GV-MVP/XZ3（USB ID `04BB:0530`）に実験的に対応（Windows WinUSB版のみ、アンテナへの外部給電が必要）。通常配布に専用BonDriverとINFを同梱し、選局・TS転送用のファームウェアは `DriverHost_PX4.exe` に内蔵します。x64とx86で地デジ・BS・110度CSの選局と受信を確認済み。専用INFで導入したx64版で110度CSを約3時間受信し、TSの異常は0件でした（TS転送の送出量が3 MiB固定の版）。本体の内蔵カードリーダーにも実験的に対応し、x64版で地デジ・BSの復号と、復号しながらの110度CSの約3時間25分の受信を確認しました（TSの異常は放送側の要因と判断したCC不整合1件）。PCのUSBポートへ直接接続した状態で、受信中のUSBの抜き差しからの復帰を確認済み。USB 2.0ハブを経由した接続では機器内のTSリングの取り出しが間に合わず受信できなかったため、PCのUSBポートへ直接接続してください。地デジ・BSの長時間受信、長時間録画、x86版のカードは未確認です。導入方法と検証範囲は[GV-MVP/XZ3対応の詳細](winusb/docs/gv-mvp-xz3.md)を参照。
-- PIXELA PIX-DT295（USB ID `06B8:103B`）に実験的に対応（Windows WinUSB版のみ、アンテナへの外部給電が必要）。選局・TS転送用のファームウェアは `DriverHost_PX4.exe` に内蔵しているため、`DriverHost_PX4.ini` を変更せずに利用できます。x64で地デジ・BS・110度CSの選局と受信、同梱の `WinSCard.dll` による内蔵カードリーダーとの通信、地デジ・110度CSでの約4時間と110度CSでの約2時間44分の連続受信を確認済み。後者では番組の切り替わりの時刻にCCの飛びが1件あり、原因は特定していません。2台を同時に使い、B-CASカードを挿した側を受信中に抜き差しして、受信の再開を確認済み（内蔵カードリーダーでの復号の再開には、TvCas の `fb3e24b` 以降の TVCAS が必要です）。x86版の実機受信、スリープ復帰は未確認です。導入方法と検証範囲は[PIX-DT295対応の詳細](winusb/docs/pix-dt295.md)を参照。
+- PIXELA PIX-DT295（USB ID `06B8:103B`）に実験的に対応（WinUSB 版、アンテナへの外部給電が必要。Linux 版はユーザー空間のデーモン `px4-cused` で対応し、[変更点 (Linux 版)](#変更点-linux-版) を参照）。選局・TS転送用のファームウェアは `DriverHost_PX4.exe` に内蔵しているため、`DriverHost_PX4.ini` を変更せずに利用できます。x64で地デジ・BS・110度CSの選局と受信、同梱の `WinSCard.dll` による内蔵カードリーダーとの通信、地デジ・110度CSでの約4時間と110度CSでの約2時間44分の連続受信を確認済み。後者では番組の切り替わりの時刻にCCの飛びが1件あり、原因は特定していません。2台を同時に使い、B-CASカードを挿した側を受信中に抜き差しして、受信の再開を確認済み（内蔵カードリーダーでの復号の再開には、TvCas の `fb3e24b` 以降の TVCAS が必要です）。x86版の実機受信、スリープ復帰は未確認です。導入方法と検証範囲は[PIX-DT295対応の詳細](winusb/docs/pix-dt295.md)を参照。
 - PIXELA XIT-SQR100（USB ID `06B8:106B`）に実験的に対応（Linux 版と WinUSB 版、BS/CS アンテナへの給電は非対応）。[yyya-nico 氏のフォーク](https://github.com/yyya-nico/px4_drv/tree/feat/support-sqr100) の対応を移植し、PX-MLT 系と同じ方式でスカパー！プレミアムサービス光 (J.83 Annex B) の選局を加えました。WinUSB 版の x64 と x86 で地デジ・BS・110度CS・J.83B の選局と受信、x64 で同梱の `WinSCard.dll` による内蔵カードリーダーとの通信と地デジ・BS・110度CS の復号、PX-MLT 系との同時受信、受信中の USB の抜き差しからの復帰を短時間確認済み (各チャンネルの受信は数十秒、同期・TEI・連続性のエラーは0件)。x64 の TVTest で内蔵カードリーダーを使って復号しながら約3時間連続受信し、同期・TEI のエラーとカード通信の失敗は0件、連続性の飛びは1件でした。Linux 版の実機動作、3時間を超える受信、スカパー！プレミアムサービスのカードは未確認です。詳細は [XIT-SQR100 対応の移植記録](docs/20261114_xitsqr100_port.md) を参照。
 - 最新coaxの選局改善、複数台管理、初回ロック待ちと自動復帰の設定は[統合版の保守情報](winusb/docs/torne-integration-notes.md)、DLL・EXEの署名と信頼登録は[アプリケーション署名](winusb/docs/application-signing.md)を参照。
 
@@ -102,6 +102,11 @@ PLEX PX-S1UD（USB ID `3275:0080`）向けに、WinUSB を直接使う地デジ1
 - チップ構成が一部変更された、ロット番号 2309 (2023年9月) 以降の DTV02A-1T1S-U に対応 (v0.4.5 以降)
 - PX-MLT5PE のリブランド品である DTV02A-5TS-P (USB Product ID: 0x924e) に対応 (v0.6.0 以降)
 - [yyya-nico 氏のフォーク](https://github.com/yyya-nico/px4_drv/tree/feat/support-sqr100) の対応を移植し、PIXELA XIT-SQR100 に実験的に対応 (地デジ・BS/CS・J.83 Annex B、内蔵カードリーダー)。WinUSB 版の x64 で受信と内蔵カードリーダーを短時間確認済みで、詳細は [XIT-SQR100 対応の移植記録](docs/20261114_xitsqr100_port.md) を参照
+- PIXELA PIX-DT295 (`06b8:103b`) と Sony torne CECH-ZD1J (`054c:04b2`) に実験的に対応
+  - カーネルモジュールではなく、libusb で機器を動かして CUSE でデバイスファイルを作るユーザー空間のデーモン `px4-cused` で対応し、カーネルのヘッダーと DKMS は不要
+  - 受信は `/dev/dt295videoN` と `/dev/tornevideoN` で、既存の機種と同じ PTX の ioctl で recpt1 などから選局できる。内蔵カードリーダーは `px4-drv-pcsc` から利用できる
+  - Raspberry Pi 4 (arm64) で、PIX-DT295 の地デジ・BS・110度CS (各3〜6時間の受信を含む)、CECH-ZD1J の地デジ (UHF のみ、2時間の受信を含む)、両機種の内蔵カードリーダー、2台の同時受信、USB の抜き差しを確認済み。x86_64 の Linux は未確認
+  - 導入方法は [cuse/README.md](cuse/README.md)、設計と検証範囲は [PIX-DT295](docs/20261120_dt295_linux_cuse_design.md) と [CECH-ZD1J](docs/20261121_torne_linux_cuse_design.md) の設計文書を参照
 - 各機種の内蔵 B-CAS カードリーダーを利用するためのドライバを追加 (v0.7.0 以降)
   - 別途 `px4-drv-pcsc` ドライバをインストールすることで、pcscd から内蔵カードリーダーを認識・利用できるようになる
   - pcscd が既定で認識している外付けカードリーダーも引き続き利用できる
@@ -173,6 +178,13 @@ PLEX PX-S1UD（USB ID `3275:0080`）向けに、WinUSB を直接使う地デジ1
 
 	- XIT-SQR100 (実験的)
 	  - このリポジトリの版の Linux 版は実機での動作をまだ確認していません (WinUSB 版は確認済み)。
+	- PIX-DT295 (実験的)
+	  - Linux 版はカーネルモジュールではなく、ユーザー空間のデーモン `px4-cused` で対応しています ([cuse/README.md](cuse/README.md))。
+
+- Sony
+
+	- torne CECH-ZD1J (実験的、地デジのみ)
+	  - Linux 版はカーネルモジュールではなく、ユーザー空間のデーモン `px4-cused` で対応しています ([cuse/README.md](cuse/README.md))。
 
 > [!NOTE]  
 > 2021 年以降メンテナンスされていない [nns779/px4_drv](https://github.com/nns779/px4_drv) から、新規に下記チューナーのサポートを追加しています。
@@ -432,6 +444,16 @@ gcc, make, カーネルソース/ヘッダ, dkms がインストールされて�
 	/dev/sqr100video0
 
 ISDB-T・ISDB-S と、拡張 ioctl による J.83 Annex B を受信できます (Linux 版は実機では未確認)。
+
+##### PIXELA PIX-DT295 / Sony torne CECH-ZD1J を接続した場合
+
+この 2 機種はカーネルモジュールではなく、ユーザー空間のデーモン `px4-cused` がデバイスファイルを作ります。  
+デーモンの導入方法は [cuse/README.md](cuse/README.md) を参照してください。
+
+	$ ls /dev/dt295video* /dev/tornevideo*
+	/dev/dt295video0  /dev/tornevideo0
+
+PIX-DT295 は ISDB-T と ISDB-S、CECH-ZD1J は ISDB-T (UHF 13〜62ch) だけを受信できます。
 
 ##### e-Better DTV02-1T1S-U/DTV02A-1T1S-U を接続した場合
 

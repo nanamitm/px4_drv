@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: GPL-2.0-only
-// px4-dt295d: PIX-DT295 を libusb で動かし、受信とカードのデバイスファイルを CUSE で公開するデーモン。
-// 設計は docs/20261120_dt295_linux_cuse_design.md を参照。
+// px4-cused: libusb で機器を動かし、受信とカードのデバイスファイルを CUSE で公開するデーモン。
+// 対応機種は PIX-DT295 (docs/20261120_dt295_linux_cuse_design.md) と
+// Sony torne CECH-ZD1J (docs/20261121_torne_linux_cuse_design.md)。
 #include "cuse_session.hpp"
-#include "device.hpp"
+#include "dt295_device.hpp"
+#include "torne_device.hpp"
 #include "msg.h"
 #include <libusb.h>
 #include <algorithm>
@@ -26,14 +28,29 @@
 
 namespace px4::cuse {
 namespace {
-constexpr std::uint16_t Vendor = 0x06b8, Product = 0x103b;
+// 対応機種。受信のデバイスファイルの名前と番号の割り当ては機種ごとに独立する。
+struct Model {
+    std::uint16_t vendor, product;
+    const char *name;
+    std::shared_ptr<Device> (*make)(libusb_device_handle *, std::uint8_t, std::uint8_t, std::function<void()>);
+};
+
+template <class T>
+std::shared_ptr<Device> Make(libusb_device_handle *handle, std::uint8_t bus, std::uint8_t address,
+                             std::function<void()> changed)
+{
+    return std::make_shared<T>(handle, bus, address, std::move(changed));
+}
+
+const Model Models[] = {
+    {Dt295Device::Vendor, Dt295Device::Product, "PIX-DT295", Make<Dt295Device>},
+    {TorneDevice::Vendor, TorneDevice::Product, "CECH-ZD1J", Make<TorneDevice>},
+};
 
 // 機器の追加と削除、デバイスファイルの解放、終了の要求を、1 つのスレッドで順に処理する。
 // libusb のホットプラグ通知と CUSE の要求の処理から長い処理 (初期化、セッションの停止) を外すためのもの。
 class Manager {
 public:
-    explicit Manager(libusb_context *) {}
-
     void Post(std::function<void()> work)
     {
         {
@@ -75,35 +92,36 @@ public:
         WriteReaderMap();
     }
 
-    void Arrived(libusb_device *usb)
+    void Arrived(libusb_device *usb, const Model &model)
     {
         libusb_device_handle *handle = nullptr;
         const int bus = libusb_get_bus_number(usb), address = libusb_get_device_address(usb);
         if (int rc = libusb_open(usb, &handle)) {
-            msg_err("PIX-DT295 %03d:%03d: open failed (%s)\n", bus, address, libusb_error_name(rc));
+            msg_err("%s %03d:%03d: open failed (%s)\n", model.name, bus, address, libusb_error_name(rc));
             return;
         }
         if (int rc = libusb_claim_interface(handle, 0)) {
-            msg_err("PIX-DT295 %03d:%03d: claim failed (%s)\n", bus, address, libusb_error_name(rc));
+            // カーネルのドライバや別のプロセスが機器を使っている場合 (torne_drv のカーネルモジュールなど)。
+            msg_err("%s %03d:%03d: claim failed (%s)\n", model.name, bus, address, libusb_error_name(rc));
             libusb_close(handle);
             return;
         }
         std::shared_ptr<Device> device;
         try {
-            device = std::make_shared<Device>(handle, static_cast<std::uint8_t>(bus), static_cast<std::uint8_t>(address),
-                                              [this, usb] { Post([this, usb] { Released(usb); }); });
+            device = model.make(handle, static_cast<std::uint8_t>(bus), static_cast<std::uint8_t>(address),
+                                [this, usb] { Post([this, usb] { Released(usb); }); });
         } catch (...) {
             libusb_release_interface(handle, 0);
             libusb_close(handle);
             return;
         }
         if (const int rc = device->Init()) {
-            msg_err("PIX-DT295 %03d:%03d: firmware bundle result=%d\n", bus, address, rc);
+            msg_err("%s: initialization result=%d\n", device->Label().c_str(), rc);
             Close(*device);
             return;
         }
-        if (const int rc = device->StartVideo(FreeIndex())) {
-            msg_err("PIX-DT295 %03d:%03d: video device not started result=%d\n", bus, address, rc);
+        if (const int rc = device->StartVideo(FreeIndex(device->VideoPrefix()))) {
+            msg_err("%s: video device not started result=%d\n", device->Label().c_str(), rc);
             Close(*device);
             return;
         }
@@ -117,7 +135,7 @@ public:
         auto device = Find(usb);
         if (!device || device->Removed())
             return;
-        msg_info("PIX-DT295 %03u:%03u: removed\n", device->Bus(), device->Address());
+        msg_info("%s: removed\n", device->Label().c_str());
         device->Remove();
         // 開かれていないセッションはすぐに消す。受信のデバイスファイルが開かれたままでも、使われていない
         // カードのデバイスファイルを残すと、挿し直した機器が同じ ID のデバイスファイルを作れないため。
@@ -159,13 +177,13 @@ private:
         libusb_close(device.Handle());
     }
 
-    // 受信のデバイスファイルは、カーネルモジュールと同じく空いている最小の番号にする。
+    // 受信のデバイスファイルは、カーネルモジュールと同じく機種ごとに空いている最小の番号にする。
     // 切断後に開かれたまま残るセッションの番号も使用中として扱う。
-    unsigned FreeIndex() const
+    unsigned FreeIndex(const std::string &prefix) const
     {
         std::set<unsigned> used;
         for (const auto &device : devices_)
-            if (device->HasVideo())
+            if (device->HasVideo() && device->VideoPrefix() == prefix)
                 used.insert(device->VideoIndex());
         unsigned index = 0;
         while (used.count(index))
@@ -181,12 +199,12 @@ private:
             return;
         for (const auto &other : devices_)
             if (other.get() != &device && other->HasCard() && other->CardId() == device.CardId()) {
-                msg_info("PIX-DT295 %03u:%03u: card device deferred until /dev/px4card/%s is released\n",
-                         device.Bus(), device.Address(), device.CardId().c_str());
+                msg_info("%s: card device deferred until /dev/px4card/%s is released\n", device.Label().c_str(),
+                         device.CardId().c_str());
                 return;
             }
         if (const int rc = device.StartCard())
-            msg_err("PIX-DT295 %03u:%03u: card device not started result=%d\n", device.Bus(), device.Address(), rc);
+            msg_err("%s: card device not started result=%d\n", device.Label().c_str(), rc);
         WriteReaderMap();
     }
 
@@ -202,7 +220,7 @@ private:
     void WriteReaderMap()
     {
         const char *dir = std::getenv("RUNTIME_DIRECTORY");
-        const std::string base = dir && *dir ? std::string(dir) : std::string("/run/px4-dt295");
+        const std::string base = dir && *dir ? std::string(dir) : std::string("/run/px4-cused");
         const std::string path = base + "/readers", temp = path + ".tmp";
         {
             std::ofstream out(temp, std::ios::trunc);
@@ -225,15 +243,22 @@ private:
     std::vector<std::shared_ptr<Device>> devices_;
 };
 
+struct HotplugContext {
+    Manager *manager;
+    const Model *model;
+};
+
 int LIBUSB_CALL Hotplug(libusb_context *, libusb_device *usb, libusb_hotplug_event event, void *data)
 {
-    auto &manager = *static_cast<Manager *>(data);
+    auto &context = *static_cast<HotplugContext *>(data);
+    auto &manager = *context.manager;
+    const Model &model = *context.model;
     // 通知の処理は libusb のイベントのスレッドで動くため、機器の初期化は Manager のスレッドへ移す。
     // 処理するまで libusb_device を解放させないよう参照を取る。
     libusb_ref_device(usb);
     if (event == LIBUSB_HOTPLUG_EVENT_DEVICE_ARRIVED)
-        manager.Post([&manager, usb] {
-            manager.Arrived(usb);
+        manager.Post([&manager, &model, usb] {
+            manager.Arrived(usb, model);
             libusb_unref_device(usb);
         });
     else
@@ -248,7 +273,7 @@ int LIBUSB_CALL Hotplug(libusb_context *, libusb_device *usb, libusb_hotplug_eve
 
 int main()
 {
-    using px4::cuse::Manager;
+    using namespace px4::cuse;
     // 終了のシグナルは全スレッドで遮断し、専用のスレッドだけが sigwait で受ける。
     // CUSE のループのスレッドへ届くと、そのスレッドの read だけが中断されて終了の処理が進まないため。
     // libusb と CUSE のスレッドはこの設定を引き継ぐため、スレッドを作る前に行う。
@@ -260,7 +285,7 @@ int main()
     pthread_sigmask(SIG_BLOCK, &exit_signals, nullptr);
     // 利用者が読み出しをやめた CUSE の応答で、プロセスが終了しないようにする。
     std::signal(SIGPIPE, SIG_IGN);
-    px4::cuse::CuseSession::InstallWakeHandler();
+    CuseSession::InstallWakeHandler();
 
     libusb_context *usb = nullptr;
     if (int rc = libusb_init(&usb)) {
@@ -272,7 +297,7 @@ int main()
         libusb_exit(usb);
         return 1;
     }
-    Manager manager(usb);
+    Manager manager;
     std::atomic_bool events_run{true};
     std::thread events([usb, &events_run] {
         while (events_run) {
@@ -280,16 +305,25 @@ int main()
             libusb_handle_events_timeout_completed(usb, &tv, nullptr);
         }
     });
-    libusb_hotplug_callback_handle hotplug = 0;
-    if (int rc = libusb_hotplug_register_callback(
-            usb, static_cast<libusb_hotplug_event>(LIBUSB_HOTPLUG_EVENT_DEVICE_ARRIVED | LIBUSB_HOTPLUG_EVENT_DEVICE_LEFT),
-            LIBUSB_HOTPLUG_ENUMERATE, px4::cuse::Vendor, px4::cuse::Product, LIBUSB_HOTPLUG_MATCH_ANY,
-            px4::cuse::Hotplug, &manager, &hotplug)) {
-        msg_err("libusb hotplug registration failed (%s)\n", libusb_error_name(rc));
-        events_run = false;
-        events.join();
-        libusb_exit(usb);
-        return 1;
+    std::vector<HotplugContext> contexts;
+    for (const auto &model : Models)
+        contexts.push_back({&manager, &model});
+    std::vector<libusb_hotplug_callback_handle> hotplugs;
+    for (auto &context : contexts) {
+        libusb_hotplug_callback_handle hotplug = 0;
+        if (int rc = libusb_hotplug_register_callback(
+                usb, static_cast<libusb_hotplug_event>(LIBUSB_HOTPLUG_EVENT_DEVICE_ARRIVED | LIBUSB_HOTPLUG_EVENT_DEVICE_LEFT),
+                LIBUSB_HOTPLUG_ENUMERATE, context.model->vendor, context.model->product, LIBUSB_HOTPLUG_MATCH_ANY,
+                Hotplug, &context, &hotplug)) {
+            msg_err("libusb hotplug registration failed for %s (%s)\n", context.model->name, libusb_error_name(rc));
+            for (const auto registered : hotplugs)
+                libusb_hotplug_deregister_callback(usb, registered);
+            events_run = false;
+            events.join();
+            libusb_exit(usb);
+            return 1;
+        }
+        hotplugs.push_back(hotplug);
     }
     std::thread signals([&exit_signals, &manager] {
         int signal = 0;
@@ -297,15 +331,16 @@ int main()
         msg_info("exit requested by signal %d\n", signal);
         manager.RequestExit();
     });
-    msg_info("px4-dt295d started\n");
+    msg_info("px4-cused started\n");
     manager.Run();
-    libusb_hotplug_deregister_callback(usb, hotplug);
+    for (const auto hotplug : hotplugs)
+        libusb_hotplug_deregister_callback(usb, hotplug);
     events_run = false;
     events.join();
     // シグナル以外の理由で Run() を抜けた場合も、sigwait のスレッドを回収できるようにする。
     pthread_kill(signals.native_handle(), SIGTERM);
     signals.join();
     libusb_exit(usb);
-    msg_info("px4-dt295d stopped\n");
+    msg_info("px4-cused stopped\n");
     return 0;
 }

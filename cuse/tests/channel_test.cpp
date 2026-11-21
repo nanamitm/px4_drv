@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 // PTX_SET_CHANNEL の換算 (cuse/src/channel.hpp) が driver/ptx_chrdev.c と同じ結果になることを確認する。
 #include "channel.hpp"
+#include <cmath>
 #include <cstdio>
 
 using px4::cuse::ChannelToTune;
@@ -53,6 +54,16 @@ int main()
     CHECK(rc == -EINVAL);
     Convert(PTX_ISDB_C_SYSTEM, 63, 0, rc);
     CHECK(rc == -EINVAL);
+
+    // dB から求めた CNDAT を recpt1 の式へ戻すと、元の dB に 0.01 dB 以内で戻る。
+    for (double db = 3.2; db < 47.5; db += 0.37)
+        CHECK(std::fabs(px4::cuse::CndatToDb(px4::cuse::DbToCndat(db)) - db) < 0.01);
+    // 範囲外は端の値に揃える。
+    CHECK(px4::cuse::DbToCndat(-5) == 5505024);
+    CHECK(px4::cuse::DbToCndat(0) == 5505024);
+    CHECK(px4::cuse::DbToCndat(100) == px4::cuse::DbToCndat(48));
+    // 25.5 dB は CNDAT の数千台 (TC90522 の地デジで 25 dB 前後の典型値と同じ桁)。
+    CHECK(px4::cuse::DbToCndat(25.5) > 1000 && px4::cuse::DbToCndat(25.5) < 20000);
     if (failures) {
         std::printf("%d failure(s)\n", failures);
         return 1;
