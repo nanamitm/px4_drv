@@ -290,6 +290,7 @@
     <ClCompile Include="xz3\device.cpp"><ObjectFileName>$(IntDir)xz3_device.obj</ObjectFileName></ClCompile>
     <ClCompile Include="xz3\frontend.cpp"><ObjectFileName>$(IntDir)xz3_frontend.obj</ObjectFileName></ClCompile>
     <ClCompile Include="xz3\card_uart.cpp"><ObjectFileName>$(IntDir)xz3_card_uart.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="xz3\session.cpp"><ObjectFileName>$(IntDir)xz3_session.obj</ObjectFileName></ClCompile>
     <ClCompile Include="dt295\device.cpp"><ObjectFileName>$(IntDir)dt295_device.obj</ObjectFileName></ClCompile>
     <ClCompile Include="dt295\winusb_transport.cpp" />
     <ClCompile Include="dt295\card_uart.cpp"><ObjectFileName>$(IntDir)dt295_card_uart.obj</ObjectFileName></ClCompile>
@@ -354,6 +355,7 @@
     <ClInclude Include="xz3\device.hpp" />
     <ClInclude Include="xz3\frontend.hpp" />
     <ClInclude Include="xz3\card_uart.hpp" />
+    <ClInclude Include="xz3\session.hpp" />
     <ClInclude Include="device_base.hpp" />
     <ClInclude Include="device_definition_set.hpp" />
     <ClInclude Include="device_manager.hpp" />

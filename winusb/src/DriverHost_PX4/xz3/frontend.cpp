@@ -177,6 +177,58 @@ std::uint32_t Frontend::ReadCndat()
     return raw;
 }
 
+/*
+ * Linux の PTX の ioctl は BS の TS を相対番号 (0〜7) で指定することが多いため、
+ * カーネルの px4_chrdev_set_stream_id_s() と PIX-DT295 の SatelliteTuneRelative() と同じ手順で TSID を求める。
+ * 搬送波のロックは Locked() と同じ 0xc3 の上位 4 bit で判定し、待つ時間は Tune() と同じ 50 ms × 35 回にする。
+ * ロック直後の TMCC は 0 を返すことがあるため 10 ms 間隔で最大 1 秒読み直し、使われていない番号の 0xffff は 0 と同じく扱う。
+ */
+int Frontend::TuneRelative(std::uint32_t frequency_khz, unsigned index)
+{
+    if (frequency_khz < 950000 || frequency_khz > 2150000 || index >= 8)
+        return -EINVAL;
+    satellite_ = true;
+    tsid_ = 0;
+    int result = Satellite(frequency_khz, 0);
+    std::uint8_t data[2]{};
+    bool carrier = false;
+    for (unsigned i = 0; !result && !carrier && i < 35; ++i) {
+        const std::uint8_t status = 0xc3;
+        result = io_.I2c(SatelliteAddress, &status, 1, data, 1);
+        carrier = !result && !(data[0] & 0xf0);
+        if (!result && !carrier)
+            result = io_.Delay(50);
+    }
+    if (result)
+        return result;
+    if (!carrier)
+        return -ENOLINK;
+    std::uint16_t tsid = 0;
+    for (unsigned i = 0; i < 100; ++i) {
+        const std::uint8_t reg = static_cast<std::uint8_t>(0xce + index * 2);
+        if ((result = io_.I2c(SatelliteAddress, &reg, 1, data, 2)))
+            return result;
+        tsid = static_cast<std::uint16_t>((data[0] << 8) | data[1]);
+        if (tsid && tsid != 0xffff)
+            break;
+        if ((result = io_.Delay(10)))
+            return result;
+    }
+    if (!tsid || tsid == 0xffff)
+        return -EAGAIN;
+    if ((result = Write(SatelliteAddress, {0x8f, Byte(tsid >> 8), Byte(tsid)})))
+        return result;
+    tsid_ = tsid;
+    for (unsigned i = 0; i < 35; ++i) {
+        bool locked = false;
+        if ((result = Locked(locked)) || locked)
+            return result;
+        if ((result = io_.Delay(50)))
+            return result;
+    }
+    return -EAGAIN;
+}
+
 int Frontend::Tune(bool satellite, std::uint32_t frequency_khz, std::uint32_t tsid)
 {
     if (satellite ? frequency_khz < 950000 || frequency_khz > 2150000 || tsid > 0xffff

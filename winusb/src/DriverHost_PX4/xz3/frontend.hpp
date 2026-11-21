@@ -21,6 +21,9 @@ public:
     explicit Frontend(FrontendIo& io) : io_(io) {}
     int Initialize();
     int Tune(bool satellite, std::uint32_t frequency_khz, std::uint32_t tsid);
+    // 衛星の相対 TS 番号 (0〜7) で選ぶ。TSID を 0 のまま周波数を合わせ、TMCC の TSID の一覧から選ぶ。
+    // 存在しない番号は -EAGAIN を返す。
+    int TuneRelative(std::uint32_t frequency_khz, unsigned index);
     int Locked(bool& locked);
     std::uint32_t ReadCndat();
 
