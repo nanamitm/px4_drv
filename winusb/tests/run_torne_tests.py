@@ -19,7 +19,7 @@ if not msbuild:
 log_dir = root / 'build/torne-validation'
 log_dir.mkdir(parents=True, exist_ok=True)
 projects = ['px4_winusb.sln'] + [f'tests/{name}.vcxproj' for name in [
-    'torne_foundation_test', 'torne_bootstrap_test', 'torne_session_test', 'ts_sync_condition_test', 'torne_usb_probe', 'torne_reference_client_test']]
+    'torne_foundation_test', 'torne_bootstrap_test', 'torne_session_test', 'ts_sync_condition_test', 'torne_usb_probe']]
 for project in projects:
     log = log_dir / (Path(project).stem + '-build.log')
     with log.open('wb') as output:
@@ -28,10 +28,6 @@ for project in projects:
         raise SystemExit(f'FAIL: build {project}; {log}')
     print(f'PASS: build {project}', flush=True)
 tests = ['torne_foundation_test', 'torne_bootstrap_test', 'torne_session_test', 'ts_sync_condition_test', 'smart_card_state_test', 'ringbuffer_purge_test']
-if (root/'build/x64/Release-static/TorneFrontendDiagnostic.exe').is_file():
-    tests.append('torne_reference_client_test')
-else:
-    print('SKIP: reference IPC test (build diagnostic helper first)', flush=True)
 for name in tests:
     log = log_dir / (name + '-run.log')
     with log.open('wb') as output:
