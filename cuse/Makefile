@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: GPL-2.0-only
-# px4-dt295d: PIX-DT295 の CUSE デーモン。WinUSB 版と共有するコードは winusb/src/DriverHost_PX4 から参照する。
+# px4-cused: PIX-DT295 と Sony torne CECH-ZD1J の CUSE デーモン。
+# WinUSB 版と共有するコードは winusb/src/DriverHost_PX4 から参照する。
 CC ?= cc
 CXX ?= c++
 PKG_CONFIG ?= pkg-config
@@ -7,6 +8,7 @@ BUILD ?= build
 ROOT := ..
 SHARED := $(ROOT)/winusb/src/DriverHost_PX4
 DT295 := $(SHARED)/dt295
+TORNE := $(SHARED)/torne
 UPSTREAM := $(DT295)/upstream
 FIRMWARE := $(ROOT)/winusb/pkg/DriverHost_PX4/firmware
 
@@ -27,18 +29,30 @@ CFLAGS += -std=gnu11 -Wall
 UPSTREAM_OBJS := $(BUILD)/upstream/stream_input.o $(BUILD)/upstream/ts_framer.o $(BUILD)/upstream/ts_mux.o
 # Windows 版の dt295/device.cpp と cuse/src/device.cpp の名前が重なるため、出力先を分ける。
 SHARED_OBJS := $(BUILD)/shared/source_firmware.o $(BUILD)/shared/frontend_init.o $(BUILD)/shared/card_uart.o $(BUILD)/shared/control_channel.o
+# torne の共有コード。DiB8096 の生成コードは coax の Go 実装から生成したもの (winusb/tools/torne_frontend)。
+TORNE_OBJS := $(BUILD)/torne/session.o $(BUILD)/torne/frontend_native_client.o $(BUILD)/torne/dib8096_native.o \
+	$(BUILD)/torne/mb86h47_bootstrap.o $(BUILD)/torne/mb86h47_i2c.o $(BUILD)/torne/mb86h47_stream.o
 PLATFORM_OBJS := $(BUILD)/platform_linux.o $(BUILD)/firmware.o
-DAEMON_OBJS := $(BUILD)/main.o $(BUILD)/device.o $(BUILD)/cuse_session.o $(BUILD)/usb_transport.o $(BUILD)/log.o
+DAEMON_OBJS := $(BUILD)/main.o $(BUILD)/device.o $(BUILD)/video_node.o $(BUILD)/card_node.o \
+	$(BUILD)/dt295_device.o $(BUILD)/torne_device.o $(BUILD)/torne_port.o \
+	$(BUILD)/cuse_session.o $(BUILD)/usb_transport.o $(BUILD)/log.o
 
-all: $(BUILD)/px4-dt295d
+all: $(BUILD)/px4-cused
 
-$(BUILD) $(BUILD)/shared $(BUILD)/upstream:
+$(BUILD) $(BUILD)/shared $(BUILD)/upstream $(BUILD)/torne $(BUILD)/torne-trace:
 	mkdir -p $@
 
 $(BUILD)/upstream/%.o: $(UPSTREAM)/core/%.c | $(BUILD)/upstream
 	$(CC) $(CPPFLAGS) $(CFLAGS) -include $(DT295)/compat.h -c $< -o $@
 
 $(BUILD)/shared/%.o: $(DT295)/%.cpp $(DT295)/*.hpp | $(BUILD)/shared
+	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -c $< -o $@
+
+# 生成コードは Go からの機械的な変換のため、符号の比較などの警告は WinUSB 版 (Level3) と同じく対象外にする。
+$(BUILD)/torne/dib8096_native.o: $(TORNE)/dib8096_native.cpp $(TORNE)/dib8096_native_generated.inc $(TORNE)/*.hpp | $(BUILD)/torne
+	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -w -c $< -o $@
+
+$(BUILD)/torne/%.o: $(TORNE)/%.cpp $(TORNE)/*.hpp | $(BUILD)/torne
 	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -c $< -o $@
 
 $(BUILD)/%.o: src/%.cpp src/*.hpp | $(BUILD)
@@ -48,7 +62,7 @@ $(BUILD)/%.o: src/%.cpp src/*.hpp | $(BUILD)
 $(BUILD)/firmware.o: src/firmware.S $(FIRMWARE)/dt295-direct-fr.bin $(FIRMWARE)/dt295-source-fr.bin | $(BUILD)
 	$(CC) -c -Wa,-I$(FIRMWARE) $< -o $@
 
-$(BUILD)/px4-dt295d: $(DAEMON_OBJS) $(SHARED_OBJS) $(PLATFORM_OBJS) $(UPSTREAM_OBJS)
+$(BUILD)/px4-cused: $(DAEMON_OBJS) $(SHARED_OBJS) $(TORNE_OBJS) $(PLATFORM_OBJS) $(UPSTREAM_OBJS)
 	$(CXX) $(CXXFLAGS) $(LDFLAGS) $^ $(DEPS_LIBS) -o $@
 
 # 自動試験 (USB と CUSE を使わない)
@@ -61,15 +75,27 @@ $(BUILD)/channel_test: tests/channel_test.cpp src/channel.hpp | $(BUILD)
 $(BUILD)/platform_test: tests/platform_test.cpp $(PLATFORM_OBJS) $(BUILD)/shared/source_firmware.o $(BUILD)/shared/frontend_init.o $(BUILD)/log.o $(UPSTREAM_OBJS)
 	$(CXX) $(CPPFLAGS) $(CXXFLAGS) $^ -o $@
 
-check: $(BUILD)/control_channel_test $(BUILD)/channel_test $(BUILD)/platform_test
+# torne の共有セッション (WinUSB 版と同じ試験)
+$(BUILD)/torne_session_test: $(ROOT)/winusb/tests/torne_session_test.cpp $(TORNE_OBJS)
+	$(CXX) $(CPPFLAGS) $(CXXFLAGS) $^ -o $@
+
+# DiB8096 の生成コードを、リポジトリにある Go の正解の記録 (winusb/tests/data/torne_native) と比べる。Go は不要。
+$(BUILD)/torne_native_frontend_test: $(ROOT)/winusb/tests/torne_native_frontend_test.cpp $(BUILD)/torne/dib8096_native.o
+	$(CXX) $(CPPFLAGS) $(CXXFLAGS) $^ -o $@
+
+check: $(BUILD)/control_channel_test $(BUILD)/channel_test $(BUILD)/platform_test $(BUILD)/torne_session_test \
+		$(BUILD)/torne_native_frontend_test | $(BUILD)/torne-trace
 	$(BUILD)/control_channel_test
 	$(BUILD)/channel_test
 	$(BUILD)/platform_test
+	$(BUILD)/torne_session_test
+	$(BUILD)/torne_native_frontend_test
+	$(BUILD)/torne_native_frontend_test --golden $(ROOT)/winusb/tests/data/torne_native $(BUILD)/torne-trace
 
-install: $(BUILD)/px4-dt295d
-	install -D -m 0755 $(BUILD)/px4-dt295d $(DESTDIR)$(SBINDIR)/px4-dt295d
-	install -D -m 0644 dist/px4-dt295d.service $(DESTDIR)$(UNITDIR)/px4-dt295d.service
-	install -D -m 0644 dist/90-px4-dt295.rules $(DESTDIR)$(UDEVDIR)/90-px4-dt295.rules
+install: $(BUILD)/px4-cused
+	install -D -m 0755 $(BUILD)/px4-cused $(DESTDIR)$(SBINDIR)/px4-cused
+	install -D -m 0644 dist/px4-cused.service $(DESTDIR)$(UNITDIR)/px4-cused.service
+	install -D -m 0644 dist/90-px4-cused.rules $(DESTDIR)$(UDEVDIR)/90-px4-cused.rules
 
 clean:
 	rm -rf $(BUILD)

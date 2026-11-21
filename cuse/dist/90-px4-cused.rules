@@ -1,7 +1,8 @@
-# PIX-DT295 の CUSE デーモン (px4-dt295d) が作るデバイスファイルの権限。
+# CUSE のデーモン (px4-cused) が作るデバイスファイルの権限。
 # CUSE のデバイスは SUBSYSTEM=="cuse" で作られ、カーネルモジュール用の etc/99-px4video.rules の規則には当たらない。
 # 受信のデバイスファイルは既存の機種と同じく video グループに読み書きを許可する。
 SUBSYSTEM=="cuse", KERNEL=="dt295video*", GROUP="video", MODE="0664"
+SUBSYSTEM=="cuse", KERNEL=="tornevideo*", GROUP="video", MODE="0664"
 # カードのデバイスファイルは DEVNAME の '!' を udev が '/' に置き換えた名前 (px4card/<ID>) で照合する。
 # pcscd が専用ユーザーで動く環境でも開けるよう、カーネルモジュールの px4card と同じく pcscd グループに許可する。
 SUBSYSTEM=="cuse", KERNEL=="px4card/*", GROUP="pcscd", MODE="0660"

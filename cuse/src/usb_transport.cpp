@@ -12,6 +12,13 @@ int RemovalSignal::Wait(unsigned milliseconds)
     return removed_ ? -ENODEV : 0;
 }
 
+int RemovalSignal::WaitUntil(std::chrono::steady_clock::time_point until)
+{
+    std::unique_lock<std::mutex> lock(mutex_);
+    changed_.wait_until(lock, until, [this] { return removed_; });
+    return removed_ ? -ENODEV : 0;
+}
+
 int UsbTransport::Control(void *ctx, std::uint8_t type, std::uint8_t request, std::uint16_t value, std::uint16_t index,
                           void *data, std::uint16_t size, unsigned timeout)
 {

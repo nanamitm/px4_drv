@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 #pragma once
 #include <cerrno>
+#include <cmath>
 #include <cstdint>
 #include <sys/ioctl.h>
 #include "ptx_ioctl.h"
@@ -41,5 +42,34 @@ inline int ChannelToTune(std::uint32_t system, const ptx_freq &freq, Tune &tune)
     else
         return -EINVAL;
     return 0;
+}
+
+// recpt1 などが PTX_GET_CNR の地デジの値 (TC90522 の CNDAT) を dB へ換算する式。
+inline double CndatToDb(double cndat)
+{
+    const double p = std::log10(5505024.0 / cndat) * 10;
+    return 0.000024 * p * p * p * p - 0.0016 * p * p * p + 0.0398 * p * p + 0.5491 * p + 3.0965;
+}
+
+// C/N を dB で返す復調器 (torne の DiB8000) の値を、上の式で同じ dB になる CNDAT へ換算する。
+// CXD2856ER の機種 (driver/cxd2856er_cnr.c) と同じく、利用者の換算式を変えずに dB を表示させるため。
+// 式は P (= 10 log10(5505024 / CNDAT)) が 0〜40 の範囲で単調に増えるため、P を二分法で求める。
+// 範囲外の値は端の値に揃える (P = 0 は約 3.1 dB、P = 40 は約 47.8 dB)。
+inline std::uint32_t DbToCndat(double db)
+{
+    double low = 0, high = 40;
+    const auto db_of = [](double p) {
+        return 0.000024 * p * p * p * p - 0.0016 * p * p * p + 0.0398 * p * p + 0.5491 * p + 3.0965;
+    };
+    if (!(db > db_of(low)))
+        return 5505024;
+    if (db >= db_of(high))
+        low = high;
+    else
+        for (int i = 0; i < 60; ++i) {
+            const double mid = (low + high) / 2;
+            (db_of(mid) < db ? low : high) = mid;
+        }
+    return static_cast<std::uint32_t>(std::lround(5505024.0 / std::pow(10.0, low / 10)));
 }
 }
