@@ -46,6 +46,17 @@ constexpr double CardHoldRate = 4.0e6;
 // CNDATを読む操作12の間隔（回数）。操作12ごとのI²Cの読み出しはその間リングを送らないため、
 // 110度CSで約2秒、地デジで約1.5秒に1回にとどめる。
 constexpr unsigned CnInterval = 8;
+/*
+ * XZ3は電源投入後、TSブロックが入力のTSを正しく取り込めない状態で始まることがあり、
+ * 中継プログラムの導入のし直しやTSブロックのリセットでは回復せず、USBの挿し直しで正常な状態になるまで続く
+ * (docs/20261121_gv_mvp_xz3_linux_cuse_design.md の「電源投入後の壊れた状態」)。
+ * この状態では、DMAの書き込み位置が0のままTSが届かないか、中継プログラムが書き込み位置を越えて
+ * 未書き込みの領域を送る。受信の途中から越え始めることもある。
+ * 中継プログラムは書き込み位置までしか送らないため、1回の操作12の送出量は、直前の応答の時点の未処理量と
+ * その操作12の間にDMAが書いた量の和を越えない。これを越えた送出と、受信開始からNoInputLimitの間に
+ * 書き込み位置が進まないことを、壊れたTSを録画し続けないよう受信の失敗として扱い、挿し直しを求める。
+ */
+constexpr auto NoInputLimit = std::chrono::seconds(3);
 using namespace std::chrono_literals;
 
 std::uint64_t Fingerprint(const std::uint8_t* p, std::size_t size)
@@ -637,6 +648,10 @@ int Session::ReadLoop(bool satellite, StreamSink& sink)
     RingStats stats(satellite);
     PumpProgress progress;
     bool short_pump = false;
+    // DMA の書き込み位置が一度でも進んだか。操作11はリングの読む位置と書き込み位置を 0 から始める。
+    bool input_seen = false;
+    std::uint32_t last_cursor = 0, last_producer = 0;
+    const auto started = Clock::now();
     for (unsigned head = 0, count = 0; port_.Available() && !stop_; ++count) {
         // 待っているカード操作があれば、次の操作12の前に先に通す。
         while (card_waiters_.load() && port_.Available() && !stop_)
@@ -655,6 +670,31 @@ int Session::ReadLoop(bool satellite, StreamSink& sink)
                 return -EIO;
         }
         const auto sent = Word(reply.data() + 52);
+        // 電源投入後の壊れた状態は、この操作12で送られたデータを渡す前に検出する。
+        const auto cursor = Word(reply.data() + 44), producer = Word(reply.data() + 48);
+        if (cursor < RingBytes && producer < RingBytes) {
+            const auto ring = [](std::uint32_t from, std::uint32_t to) {
+                return to >= from ? to - from : RingBytes - from + to;
+            };
+            const auto available = static_cast<std::uint64_t>(ring(last_cursor, last_producer)) +
+                                   ring(last_producer, producer);
+            if (sent > available) {
+                msg_err("GV-MVP/XZ3: TS capture is in a bad state after power-on (op12=%u sent=%u available=%llu "
+                        "cursor=%u producer=%u); reconnect USB\n",
+                        count, sent, static_cast<unsigned long long>(available), cursor, producer);
+                return -EIO;
+            }
+            last_cursor = cursor;
+            last_producer = producer;
+            if (producer)
+                input_seen = true;
+        }
+        if (!input_seen && Clock::now() - started >= NoInputLimit) {
+            msg_err("GV-MVP/XZ3: no TS input %lld ms after the stream started (bad state after power-on); "
+                    "reconnect USB\n",
+                    static_cast<long long>(std::chrono::duration_cast<std::chrono::milliseconds>(NoInputLimit).count()));
+            return -EIO;
+        }
         const bool partial = sent < PumpSize(request);
         if (partial && !short_pump)
             msg_warn("GV-MVP/XZ3: TS pump sent %u/%u bytes; waiting for more input\n", sent, PumpSize(request));
