@@ -5,6 +5,7 @@
 #include "../src/DriverHost_PX4/torne/dib8096_registers.hpp"
 #include "../src/DriverHost_PX4/torne/mb86h47_stream.hpp"
 #include "../src/DriverHost_PX4/torne/frontend_native_client.hpp"
+#include "../src/DriverHost_PX4/torne/frontend_signal_win32.hpp"
 
 #include <cstdlib>
 #include <algorithm>
@@ -391,8 +392,9 @@ static void FrontendStopTests()
 	const HANDLE removed = CreateEventW(nullptr, TRUE, FALSE, nullptr);
 	const HANDLE stop = CreateEventW(nullptr, TRUE, FALSE, nullptr);
 	Check(removed && stop, "frontend stop events");
-	NativeFrontendClient frontend(bus, removed);
-	frontend.SetStop(stop);
+	WinFrontendSignal signal(removed, stop);
+	NativeFrontendClient frontend(bus, signal);
+	frontend.SetStoppable(true);
 	chip.stop_on_mailbox = stop;
 	std::vector<std::uint8_t> response;
 	const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);

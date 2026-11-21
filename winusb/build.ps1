@@ -174,7 +174,8 @@ foreach ($build_platform in $build_platforms) {
     & "build/$build_platform/Release-static/torne_native_frontend_test.exe"
     if ($LASTEXITCODE -ne 0) { throw "Native torne frontend test failed. platform: $build_platform" }
 
-    foreach ($torne_test in @('torne_foundation_test', 'torne_bootstrap_test')) {
+    # torne_session_test は Linux 版のデーモンと共有する制御 (torne/session.cpp) を模擬の機器で確かめる。
+    foreach ($torne_test in @('torne_foundation_test', 'torne_bootstrap_test', 'torne_session_test')) {
         msbuild "tests/$torne_test.vcxproj" /p:"Configuration=Release-static;Platform=$build_platform;PlatformToolset=v143"
         if ($LASTEXITCODE -ne 0) { throw "Torne test build failed: $torne_test ($build_platform)" }
         & "build/$build_platform/Release-static/$torne_test.exe"

@@ -1,18 +1,20 @@
 // SPDX-License-Identifier: GPL-2.0-only
 #pragma once
 #include "dib8096_native.hpp"
+#include "frontend_signal.hpp"
 #include "mb86h47_i2c.hpp"
-#include <windows.h>
 
 namespace px4::torne {
+// 抜去と停止の確認、待機は FrontendSignal を通すため、WinUSB 版と Linux 版で共有する。
 class NativeFrontendClient final : private dibnative::Bus {
 public:
-    NativeFrontendClient(MailboxI2c& bus,HANDLE cancel):bus_(bus),cancel_(cancel),frontend_(*this){}
+    NativeFrontendClient(MailboxI2c& bus,FrontendSignal& signal):bus_(bus),signal_(signal),frontend_(*this){}
     bool Command(std::uint8_t kind,const std::vector<std::uint8_t>& body,std::vector<std::uint8_t>& response,
         std::chrono::steady_clock::time_point deadline);
     void SetBulkTiming() noexcept { frontend_.SetBulkTiming(true); }
     void SetBatchWrites(bool enabled) noexcept { batch_writes_ = enabled; }
-    void SetStop(HANDLE stop) noexcept {stop_=stop;}
+    // true の間、受信機の停止要求で I2C 要求の合間と待機を中断する。
+    void SetStoppable(bool stoppable) noexcept {stoppable_=stoppable;}
     bool StoppedCleanly() const noexcept { return stopped_cleanly_ && !io_failed_; }
     const std::string& Error() const noexcept{return error_;}
 private:
@@ -30,8 +32,8 @@ private:
     std::size_t pending_count_ = 0;
     bool batch_writes_ = false;
     MailboxI2c& bus_;
-    HANDLE cancel_;
-    HANDLE stop_=nullptr;
+    FrontendSignal& signal_;
+    bool stoppable_=false;
     NativeFrontend frontend_;
     std::chrono::steady_clock::time_point deadline_{};
     bool stopped_cleanly_ = false, io_failed_ = false;
