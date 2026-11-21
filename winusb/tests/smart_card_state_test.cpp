@@ -186,6 +186,26 @@ int main()
 		response_length) == 0 && device->reset_count == 7,
 		"A stale delayed response did not recover on the next APDU.") && succeeded;
 
+	/*
+	 * 抜去の途中に読んだ 00 だけのフレームは、受信連番が 0 のときに空の I ブロックとして検査を通る
+	 * SW のない応答を成功として返さず、次の APDU で再初期化して回復することを確かめる
+	 */
+	if (device->response_sequence != 0) {
+		response_length = sizeof(response);
+		succeeded = Check(card.Transmit(apdu, sizeof(apdu), response,
+			response_length) == 0,
+			"The APDU before the zero frame test failed.") && succeeded;
+	}
+	device->zero_frame_response = true;
+	response_length = sizeof(response);
+	succeeded = Check(card.Transmit(apdu, sizeof(apdu), response,
+		response_length) == -EPROTO,
+		"An all-zero frame was accepted as an empty response.") && succeeded;
+	response_length = sizeof(response);
+	succeeded = Check(card.Transmit(apdu, sizeof(apdu), response,
+		response_length) == 0 && response_length == 2 && device->reset_count == 8,
+		"An all-zero frame did not recover on the next APDU.") && succeeded;
+
 	/* UART の残留バイトで ATR が壊れた場合だけ、カード全体を1回再初期化する */
 	auto retry_device = std::make_shared<MockCardDevice>();
 	retry_device->is_present = true;
