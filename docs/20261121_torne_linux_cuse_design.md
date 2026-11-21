@@ -2,7 +2,8 @@
 
 この文書は、Sony torne CECH-ZD1J (USB ID `054c:04b2`) を Linux で使うための構成案です。  
 PIX-DT295 の Linux 対応 ([20261120_dt295_linux_cuse_design.md](20261120_dt295_linux_cuse_design.md)) と同じく、libusb で機器を動かし CUSE でデバイスファイルを公開する方式を前提に、維持する契約、WinUSB 版と共有するコード、試験の範囲、決定した事項を整理します。  
-Linux での実機の測定はまだ行っていないため、記載した動作はすべて設計上の想定です。  
+本実装は [`cuse/`](../cuse/README.md) の `px4-cused` にあり、Linux の実機で確かめた範囲は「Linux 版の実機確認」に記載します。  
+それ以外の節の Linux の動作は、設計上の想定です。  
 WinUSB 版での測定値は、出典の文書を併記して引用します。
 
 この文書の「検証環境」は、PIX-DT295 の設計文書と同じく、Raspberry Pi 4 Model B に 64 ビット版の Raspberry Pi OS Lite を入れ、CECH-ZD1J を本体の USB ポートへ直接接続した構成を指します。  
@@ -437,6 +438,64 @@ udev 規則には、受信のデバイスファイルの名前に対応する `S
 `build.ps1` で x86 と x64 をビルドし、`run_torne_tests.py` と `check_torne_native.py --arch x86/x64` の自動試験を実行します。  
 実機では、Windows 11 x64 の PC へ CECH-ZD1J をつなぎ替え、[torne-integration-notes.md](../winusb/docs/torne-integration-notes.md) の `BulkI2c=true` の既定値を決めたときの試験 (13ch・17ch の交互の選局 20 回、無信号の 62ch を含む切り替え、受信中のカード APDU、30 分の受信、受信中の USB の抜き差し) を同じ条件で繰り返し、切り出し前の結果と比べます。
 
+## Linux 版の実装
+
+`px4-dt295d` を機種共通のデーモン `px4-cused` へ組み替え、CECH-ZD1J を加えました。
+
+| ファイル | 内容 |
+|---|---|
+| `cuse/src/video_node.*`、`card_node.*` | 受信とカードのデバイスファイルの機種共通の部分。旧 `device.cpp` のリング、`read`、`poll`、PTX の ioctl とカードの ioctl の受け渡しを、順序と応答を変えずに移した |
+| `cuse/src/device.*` | 機器 1 台の共通部分 (2 つのノード、切断、セッションの寿命)。機種ごとの処理は `VideoBackend` と `CardBackend` |
+| `cuse/src/dt295_device.*` | PIX-DT295 の固有の処理。旧 `device.cpp` からそのまま移した |
+| `cuse/src/torne_device.*`、`torne_port.*` | CECH-ZD1J の固有の処理と、共有の `torne::Session` へ渡す libusb 版の `SessionPort` と `FrontendSignal` |
+| `cuse/src/main.cpp` | 機種の表 (VID/PID) からホットプラグを登録する。受信のデバイスファイルの番号は機種ごとに独立 |
+| `cuse/dist/px4-cused.service`、`90-px4-cused.rules` | ユニットと udev 規則の名前を変え、`tornevideo*` の規則を加えた。ユニットは `px4-dt295d.service` と同時に動かない |
+| `pcsc/` | 対応表の既定を `/run/px4-cused/readers` にし、既定の表を使う場合は旧パス `/run/px4-dt295/readers` も読む。`Info.plist` に `054c:04b2` を加えた |
+
+CECH-ZD1J の処理の要点は次のとおりです。
+
+- 開くときに共有セッションを取得し、`Recover` の後に `InitializeFrontend` を呼ぶ (Bulk のコマンド経路、書き込みの一括化)。閉じるときは復調器を休止させ、カードが開いていればブリッジを残す
+- 選局は `TuneFrequency` を 10 秒の期限で呼び、確定した検索失敗と期限内のロックなしを `-ENOLINK` にする。I²C や USB の失敗は、閉じて開き直すまで操作を断る
+- 受信は、出力の切り替え、`PrepareStream`、`libusb_clear_halt(0x81)`、Bulk IN 24 KiB (1,536 × 16) × 16 本の投入、`StartStream` の順で始める。2 秒以内に最初の TS が届かなければ `read` を `-EIO` で終える
+- C/N は DiB8000 の dB を、recpt1 の式で同じ dB になる CNDAT へ換算する (`cuse/src/channel.hpp` の `DbToCndat`)
+- 待機は `RemovalSignal::WaitUntil` で期限の時刻まで待ち、ミリ秒より短い指定も切り上げない
+
+`make -C cuse check` は、PIX-DT295 の既存の試験に加えて、`torne_session_test` と、DiB8096 の生成コードの正解の記録との比較を実行します。
+
+## Linux 版の実機確認
+
+検証環境で、systemd のユニットで動かした `px4-cused` に PIX-DT295 と CECH-ZD1J を同時に接続して確かめました。  
+カーネルは 6.18.50、libusb は 1.0.28、libfuse3 は 3.17.2、受信は recpt1 (stz2012 版) です。  
+TS の計数は同期、TEI、CC の飛び、同じ CC の内容違い、形式不正で、受信の終了時のデーモンの記録 (リングのあふれ、`stop_ok`) も確かめました。  
+カードは B-CAS で、試験は応答の長さと SW だけを記録しました。
+
+| 試験 | 結果 |
+|---|---|
+| `make -C cuse check`、`make -C pcsc check` (arm64、GCC 14.2) | すべて成功 |
+| 接続直後 | 両機種の受信とカードのデバイスファイルを作成し、`/run/px4-cused/readers` に 2 行を記載。CECH-ZD1J はほかのカーネルドライバに割り当てられていなかった (`Driver=usbfs`) |
+| 開く処理 | bootstrap は制御転送 1,218 回 (平均 132 µs)、フロントエンドの初期化は制御転送 23 回と Bulk のコマンド経路 166 回 |
+| CECH-ZD1J の 13ch を 30 秒 | 340,863 パケット、異常 0 件。recpt1 の C/N の表示 24.65 dB、最初の選局 2.53 秒、受信の開始から最初の TS まで 12 ms、Bulk IN の完了の間隔は最大 11.3 ms |
+| UHF 13〜62ch の走査 (recpt1 で各 2 秒) | 13・15・16・17ch がロック (C/N 24.5〜26.1 dB)。無信号の 46 チャンネルは 1.5〜3.9 秒で検索失敗を確定。14ch は 1 回だけ 3.9 秒で検索失敗を確定した (下記) |
+| 14ch を続けて 5 回 | 5 回ともロック (選局 2.1〜2.6 秒、C/N 25.2〜26.0 dB) |
+| PIX-DT295 の 13ch を 30 秒 | 593,571 パケット、異常 0 件 (組み替えの前と同じ動作) |
+| 2 台の同時受信 60 秒 (PIX-DT295 は 15ch、CECH-ZD1J は 13ch) | 1,179,691 パケットと 678,527 パケット、どちらも異常 0 件。CECH-ZD1J の Bulk IN の完了の間隔は最大 23.4 ms |
+| pcscd 経由の APDU、受信なし | CECH-ZD1J 50 回すべて成功 (平均 54.9 ms)、PIX-DT295 50 回すべて成功 (平均 70.9 ms) |
+| CECH-ZD1J の 13ch を 120 秒受信中に APDU | 1,000 回すべて成功 (平均 54.3 ms、最大 127.6 ms)。TS は 1,376,639 パケット、異常 0 件で、Bulk IN の完了の間隔は最大 11.6 ms |
+| PIX-DT295 の 13ch を 60 秒受信中に APDU | 500 回すべて成功 (平均 57.6 ms)。TS は 1,180,911 パケット、異常 0 件、SERVICE の最大 9.05 ms |
+| 受信していない間の `systemctl restart` の後 | 抜き差しなしで開き、166,399 パケット、異常 0 件 |
+| CECH-ZD1J の受信中に SIGKILL | systemd が 5 秒後に起動し直し、抜き差しなしで CECH-ZD1J は 165,759 パケット、PIX-DT295 は 291,033 パケット、どちらも異常 0 件 |
+| CECH-ZD1J の受信中に USB を抜き、約 2.5 秒後に挿し直す | Bulk IN の失敗で受信を止め、それまでの 506,495 パケットは異常 0 件。開かれたままの `/dev/tornevideo0` を残して `/dev/tornevideo1` とカードのデバイスファイル (同じ ID) を作り、対応表を更新した。挿し直した機器の 15 秒の受信は異常 0 件 |
+| 受信していない間に抜き、約 3.4 秒後に挿し直す | `/dev/tornevideo0` を作り直して対応表を更新し、15 秒の受信は異常 0 件 |
+
+制御転送の往復は平均 0.13〜0.21 ms で、WinUSB 版の測定環境 (約 3 ms) より短く、選局はおおむね 2.0〜2.7 秒でした。  
+受信中に制御転送を使わないため、カードの操作は Bulk IN の完了の間隔に影響しませんでした。
+
+`Bootstrap` は二重 bank の検証と切り替えで起動済みのブリッジを再び起動できるため、デーモンの再起動と、受信中の強制終了の後のどちらも、CECH-ZD1J の抜き差しは不要でした。  
+デーモンの強制終了や USB の抜去で受信が途切れたとき、recpt1 は終了コード 0 で終わったため、録画が途中で止まったことは recpt1 の終了コードからは判別できません。
+
+走査での 14ch の検索失敗は、上流の探索が無信号として確定したもので、WinUSB 版の既定 (`InitialLockRetry=false`) でも同じく返します。  
+1 回だけの観測で、頻度と条件は確かめていません。
+
 ## 決定した事項
 
 利用者の判断を仰いだ事項と、その結果は次のとおりです。
@@ -447,7 +506,7 @@ udev 規則には、受信のデバイスファイルの名前に対応する `S
 | WinUSB 版との共有コードの切り出しの順序 | 切り出しを先に行い Windows の回帰試験を済ませてから Linux 版を作る / Linux 版を先に動かし、後で切り出す | 切り出しを先に行う | 切り出しを先に行う (2026-11-21) |
 | 受信のデバイスファイルの名前 | `tornevideoN` / `cechzd1jvideoN` | `tornevideoN` | `tornevideoN` (2026-11-21) |
 
-デーモンの新しい名前は仮称の `px4-cused` とし、ユニット名と `/run` の下のディレクトリ名とともに実装の最初の変更で確定します。
+デーモンの新しい名前は `px4-cused` とし、ユニットは `px4-cused.service`、対応表は `/run/px4-cused/readers` に決めました。
 
 設計者が決めた次の事項は、異論があれば見直します。
 
@@ -459,12 +518,16 @@ udev 規則には、受信のデバイスファイルの名前に対応する `S
 
 ## 未確認の条件
 
-- ほかのカーネルドライバが `054c:04b2` へ割り当てられないこと
-- 検証環境での制御転送の往復時間と、それに比例する開く処理と選局の時間
-- Bulk IN の転送の長さと本数の適切な値
-- `libusb_clear_halt` と `WinUsb_ResetPipe` が機器へ同じ要求を送るか
-- DiB8096 のロック直後の訂正前の TS の有無
-- デーモンの再起動と異常終了の後に、抜き差しなしで bootstrap できること
+「Linux 版の実機確認」で、ほかのカーネルドライバの割り当て、制御転送の往復時間、デーモンの再起動と強制終了の後の bootstrap は確かめました。  
+次の条件は未確認です。
+
+- 長時間の受信と、カード通信を続けながらの長時間の受信 (Linux では最長 120 秒)
+- Bulk IN の転送の長さと本数の見直し (24 KiB × 16 本で、単独では完了の間隔が最大約 11 ms、PIX-DT295 と同時で最大約 23 ms)
+- `libusb_clear_halt` と `WinUsb_ResetPipe` が機器へ同じ要求を送るか (受信の開始は成功している)
+- DiB8096 のロック直後の訂正前の TS の有無 (選局から最初の TS までに TEI は記録されていない)
+- 走査で 1 回起きた 14ch の検索失敗の頻度と条件
+- pcscd がカードを使っている最中の USB の抜き差しと、カードの抜き差し
+- x86_64 の Linux でのビルドと動作
 - 選局とカード操作を重ねたときの、カードの応答時間の上限 (Windows でも未確認)
 - 映像の復号、長時間の録画、複数台の同時利用 (Windows でも未確認)
 - A-CAS での受信を伴う長時間のカード通信 (Windows でも未確認)
