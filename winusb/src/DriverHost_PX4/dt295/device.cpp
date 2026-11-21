@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 #include "device.hpp"
 #include "card_uart.hpp"
+#include "control_channel.hpp"
 #include "winusb_transport.hpp"
 #include "source_firmware.hpp"
 #include "stall_history.hpp"
@@ -64,7 +65,12 @@ public:
     // 同系統の復調器を持つ機種と同じく、ロックから350msまでの待機後に選局を完了し、BonDriverのPurgeで破棄させる。
     Receiver(Device &device,std::unique_ptr<SourceFirmware> source):
         ReceiverBase(RECEIVER_SAT_SET_STREAM_ID_BEFORE_TUNE|RECEIVER_WAIT_AFTER_LOCK_TC_T),
-        parent_(device),source_(std::move(source)),transport_(device.usb_dev_.dev,device.usb_dev_.winusb,device.removed_) {}
+        parent_(device),source_(std::move(source)),transport_(device.usb_dev_.dev,device.usb_dev_.winusb,device.removed_),
+        channel_(*source_,transport_,device.available_,
+            [&device](unsigned ms){return WaitForSingleObject(device.removed_,ms)==WAIT_TIMEOUT?0:-ENODEV;},
+            [this](ControlChannel::Hold kind,Clock::time_point begin){
+                RecordHold(kind==ControlChannel::Hold::Card?StallHistory::Kind::Card:StallHistory::Kind::Cn,begin);
+            }) {}
     ~Receiver() override {Close();}
     int Open() override {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -121,59 +127,15 @@ public:
         if(cn_cached_ && Clock::now()-cn_read_at_<CnMinInterval){value=cn_value_;return 0;}
         bool satellite=false;uint32_t raw=0;
         {
-            ++command_waiters_;
-            std::unique_lock<std::mutex> command(command_mutex_);
-            --command_waiters_;
-            const auto hold=Clock::now();
-            transport_.Begin(2000);
-            const int rc=source_->ReadCn(satellite,raw);
-            RecordHold(StallHistory::Kind::Cn,hold);
+            const int rc=channel_.ReadCn(satellite,raw);
             if(rc){cn_failed_=true;return rc;}
         }
         value=px4::tc90522::CnrMilliDb(satellite,raw);
         cn_value_=value;cn_read_at_=Clock::now();cn_cached_=true;
         return 0;
     }
-    // 内蔵カードUARTの操作。受信の有無に関係なく、TSと同じ制御ロックと転送路を使う。
-    // 1回の保持で行う転送を短く区切り、手順内の待機ではロックを手放してSERVICEを止めない。
-    int Card(const std::function<int(CardUart &)> &operation) {
-        if(!parent_.available_)return -ENODEV;
-        ++command_waiters_;
-        std::unique_lock<std::mutex> command(command_mutex_);
-        --command_waiters_;
-        // 選局、SERVICE、CN、復元の転送失敗は、それぞれの経路が受信の停止と次回のCloseでの復元で扱う。
-        // 応答の分からない要求が残る間は、カード操作からも転送を始めない。
-        if(const int failed=transport_.Failed())return failed;
-        auto hold=Clock::now();
-        transport_.Begin(2000);
-        bool inherited=false;
-        // PIF1の導入後は、FIFOをファームウェアの一括転送で移す。導入前はTSを受信していない。
-        DirectBus::BulkFifo bulk;
-        if(source_->Ready())
-            bulk=[this](bool write,std::uint8_t *data,std::size_t &count){return source_->CardFifo(write,data,count);};
-        DirectBus bus(transport_.Callbacks(),[this,&command,&hold,&inherited](unsigned ms){
-            RecordHold(StallHistory::Kind::Card,hold);
-            command.unlock();
-            const DWORD wait=WaitForSingleObject(parent_.removed_,ms);
-            ++command_waiters_;command.lock();--command_waiters_;
-            hold=Clock::now();
-            // 待機中に他の経路の転送が失敗した場合は、その失敗を解除せずにカード操作を終える。
-            if(const int failed=transport_.Failed()){inherited=true;return failed;}
-            transport_.Begin(2000);
-            return wait==WAIT_TIMEOUT?0:-ENODEV;
-        },std::move(bulk));
-        CardUart uart(bus);
-        const int rc=operation(uart);
-        RecordHold(StallHistory::Kind::Card,hold);
-        if(rc && bus.Error())
-            msg_err("PIX-DT295: card transfer failed errno=%d win32=%lu\n",bus.Error(),transport_.LastError());
-        // カード操作の転送失敗は、DirectBusがこの操作の後続を止め、SmartCardが次のAPDUでカードをリセットし直す。
-        // 次の操作は失敗した要求の結果に依存しないため、ここで解除する。解除しないと、受信していない間は
-        // カードがDriverHost_PX4の再起動まで使えず、受信中はSERVICEも失敗してTSが止まる。
-        // PIF1の応答は連番で照合するため、遅れて実行された要求の応答はSERVICEが-EPROTOとして検出する。
-        if(!inherited && transport_.Failed())transport_.ClearFailure();
-        return rc;
-    }
+    // 内蔵カードUARTの操作は、受信の有無に関係なく、TSと同じ制御ロックと転送路を使う (ControlChannel::Card)。
+    ControlChannel &Channel() noexcept {return channel_;}
 protected:
     int SetStreamId() override {return 0;} // TSIDはSetFrequencyのTUNEへ同梱する。
     int SetFrequency() override {
@@ -184,7 +146,7 @@ protected:
             params_.bandwidth!=6 && params_.bandwidth!=6000 && params_.bandwidth!=6000000)return -EINVAL;
         // ReceiverManagerはOpen中に一覧ロックを保持するため、長いUSB初期化を最初の選局まで遅延する。
         if(!initialized_){
-            std::lock_guard<std::mutex> command(command_mutex_);
+            auto command=channel_.Lock();
             msg_info("DT295: initializing backend=%s\n",source_->Direct()?"direct-fr":"source-fr");
             transport_.Begin(120000);
             const int initialized=source_->Start(transport_.Callbacks());
@@ -202,15 +164,16 @@ protected:
         stream_buf_->ResetInputPacketCount();worker_error_=0;cn_failed_=false;cn_cached_=false;
         uint32_t tsid=0;
         {
-            std::lock_guard<std::mutex> command(command_mutex_);
+            auto command=channel_.Lock();
             transport_.Begin(20000);
             const bool satellite=params_.system==px4::SystemType::ISDB_S;
             // 地デジの要求はSTREAM_IDを持たず、params_には直前の衛星選局のTSIDが残る。地デジでは0を使う。
             tsid=satellite?params_.stream_id:0;
             msg_info("PIX-DT295: tune frequency_khz=%u tsid=%x\n",params_.freq,tsid);
             rc=source_->Tune(satellite,params_.freq,tsid);
-            // 引数不正と無信号(-ENOLINK)は機器状態を壊さないため、次の選局を受け付ける。それ以外は転送異常として扱う。
-            if(rc && rc!=-EINVAL && rc!=-ENOLINK)failed_=true;
+            // 引数不正、無信号(-ENOLINK)、存在しない相対TS番号やTSIDの不一致(-EAGAIN)は機器状態を壊さないため、
+            // 次の選局を受け付ける。それ以外は転送異常として扱う。
+            if(rc && rc!=-EINVAL && rc!=-ENOLINK && rc!=-EAGAIN)failed_=true;
             transport_.ReportTiming("tune");
         }
         if(!rc){tuned_=true;if(capture_)rc=StartReader();}
@@ -221,7 +184,7 @@ protected:
 private:
     void Cleanup(){
         // カードの操作と転送が混ざらないよう、復元も制御ロックの下で行う。
-        std::lock_guard<std::mutex> command(command_mutex_);
+        auto command=channel_.Lock();
         transport_.BeginRestore(120000);
         restore_failed_=source_->Close()!=0;
         transport_.ReportTiming("source-close");
@@ -254,7 +217,7 @@ private:
         }
         int rc=worker_error_.load()?-EIO:0;
         if(!rc){
-            std::lock_guard<std::mutex> command(command_mutex_);
+            auto command=channel_.Lock();
             transport_.Begin(20000);rc=source_->Capture(true);
         }
         if(rc){StopReader();return rc;}
@@ -266,34 +229,22 @@ private:
         // input初期化が終わる前のUSBデータは破棄し、フレーマーとの競合を避ける。
         deliver_=true;
         try {service_worker_=std::thread([this]{
-            uint64_t calls=0,total_gap_us=0,max_gap_us=0,max_call_us=0;
-            auto previous=Clock::now();
-            while(parent_.available_ && !worker_error_){
-                // PIF1は機器側でリング/FIFOを待つため、ホストでは待機を重ねない。
-                if(WaitForSingleObject(stop_.value,0)==WAIT_OBJECT_0)break;
-                // source-frのSERVICEは待機なしで連続するため、std::mutexの取り直しで統計要求が数秒待たされる。
-                // 待機中の要求があれば1回分だけ先に通し、CNの読み出しをSERVICE1回程度の遅れに収める。
-                while(command_waiters_.load() && !worker_error_ && WaitForSingleObject(stop_.value,0)!=WAIT_OBJECT_0)
-                    std::this_thread::yield();
-                std::lock_guard<std::mutex> command(command_mutex_);
-                const auto begin=Clock::now();
-                const auto gap=static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(begin-previous).count());
-                total_gap_us+=gap;max_gap_us=(std::max)(max_gap_us,gap);previous=begin;++calls;
-                transport_.Begin(2000);const int rc=source_->Service();
-                const auto completed=Clock::now();
+            ControlChannel::ServiceStats stats;
+            const int rc=channel_.RunService([this]{
+                return !parent_.available_ || worker_error_ || WaitForSingleObject(stop_.value,0)==WAIT_OBJECT_0;
+            },[this](Clock::time_point begin,Clock::time_point completed,int rc){
                 if(!trace_dir_.empty() && service_trace_.size()<100000){
                     ServiceTrace row{};row.begin=TraceTime(begin);row.end=TraceTime(completed);
                     row.bytes=trace_bytes_.load();row.cc=trace_cc_.load();row.rc=rc;
                     service_trace_.push_back(row);
                 }
-                max_call_us=(std::max)(max_call_us,static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(Clock::now()-begin).count()));
                 if(!rc && stall_history_)RecordService(begin,completed);
-                if(rc)worker_error_=rc;
-            }
+            },stats);
+            if(rc)worker_error_=rc;
             if(stall_active_ && stall_trigger_.Flush())QueueStallDump(true);
             msg_info("PIX-DT295: service calls=%llu mean_gap_us=%llu max_gap_us=%llu max_call_us=%llu\n",
-                static_cast<unsigned long long>(calls),static_cast<unsigned long long>(calls?total_gap_us/calls:0),
-                static_cast<unsigned long long>(max_gap_us),static_cast<unsigned long long>(max_call_us));
+                static_cast<unsigned long long>(stats.calls),static_cast<unsigned long long>(stats.calls?stats.total_gap_us/stats.calls:0),
+                static_cast<unsigned long long>(stats.max_gap_us),static_cast<unsigned long long>(stats.max_call_us));
         });}catch(...){StopReader();return -ENOMEM;}
         return 0;
     }
@@ -308,21 +259,17 @@ private:
             stall_changed_.notify_all();stall_writer_.join();
         }
         SaveTrace();
-        std::lock_guard<std::mutex> command(command_mutex_);
+        auto command=channel_.Lock();
         transport_.Begin(20000);const int rc=source_->Capture(false);
         transport_.ReportTiming("capture-stop");
         if(rc)failed_=true;
         return rc;
     }
-    static int Packet(void *ctx,const uint8_t *packet) noexcept {
-        try {auto &out=*static_cast<std::vector<uint8_t> *>(ctx);out.insert(out.end(),packet,packet+188);return 0;}
-        catch(...){return -ENOMEM;}
-    }
     void ReadLoop() noexcept {
         px4::TsContinuityMonitor::Counters counts{};
         uint64_t input_bytes=0,max_read_gap_us=0;
         try {
-            auto quality=std::make_unique<px4::TsContinuityMonitor>();
+            TsDelivery delivery;
             const bool direct=source_->Direct();
             std::vector<std::unique_ptr<Read>> reads(direct?64:4);
             for(auto &read:reads){
@@ -331,8 +278,15 @@ private:
             }
             {std::lock_guard<std::mutex> state(state_mutex_);armed_=!worker_error_;}changed_.notify_all();
             size_t head=0;auto last=Clock::now();auto warning=last;auto previous_read=last;
-            std::vector<uint8_t> output;output.reserve(32768);
             px4::StreamOverflowLog overflow("PIX-DT295");
+            const auto deliver=[this,&overflow,&last](const uint8_t *packets,size_t size){
+                for(size_t offset=0;offset<size;offset+=188){
+                    size_t written_size=188;
+                    const bool written=stream_buf_->Write(packets+offset,written_size);
+                    overflow.Record(written,188,written_size);
+                }
+                stream_buf_->NotifyWrite();last=Clock::now();
+            };
             while(!worker_error_){
                 auto &read=*reads[head];HANDLE events[]{stop_.value,parent_.removed_,read.event.value};
                 const DWORD wait=WaitForMultipleObjects(3,events,FALSE,1);
@@ -350,20 +304,11 @@ private:
                             static_cast<uint32_t>(bytes),0,StallHistory::Kind::Bulk});
                     input_bytes+=bytes;trace_bytes_=input_bytes;
                     if(deliver_){
-                        output.clear();int rc=source_->Feed(read.bytes.data(),bytes,Packet,&output);
+                        const int rc=delivery.Deliver(*source_,read.bytes.data(),bytes,deliver);
                         if(rc){worker_error_=rc;break;}
-                        if(!output.empty()){
-                            quality->Feed(output.data(),output.size(),[](const px4::TsContinuityMonitor::Event &){});
-                            for(size_t offset=0;offset<output.size();offset+=188){
-                                size_t size=188;
-                                const bool written=stream_buf_->Write(output.data()+offset,size);
-                                overflow.Record(written,188,size);
-                            }
-                            stream_buf_->NotifyWrite();last=Clock::now();
-                        }
                     }else last=Clock::now();
                     if(!trace_dir_.empty() && bulk_trace_.size()<100000){
-                        const auto current=quality->Counts();trace_cc_=current.cc_jump+current.repeat_changed;
+                        const auto current=delivery.Counts();trace_cc_=current.cc_jump+current.repeat_changed;
                         bulk_trace_.push_back({TraceTime(observed),TraceTime(Clock::now()),bytes,trace_cc_.load()});
                     }
                     if(read.Submit()){worker_error_=-EIO;break;}head=(head+1)%reads.size();
@@ -375,7 +320,7 @@ private:
                         static_cast<long long>(std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now()-last).count()));warning=Clock::now();
                 }
             }
-            counts=quality->Counts();
+            counts=delivery.Counts();
         }catch(...){worker_error_=-ENOMEM;}
         uint64_t discarded=0,desyncs=0;
         source_->InputStats(discarded,desyncs);
@@ -498,8 +443,9 @@ private:
     Device &parent_;
     std::unique_ptr<SourceFirmware> source_;
     Transport transport_;
-    std::mutex mutex_,command_mutex_,state_mutex_;
-    std::atomic<int> command_waiters_{0};
+    // 制御ロック、SERVICEのループ、カード操作。Linux版と共有する。
+    ControlChannel channel_;
+    std::mutex mutex_,state_mutex_;
     std::condition_variable changed_,closed_;
     Event stop_;
     // SERVICEがUSB制御応答を待ってもBulk受信を回収し続けるため、workerを分離する。
@@ -568,23 +514,25 @@ void Device::Term(){
     if(registered_){receiver_manager_.Unregister(receiver_.get());registered_=false;}
     // 実行中のカード操作がreceiver_を使い終わるまで待ってから破棄する。
     std::lock_guard<std::mutex> card(card_mutex_);
-    card_open_=false;card_response_.Reset();
+    card_open_=false;card_.Discard();
     if(receiver_){receiver_->WaitClosed();receiver_.reset();}
 }
 
+// カードの応答の状態とUARTの手順はLinux版と共有する (CardSession)。ここではDriverHostのカードAPIの
+// 開閉と利用可否の判定だけを行う。
 int Device::OpenCard(){
     std::lock_guard<std::mutex> lock(card_mutex_);
     if(!receiver_ || !available_)return -ENODEV;
     if(card_open_)return -EBUSY;
-    card_open_=true;card_response_.Reset();
+    card_open_=true;card_.Discard();
     return 0;
 }
 
 void Device::CloseCard(){
     std::lock_guard<std::mutex> lock(card_mutex_);
     if(!card_open_)return;
-    card_open_=false;card_response_.Reset();
-    if(available_ && receiver_ && receiver_->Card([](CardUart &uart){return uart.PowerDown();}))
+    card_open_=false;card_.Discard();
+    if(available_ && receiver_ && card_.PowerDown(receiver_->Channel()))
         msg_warn("PIX-DT295: card power down failed\n");
 }
 
@@ -592,17 +540,13 @@ int Device::DetectCard(bool &detected){
     std::lock_guard<std::mutex> lock(card_mutex_);
     detected=false;
     if(!card_open_ || !available_ || !receiver_)return -ENODEV;
-    const int rc=receiver_->Card([&detected](CardUart &uart){return uart.Present(detected);});
-    // 抜去を検出したら、受信途中のATRやブロックを次のカードへ持ち越さない。
-    if(rc || !detected){card_response_.Reset();}
-    return rc;
+    return card_.Detect(receiver_->Channel(),detected);
 }
 
 int Device::ResetCard(){
     std::lock_guard<std::mutex> lock(card_mutex_);
     if(!card_open_ || !available_ || !receiver_)return -ENODEV;
-    card_response_.Reset();
-    return receiver_->Card([](CardUart &uart){return uart.Reset();});
+    return card_.Reset(receiver_->Channel());
 }
 
 int Device::SetCardBaudrate(std::uint32_t baudrate){
@@ -610,50 +554,28 @@ int Device::SetCardBaudrate(std::uint32_t baudrate){
     if(baudrate!=19200 && baudrate!=38400)return -ENOTSUP;
     std::lock_guard<std::mutex> lock(card_mutex_);
     if(!card_open_ || !available_ || !receiver_)return -ENODEV;
-    return receiver_->Card([baudrate](CardUart &uart){return uart.SetBaudrate(baudrate);});
+    return card_.SetBaudrate(receiver_->Channel(),baudrate);
 }
 
 int Device::IsCardDataReady(bool &ready) try {
     std::lock_guard<std::mutex> lock(card_mutex_);
     ready=false;
     if(!card_open_ || !available_ || !receiver_)return -ENODEV;
-    if(card_response_.Ready()){ready=true;return 0;}
-    // 1回に読むバイト数はCardUartが転送方式に合わせて区切り、TSのSERVICEを長く待たせない。
-    std::uint8_t bytes[CardUart::BulkChunk]{};std::size_t count=0;
-    const int rc=receiver_->Card([&](CardUart &uart){return uart.ReadBytes(bytes,sizeof(bytes),count);});
-    if(rc)return rc;
-    const int appended=card_response_.Append(bytes,count);
-    if(appended)return appended;
-    ready=card_response_.Ready();
-    return 0;
+    return card_.DataReady(receiver_->Channel(),ready);
 } catch(...) {return -ENOMEM;}
 
 int Device::ReadCardData(std::uint8_t *buf,std::uint8_t &len){
     std::lock_guard<std::mutex> lock(card_mutex_);
     if(!card_open_ || !available_)return -ENODEV;
     if(!buf || !len)return -EINVAL;
-    len=static_cast<std::uint8_t>(card_response_.Read(buf,len));
+    len=static_cast<std::uint8_t>(card_.Read(buf,len));
     return 0;
 }
 
 int Device::WriteCardData(const std::uint8_t *buf,std::uint8_t len){
     std::lock_guard<std::mutex> lock(card_mutex_);
     if(!card_open_ || !available_ || !receiver_)return -ENODEV;
-    if(!buf || !len)return -EINVAL;
-    // FIFOへの積み込みを区切り、各回の制御ロックの保持を短くする。送信開始は最後に1回だけ行う。
-    // 一括転送では32バイトが1往復、導入前の直接アクセスは1バイトごとに1回の転送になる。
-    constexpr std::size_t Chunk=CardUart::BulkChunk;
-    int rc=0;
-    for(std::size_t at=0;!rc && at<len;at+=Chunk){
-        const auto size=(std::min)(Chunk,std::size_t(len)-at);
-        rc=receiver_->Card([&](CardUart &uart){
-            int result=at?0:uart.BeginTransmit();
-            if(!result)result=uart.Queue(buf+at,size);
-            return result;
-        });
-    }
-    if(!rc)rc=receiver_->Card([len](CardUart &uart){return uart.Transmit(len);});
-    return rc;
+    return card_.Write(receiver_->Channel(),buf,len);
 }
 px4::ReceiverBase *Device::GetReceiver(int id) const {if(id)throw std::out_of_range("PIX-DT295 receiver index");return receiver_.get();}
 }

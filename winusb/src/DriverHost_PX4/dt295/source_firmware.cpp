@@ -1,15 +1,11 @@
 // SPDX-License-Identifier: GPL-2.0-only
 #include "source_firmware.hpp"
 #include "frontend_init.hpp"
-#include "../resource.h"
+#include "platform.hpp"
 #include "msg.h"
-#include <windows.h>
-#include <bcrypt.h>
 #include <algorithm>
 #include <cerrno>
 #include <string>
-
-#pragma comment(lib, "bcrypt.lib")
 
 namespace px4::dt295 {
 namespace {
@@ -59,8 +55,7 @@ Bytes Encode(uint32_t value, unsigned width = 4)
 std::string Digest(const Bytes &bytes)
 {
     std::array<uint8_t, 32> digest{};
-    if (BCryptHash(BCRYPT_SHA256_ALG_HANDLE, nullptr, 0, const_cast<PUCHAR>(bytes.data()),
-                   static_cast<ULONG>(bytes.size()), digest.data(), static_cast<ULONG>(digest.size())) < 0)
+    if (!platform::Sha256(bytes.data(), bytes.size(), digest))
         return {};
     constexpr char hex[] = "0123456789abcdef";
     std::string result;
@@ -80,14 +75,10 @@ int SourceFirmware::Failure(const char *stage, int code) const
 
 int SourceFirmware::LoadEmbedded()
 {
-    const auto module = GetModuleHandleW(nullptr);
-    const auto id = direct_ ? IDR_DT295_DIRECT_FIRMWARE : IDR_DT295_SOURCE_FIRMWARE;
-    const auto resource = FindResourceW(module, MAKEINTRESOURCEW(id), RT_RCDATA);
-    if (!resource)
+    const uint8_t *bytes = nullptr;
+    size_t size = 0;
+    if (!platform::EmbeddedBundle(direct_, bytes, size))
         return Failure("embedded bundle", -ENOENT);
-    const auto handle = LoadResource(module, resource);
-    const auto *bytes = handle ? static_cast<const uint8_t *>(LockResource(handle)) : nullptr;
-    const auto size = SizeofResource(module, resource);
     if (!bytes || size < 16 || size > 32768)
         return Failure("bundle size", -EINVAL);
     // DTP3/4はDriverHostの組み込み初期化列を使う。
@@ -630,6 +621,55 @@ bool SourceFirmware::IsLocked()
     return !(status & 0x28) && (I2c(Gr, {0xb0}, 1)[0] & 15) >= 8;
 }
 
+int SourceFirmware::SatelliteTuneRelative(uint32_t khz, uint32_t index)
+{
+    // driver/isdb2056_device.c がTC90532XBGへ行う手順と同じく、TSIDを0のまま周波数を合わせ、
+    // 搬送波のロック (0xc3 bit4) を待ってから、TMCCのTSID一覧 (0xceから2 bytesずつ) を読む。
+    // IsLocked()は0xe6とtsid_の一致を条件に含むため、TSIDが決まるまでは0xc3だけで判定する。
+    const char *backend = direct_ ? "direct-fr" : "source-fr";
+    SatelliteTune(khz, 0);
+    const auto start = io_.now_ms(io_.opaque);
+    while (I2c(Sat, {0xc3}, 1)[0] & 0x10) {
+        if (io_.now_ms(io_.opaque) - start >= 4000) {
+            msg_info("PIX-DT295 %s: no lock system=ISDB-S IF_kHz=%u relative=%u\n", backend, khz, index);
+            return -ENOLINK;
+        }
+        Delay(100);
+    }
+    // ロック直後のTMCCは0を返すことがあるため、Linux版と同じく10 ms間隔で最大1秒読み直す。
+    // PIX-DT295では使われていない番号が0xffffと読める (BS15で 40f1 40f2 48f3 ffff ...)。
+    // 0xffffをTSIDとして書くと0xe6も0xffffを返して選局が成功してしまうため、0と同じく存在しない番号として扱う。
+    uint32_t tsid = 0;
+    for (int i = 0; i < 100; ++i) {
+        tsid = Be(I2c(Sat, {static_cast<uint8_t>(0xce + index * 2)}, 2).data(), 2);
+        if (tsid && tsid != 0xffff)
+            break;
+        Delay(10);
+    }
+    // 一覧は選局の切り分けに使うためログへ残す。実機で確認済みの2 bytesずつの読み出しを使う。
+    uint32_t table[RelativeStreamCount];
+    for (uint32_t i = 0; i < RelativeStreamCount; ++i)
+        table[i] = Be(I2c(Sat, {static_cast<uint8_t>(0xce + i * 2)}, 2).data(), 2);
+    msg_info("PIX-DT295 %s: TMCC TSID IF_kHz=%u relative=%u table=%04x %04x %04x %04x %04x %04x %04x %04x\n",
+        backend, khz, index, table[0], table[1], table[2], table[3], table[4], table[5], table[6], table[7]);
+    // 存在しない相対TS番号は、PX4系、ISDB2056系の受信機と同じく-EAGAINを返す。
+    if (!tsid || tsid == 0xffff)
+        return -EAGAIN;
+    Reg(Sat, 0x8f, static_cast<uint8_t>(tsid >> 8));
+    Reg(Sat, 0x90, static_cast<uint8_t>(tsid));
+    tsid_ = tsid;
+    for (int i = 0; i < 100; ++i) {
+        if (IsLocked()) {
+            tuned_ = true;
+            msg_info("PIX-DT295 %s: locked system=ISDB-S IF_kHz=%u relative=%u TSID=%u\n", backend, khz, index, tsid);
+            return 0;
+        }
+        Delay(10);
+    }
+    msg_info("PIX-DT295 %s: TSID not selected IF_kHz=%u relative=%u TSID=%u\n", backend, khz, index, tsid);
+    return -EAGAIN;
+}
+
 int SourceFirmware::Tune(bool satellite, uint32_t khz, uint32_t tsid)
 {
     // 地デジはUHF 13〜62chの中心周波数を受け付ける。上限の770 MHzと700 MHz以上のRF設定はpix-userlandの
@@ -644,6 +684,10 @@ int SourceFirmware::Tune(bool satellite, uint32_t khz, uint32_t tsid)
             if (!satellite_)
                 TerrestrialSleep();
             satellite_ = true;
+            if (tsid < RelativeStreamCount) {
+                tsid_ = 0;
+                return SatelliteTuneRelative(khz, tsid);
+            }
             SatelliteTune(khz, static_cast<uint16_t>(tsid));
         } else {
             if (satellite_)

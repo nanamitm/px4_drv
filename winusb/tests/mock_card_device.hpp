@@ -255,6 +255,12 @@ public:
 			QueueBlock(response_pcb, max_inf.data(), max_inf.size());
 			return 0;
 		}
+		if (zero_frame_response) {
+			zero_frame_response = false;
+			/* 抜去の途中に UART が読んだ 00 だけの4バイト (空の I ブロックと同じ形) を返す */
+			QueueBytes({ 0x00, 0x00, 0x00, 0x00 });
+			return 0;
+		}
 		const std::uint8_t response[] = { 0x90, 0x00 };
 		last_response_pcb = response_pcb;
 		last_response.assign(response, response + sizeof(response));
@@ -333,6 +339,7 @@ public:
 	bool large_duplicate_response = false;
 	bool max_duplicate_response = false;
 	bool lose_final_response = false;
+	bool zero_frame_response = false;
 	bool final_response_lost = false;
 	unsigned int cached_resend_count = 0;
 	std::uint8_t response_sequence = 0;

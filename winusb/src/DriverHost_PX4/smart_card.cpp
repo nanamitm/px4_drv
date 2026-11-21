@@ -853,8 +853,13 @@ int SmartCard::TransmitInitialized(const std::uint8_t *send_buf,
 		recv_len += last_data.size();
 		receive_sequence_ ^= 1;
 
+		/*
+		 * 応答 APDU は必ず SW1 SW2 の2バイトで終わる
+		 * 抜去の途中に UART が 00 だけを読むと、NAD・PCB・LEN・LRC がすべて 0 の空の I ブロックとして
+		 * 検査を通るため、2バイトに満たない応答は成功にせず、次の APDU で再初期化させる
+		 */
 		if (!(last_pcb & T1_I_CHAIN))
-			return 0;
+			return recv_len < 2 ? -EPROTO : 0;
 
 		std::uint8_t r_pcb = T1_R_BLOCK |
 			(receive_sequence_ ? T1_R_SEQUENCE : 0);

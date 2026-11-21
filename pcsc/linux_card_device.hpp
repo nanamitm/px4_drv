@@ -26,10 +26,14 @@ private:
 	int fd_ = -1;
 };
 
-/* 同じ機種を複数台つないだときに VID と PID だけでは区別できないため、sysfs で USB のバス番号とデバイス番号まで照合する */
+/*
+ * 同じ機種を複数台つないだときに VID と PID だけでは区別できないため、sysfs で USB のバス番号とデバイス番号まで照合する
+ * PIX-DT295 のカードは CUSE のデーモン (cuse/) が作り、USB 機器を親に持たないため、デーモンが書く対応表 (readers) で照合する
+ */
 int ResolveCardDevice(const std::string &name, std::string &path,
 		      const std::string &sysfs = "/sys/class/px4card",
 		      const std::string &devdir = "/dev",
-		      const std::string &usbsys = "/sys/bus/usb/devices");
+		      const std::string &usbsys = "/sys/bus/usb/devices",
+		      const std::string &readers = "/run/px4-dt295/readers");
 
 } // namespace px4

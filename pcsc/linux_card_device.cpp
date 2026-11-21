@@ -164,7 +164,7 @@ static bool LacksCardSlot(unsigned int vendor, unsigned int product,
 
 int ResolveCardDevice(const std::string &name, std::string &path,
 		      const std::string &sysfs, const std::string &devdir,
-		      const std::string &usbsys)
+		      const std::string &usbsys, const std::string &readers)
 {
 	if (!name.empty() && name[0] == '/') {
 		path = name;
@@ -205,6 +205,26 @@ int ResolveCardDevice(const std::string &name, std::string &path,
 				return 0;
 			}
 		}
+	}
+	/*
+	 * CUSE のデーモン (px4-dt295d) が作るカードのデバイスは sysfs で USB 機器をたどれないため、
+	 * デーモンが書く「バス番号 デバイス番号 パス」の行で照合する。表にない間は、デーモンの登録を待つ ENODEV にする
+	 */
+	std::ifstream table(readers);
+	std::string line;
+	while (std::getline(table, line)) {
+		unsigned int b, d;
+		char device_path[256];
+		if (line.empty() || line[0] == '#' ||
+		    std::sscanf(line.c_str(), "%u %u %255s", &b, &d, device_path) != 3 || b != bus || d != device)
+			continue;
+		const std::filesystem::path card(device_path);
+		/* 表の内容でも /dev/px4card/ の外のファイルは開かない */
+		if (!card.is_absolute() || card.parent_path() != std::filesystem::path(devdir) / "px4card" ||
+		    card.filename() == "..")
+			return -EINVAL;
+		path = card.string();
+		return 0;
 	}
 	/* 登録を待つ ENODEV と区別し、カードリーダーを持たない側は ENXIO ですぐに失敗させる */
 	return LacksCardSlot(vendor, product, bus, device, usbsys) ? -ENXIO : -ENODEV;

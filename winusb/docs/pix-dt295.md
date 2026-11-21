@@ -89,7 +89,7 @@ python winusb/experimental/dt295-firmware/extract_init_trace.py winusb/pkg/Drive
 python winusb/experimental/dt295-firmware/build_host_bundle.py $auxiliaryBuild $bulkBuild $initTrace dt295-source-fr-dtp1.bin
 ```
 
-BonDriverの選局・TS配信は既存のIPCを使います。衛星選局時には明示TSIDが必要です。`CheckLock` は選局完了時の検証結果を返します。RF状態の継続監視、内蔵B-CAS、アンテナ給電はこの経路の対象外です。CloseはTSエンジンを停止してからRAMとシステム設定を復元します。TSリングのSDRAMは復元の対象外で、理由は [TSリング](#tsリング) にあります。復元が完了しなかった場合はログに記録され、USBの電源再投入が必要です。
+BonDriverの選局・TS配信は既存のIPCを使います。衛星選局のTSIDには、TSIDそのものか、0〜7の相対TS番号を指定できます。相対TS番号はPX4系の受信機と同じく、復調器のTMCCが示すTSIDの一覧の位置で、存在しない番号の選局は失敗します。`CheckLock` は選局完了時の検証結果を返します。RF状態の継続監視、内蔵B-CAS、アンテナ給電はこの経路の対象外です。CloseはTSエンジンを停止してからRAMとシステム設定を復元します。TSリングのSDRAMは復元の対象外で、理由は [TSリング](#tsリング) にあります。復元が完了しなかった場合はログに記録され、USBの電源再投入が必要です。
 
 初期実装（コミット `4089042`、DTP1バンドル）の試験では、Windows x64の隔離環境で、同じBonDriverのOpen中にGR13 → BS01 → CS02 → GR13を各6秒受信し、保存TSのPATでTSID 31761 → 16400 → 24608 → 31761を確認しました。各保存TSの同期・TEI・CC・形式異常は0件でした。DriverHostの一部の区間では192-byte入力の再同期が1件記録されました。Close後にUSB抜き差しなしで再Openし、BS01とCS02を各4秒受信して再度復元を確認しました。初回選局は約28～29秒、以降の切り替えは約4.5～5.3秒、終了時の復元は約31～33秒でした。
 

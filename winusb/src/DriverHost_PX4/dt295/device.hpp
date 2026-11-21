@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 #pragma once
 #include "../device_base.hpp"
-#include "card_response.hpp"
+#include "control_channel.hpp"
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
@@ -34,7 +34,7 @@ private:
     // ATRとT=1ブロックの受信途中の状態。抜去・リセット・Closeで一括して破棄する。
     std::mutex card_mutex_;
     bool card_reader_=false,card_open_=false;
-    CardResponse card_response_;
+    CardSession card_;
     std::atomic_bool available_{true};
     HANDLE removed_=nullptr;
     bool registered_=false;
