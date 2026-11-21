@@ -173,6 +173,11 @@ foreach ($build_platform in $build_platforms) {
     if ($LASTEXITCODE -ne 0) { throw "Native torne frontend test build failed. platform: $build_platform" }
     & "build/$build_platform/Release-static/torne_native_frontend_test.exe"
     if ($LASTEXITCODE -ne 0) { throw "Native torne frontend test failed. platform: $build_platform" }
+    # Go の模擬バスが作った正解の記録 (tests/data/torne_native) と、生成した C++ の I2C の要求列を Go なしで比べる。
+    $torne_trace_dir = "build/torne-native-golden/$build_platform"
+    New-Item -ItemType Directory -Force $torne_trace_dir | Out-Null
+    & "build/$build_platform/Release-static/torne_native_frontend_test.exe" --golden tests/data/torne_native $torne_trace_dir
+    if ($LASTEXITCODE -ne 0) { throw "Native torne frontend golden trace comparison failed. platform: $build_platform" }
 
     # torne_session_test は Linux 版のデーモンと共有する制御 (torne/session.cpp) を模擬の機器で確かめる。
     foreach ($torne_test in @('torne_foundation_test', 'torne_bootstrap_test', 'torne_session_test')) {

@@ -13,6 +13,8 @@ root=winusb.parent.parent
 parser=argparse.ArgumentParser()
 parser.add_argument('--arch',choices=('x86','x64'),default='x64')
 parser.add_argument('--regenerate',action='store_true')
+# Go が作る正解の記録を tests/data/torne_native へ書き戻す。build.ps1 と Linux の make check は、この記録で Go なしに比べる。
+parser.add_argument('--update-golden',action='store_true')
 args=parser.parse_args()
 build=winusb/'build/torne-native'/args.arch
 build.mkdir(parents=True,exist_ok=True)
@@ -51,5 +53,13 @@ for mode in ('locked','nosignal','timeout','unknown','iofail','waitfail','cband'
         print('FAIL:',args.arch,mode)
         print('\n'.join(list(difflib.unified_diff(expected,actual,fromfile='Go',tofile='C++'))[:75]))
     else:print('PASS:',args.arch,mode,len(actual),'identical I2C/wait/result events')
+golden=winusb/'tests/data/torne_native'
+for mode in ('locked','nosignal','timeout','unknown','iofail','waitfail','cband','jobs','retune'):
+    fresh=(build/(mode+'.go.trace')).read_text().splitlines()
+    stored=golden/(mode+'.go.trace')
+    if args.update_golden:
+        golden.mkdir(parents=True,exist_ok=True);stored.write_text(chr(10).join(fresh)+chr(10),newline=chr(10))
+    elif not stored.is_file() or stored.read_text().splitlines()!=fresh:
+        failed=True;print('FAIL: stale golden trace (run with --update-golden):',stored)
 if failed:raise SystemExit(1)
-print('PASS: native frontend comparison. No USB device was opened.')
+print('PASS: native frontend comparison and golden traces. No USB device was opened.')
