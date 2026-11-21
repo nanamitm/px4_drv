@@ -109,7 +109,7 @@ PLEX PX-S1UD（USB ID `3275:0080`）向けに、WinUSB を直接使う地デジ1
   - 導入方法は [cuse/README.md](cuse/README.md)、設計と検証範囲は [PIX-DT295](docs/20261120_dt295_linux_cuse_design.md) と [CECH-ZD1J](docs/20261121_torne_linux_cuse_design.md) の設計文書を参照
 - I-O DATA GV-MVP/XZ3 (`04bb:0530`) に実験的に対応
   - `px4-cused` が `/dev/xz3videoN` と内蔵カードリーダーを作る。中継プログラムは WinUSB 版と同じく実行ファイルに組み込み
-  - x86_64 の PC で地デジ・BS・110度CS の受信と、110度CS の2時間の受信を確認済み。Raspberry Pi 4 の受信、地デジ・BS の長時間受信、内蔵カードリーダーは未確認
+  - x86_64 の PC で地デジ・BS・110度CS の受信と110度CS の2時間の受信、Raspberry Pi 4 で受信と内蔵カードリーダー (受信中の APDU を含む) を確認済み。地デジ・BS の長時間受信は未確認
   - XZ3 は電源投入後に TS の取り込みが壊れた状態で始まることがあり (WinUSB 版でも同じ)、その場合は受信を失敗にして USB の挿し直しを求める。詳細は [設計文書](docs/20261121_gv_mvp_xz3_linux_cuse_design.md) を参照
 - 各機種の内蔵 B-CAS カードリーダーを利用するためのドライバを追加 (v0.7.0 以降)
   - 別途 `px4-drv-pcsc` ドライバをインストールすることで、pcscd から内蔵カードリーダーを認識・利用できるようになる
