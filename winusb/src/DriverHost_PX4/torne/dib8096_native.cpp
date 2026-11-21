@@ -59,7 +59,7 @@ public:
         if(master_.v_gate!=address){
             m_i2cMaster_selectInterface(&master_,v_interfaceTuner);
             m_dib8000_writeWord(master_.v_demod,static_cast<std::uint16_t>(master_.v_baseRegister+1),m_i2cMaster_gateControl(&master_,address>>1,true));
-            if(master_.v_demod->v_failure->v_err)return {{},master_.v_demod->v_failure->v_err};
+            if(master_.v_demod->v_failure->v_err)return {Slice<std::uint8_t>(),master_.v_demod->v_failure->v_err};
             master_.v_gate=address;
         }
         return parent_.WriteRead(address,write,length);
