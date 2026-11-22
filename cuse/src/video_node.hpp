@@ -4,6 +4,7 @@
 #include <sys/ioctl.h>
 #include "ptx_ioctl.h"
 #include <atomic>
+#include <cerrno>
 #include <chrono>
 #include <cstdint>
 #include <deque>
@@ -26,6 +27,11 @@ public:
     // PTX_SET_SYSTEM_MODE で受け付ける方式か。
     virtual bool AcceptsSystem(std::uint32_t system) const = 0;
     virtual int SetChannel(std::uint32_t system, const ptx_freq &freq, bool streaming, bool &fatal) = 0;
+    // 拡張 ioctl (PTXT_SET_PARAMS) で受け付ける方式か。カーネルの ptx_chrdev_set_params() と同じく、
+    // 既存の PTX_SET_CHANNEL で選べない ISDB-C と J.83B だけが対象で、対応しない機種は false のまま
+    virtual bool AcceptsParams(std::uint32_t) const { return false; }
+    // PTXT_TUNE。PTXT_SET_PARAMS で受け付けた方式と中心周波数 (kHz) で選局し、ロックを待つ
+    virtual int TuneParams(std::uint32_t, std::uint32_t, bool, bool &) { return -ENOSYS; }
     // 選局済みの状態でロックを返す。
     virtual int LockStatus(bool &locked) = 0;
     // PTX_GET_CNR の値 (TC90522 の CNDAT 相当)。VideoNode が 1 秒に 1 回へ間引く。
@@ -84,6 +90,8 @@ private:
     static const cuse_lowlevel_ops ops_;
 
     int SetChannel(const ptx_freq &freq);
+    int SetParams(const ptxt_params &params);
+    int TuneParams();
     int ReadCn(std::uint32_t &raw);
     // state_mutex_ を保持して呼ぶ。
     int StartStreamLocked();
@@ -101,6 +109,8 @@ private:
     std::mutex state_mutex_;
     bool open_ = false, tuned_ = false, streaming_ = false, failed_ = false;
     std::uint32_t system_ = 0;
+    // PTXT_SET_PARAMS で受け付けた方式と中心周波数 (kHz)。params_system_ が 0 なら未設定
+    std::uint32_t params_system_ = 0, params_khz_ = 0;
     bool cn_cached_ = false;
     std::uint32_t cn_raw_ = 0;
     Clock::time_point cn_read_at_{};

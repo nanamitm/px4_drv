@@ -124,6 +124,8 @@ void VideoNode::OnOpen(fuse_req_t req, struct fuse_file_info *fi)
     self.failed_ = self.tuned_ = false;
     self.cn_cached_ = false;
     self.system_ = PTX_UNSPECIFIED_SYSTEM;
+    // カーネルの ptx_chrdev_release() と同じく、J.83B などの拡張 ioctl の方式を次の利用者へ持ち越さない
+    self.params_system_ = self.params_khz_ = 0;
     {
         std::lock_guard<std::mutex> ring(self.ring_mutex_);
         self.head_ = self.fill_ = 0;
@@ -350,10 +352,54 @@ void VideoNode::OnIoctl(fuse_req_t req, int cmd, void *arg, struct fuse_file_inf
         }
         return;
     }
+    case PTXT_SET_PARAMS: {
+        if (in_size < sizeof(ptxt_params)) {
+            struct iovec iov = {arg, sizeof(ptxt_params)};
+            fuse_reply_ioctl_retry(req, &iov, 1, nullptr, 0);
+            return;
+        }
+        ptxt_params params;
+        std::memcpy(&params, in, sizeof(params));
+        ReplyResult(req, self.SetParams(params));
+        return;
+    }
+    case PTXT_TUNE:
+        ReplyResult(req, self.TuneParams());
+        return;
     default:
         fuse_reply_err(req, ENOSYS);
         return;
     }
+}
+
+int VideoNode::SetParams(const ptxt_params &params)
+{
+    std::lock_guard<std::mutex> state(state_mutex_);
+    // カーネルの ptx_chrdev_set_params() と同じ検査。追加パラメーターは ISDB-C の TSMF の TS 番号だけで、
+    // CUSE の機種は ISDB-C を扱わないため、配列を読まずに 0 個以外を断る
+    if (!params.system || !backend_.AcceptsParams(params.system) || !params.freq || params.reserved ||
+        params.num_prop)
+        return -EINVAL;
+    params_system_ = params.system;
+    params_khz_ = params.freq;
+    return 0;
+}
+
+int VideoNode::TuneParams()
+{
+    std::lock_guard<std::mutex> state(state_mutex_);
+    if (failed_)
+        return -EIO;
+    if (!params_system_)
+        return -EINVAL;
+    tuned_ = false;
+    cn_cached_ = false;
+    bool fatal = false;
+    const int rc = backend_.TuneParams(params_system_, params_khz_, streaming_, fatal);
+    if (fatal)
+        failed_ = true;
+    tuned_ = rc == 0;
+    return rc;
 }
 
 int VideoNode::SetChannel(const ptx_freq &freq)
