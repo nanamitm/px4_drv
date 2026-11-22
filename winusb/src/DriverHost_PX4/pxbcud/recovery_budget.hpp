@@ -43,7 +43,8 @@ public:
     std::chrono::milliseconds Backoff() const noexcept
     {
         if (consecutive_<=1) return std::chrono::milliseconds::zero();
-        const auto wait=BackoffStep*static_cast<long long>(consecutive_-1);
+        // 積の表現型は処理系で異なる (Linux の GCC では long) ため、戻り値の型へ揃えてから比べる。
+        const std::chrono::milliseconds wait=BackoffStep*static_cast<long long>(consecutive_-1);
         return wait<BackoffMax?wait:BackoffMax;
     }
     std::size_t Consecutive() const noexcept {return consecutive_;}
