@@ -1,9 +1,11 @@
 // SPDX-License-Identifier: GPL-2.0-only
 // px4-cused: libusb で機器を動かし、受信とカードのデバイスファイルを CUSE で公開するデーモン。
 // 対応機種は PIX-DT295 (docs/20261120_dt295_linux_cuse_design.md) と
-// Sony torne CECH-ZD1J (docs/20261121_torne_linux_cuse_design.md)。
+// Sony torne CECH-ZD1J (docs/20261121_torne_linux_cuse_design.md)、I-O DATA GV-MVP/XZ3
+// (docs/20261121_gv_mvp_xz3_linux_cuse_design.md)、PLEX PX-BCUD (docs/20261122_px_bcud_linux_cuse_design.md)。
 #include "cuse_session.hpp"
 #include "dt295_device.hpp"
+#include "pxbcud_device.hpp"
 #include "torne_device.hpp"
 #include "xz3_device.hpp"
 #include "msg.h"
@@ -34,6 +36,8 @@ struct Model {
     std::uint16_t vendor, product;
     const char *name;
     std::shared_ptr<Device> (*make)(libusb_device_handle *, std::uint8_t, std::uint8_t, std::function<void()>);
+    // Linux の本体のドライバーが既定で interface 0 を取る機種。開くときに外し、閉じるときに戻す。
+    bool detach_kernel_driver;
 };
 
 template <class T>
@@ -44,9 +48,11 @@ std::shared_ptr<Device> Make(libusb_device_handle *handle, std::uint8_t bus, std
 }
 
 const Model Models[] = {
-    {Dt295Device::Vendor, Dt295Device::Product, "PIX-DT295", Make<Dt295Device>},
-    {TorneDevice::Vendor, TorneDevice::Product, "CECH-ZD1J", Make<TorneDevice>},
-    {Xz3Device::Vendor, Xz3Device::Product, "GV-MVP/XZ3", Make<Xz3Device>},
+    {Dt295Device::Vendor, Dt295Device::Product, "PIX-DT295", Make<Dt295Device>, false},
+    {TorneDevice::Vendor, TorneDevice::Product, "CECH-ZD1J", Make<TorneDevice>, false},
+    {Xz3Device::Vendor, Xz3Device::Product, "GV-MVP/XZ3", Make<Xz3Device>, false},
+    // PX-BCUD は Linux の本体の em28xx (DVB) が対応機種として取る (docs/20261122_px_bcud_linux_cuse_design.md)。
+    {PxBcudDevice::Vendor, PxBcudDevice::Product, "PX-BCUD", Make<PxBcudDevice>, true},
 };
 
 // 機器の追加と削除、デバイスファイルの解放、終了の要求を、1 つのスレッドで順に処理する。
@@ -102,9 +108,21 @@ public:
             msg_err("%s %03d:%03d: open failed (%s)\n", model.name, bus, address, libusb_error_name(rc));
             return;
         }
+        bool detached = false;
+        if (model.detach_kernel_driver && libusb_kernel_driver_active(handle, 0) == 1) {
+            if (int rc = libusb_detach_kernel_driver(handle, 0))
+                msg_err("%s %03d:%03d: kernel driver detach failed (%s)\n", model.name, bus, address,
+                        libusb_error_name(rc));
+            else {
+                detached = true;
+                msg_info("%s %03d:%03d: kernel driver detached\n", model.name, bus, address);
+            }
+        }
         if (int rc = libusb_claim_interface(handle, 0)) {
             // カーネルのドライバや別のプロセスが機器を使っている場合 (torne_drv のカーネルモジュールなど)。
             msg_err("%s %03d:%03d: claim failed (%s)\n", model.name, bus, address, libusb_error_name(rc));
+            if (detached)
+                libusb_attach_kernel_driver(handle, 0);
             libusb_close(handle);
             return;
         }
@@ -114,9 +132,12 @@ public:
                                 [this, usb] { Post([this, usb] { Released(usb); }); });
         } catch (...) {
             libusb_release_interface(handle, 0);
+            if (detached)
+                libusb_attach_kernel_driver(handle, 0);
             libusb_close(handle);
             return;
         }
+        device->kernel_driver_detached = detached;
         if (const int rc = device->Init()) {
             msg_err("%s: initialization result=%d\n", device->Label().c_str(), rc);
             Close(*device);
@@ -176,6 +197,14 @@ private:
     static void Close(Device &device)
     {
         libusb_release_interface(device.Handle(), 0);
+        // 外したカーネルのドライバーを戻し、デーモンを止めた後は DVB などのほかの使い方ができる状態にする。
+        if (device.kernel_driver_detached && !device.Removed()) {
+            const int rc = libusb_attach_kernel_driver(device.Handle(), 0);
+            if (rc)
+                msg_err("%s: kernel driver reattach failed (%s)\n", device.Label().c_str(), libusb_error_name(rc));
+            else
+                msg_info("%s: kernel driver reattached\n", device.Label().c_str());
+        }
         libusb_close(device.Handle());
     }
 

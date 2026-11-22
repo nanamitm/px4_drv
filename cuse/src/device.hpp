@@ -59,6 +59,8 @@ public:
     libusb_device_handle *Handle() const { return handle_; }
     std::uint8_t Bus() const { return bus_; }
     std::uint8_t Address() const { return address_; }
+    // 開くときにカーネルのドライバー (PX-BCUD の em28xx) を interface 0 から外した。閉じるときに戻す。
+    bool kernel_driver_detached = false;
 
 protected:
     // 機種ごとの確認。card_id_ を設定できない機種ではカードのデバイスファイルを作らない。

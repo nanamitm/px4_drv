@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-2.0-only
-# px4-cused: PIX-DT295、Sony torne CECH-ZD1J、I-O DATA GV-MVP/XZ3 の CUSE デーモン。
+# px4-cused: PIX-DT295、Sony torne CECH-ZD1J、I-O DATA GV-MVP/XZ3、PLEX PX-BCUD の CUSE デーモン。
 # WinUSB 版と共有するコードは winusb/src/DriverHost_PX4 から参照する。
 CC ?= cc
 CXX ?= c++
@@ -10,6 +10,7 @@ SHARED := $(ROOT)/winusb/src/DriverHost_PX4
 DT295 := $(SHARED)/dt295
 TORNE := $(SHARED)/torne
 XZ3 := $(SHARED)/xz3
+PXBCUD := $(SHARED)/pxbcud
 UPSTREAM := $(DT295)/upstream
 FIRMWARE := $(ROOT)/winusb/pkg/DriverHost_PX4/firmware
 
@@ -35,14 +36,16 @@ TORNE_OBJS := $(BUILD)/torne/session.o $(BUILD)/torne/frontend_native_client.o $
 	$(BUILD)/torne/mb86h47_bootstrap.o $(BUILD)/torne/mb86h47_i2c.o $(BUILD)/torne/mb86h47_stream.o
 # GV-MVP/XZ3 の共有コード。xz3/card_uart.cpp は dt295/card_uart.cpp と名前が重なるため、出力先を分ける。
 XZ3_OBJS := $(BUILD)/xz3/session.o $(BUILD)/xz3/frontend.o $(BUILD)/xz3/card_uart.o
+# PX-BCUD の共有コード。xz3/frontend.cpp と名前が重なるため、出力先を分ける。
+PXBCUD_OBJS := $(BUILD)/pxbcud/frontend.o
 PLATFORM_OBJS := $(BUILD)/platform_linux.o $(BUILD)/firmware.o
 DAEMON_OBJS := $(BUILD)/main.o $(BUILD)/device.o $(BUILD)/video_node.o $(BUILD)/card_node.o \
-	$(BUILD)/dt295_device.o $(BUILD)/torne_device.o $(BUILD)/torne_port.o $(BUILD)/xz3_device.o \
+	$(BUILD)/dt295_device.o $(BUILD)/torne_device.o $(BUILD)/torne_port.o $(BUILD)/xz3_device.o $(BUILD)/pxbcud_device.o \
 	$(BUILD)/cuse_session.o $(BUILD)/usb_transport.o $(BUILD)/log.o
 
 all: $(BUILD)/px4-cused
 
-$(BUILD) $(BUILD)/shared $(BUILD)/upstream $(BUILD)/torne $(BUILD)/torne-trace $(BUILD)/xz3:
+$(BUILD) $(BUILD)/shared $(BUILD)/upstream $(BUILD)/torne $(BUILD)/torne-trace $(BUILD)/xz3 $(BUILD)/pxbcud:
 	mkdir -p $@
 
 $(BUILD)/upstream/%.o: $(UPSTREAM)/core/%.c | $(BUILD)/upstream
@@ -61,6 +64,9 @@ $(BUILD)/torne/%.o: $(TORNE)/%.cpp $(TORNE)/*.hpp | $(BUILD)/torne
 $(BUILD)/xz3/%.o: $(XZ3)/%.cpp $(XZ3)/*.hpp | $(BUILD)/xz3
 	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -c $< -o $@
 
+$(BUILD)/pxbcud/%.o: $(PXBCUD)/%.cpp $(PXBCUD)/*.hpp | $(BUILD)/pxbcud
+	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -c $< -o $@
+
 $(BUILD)/%.o: src/%.cpp src/*.hpp | $(BUILD)
 	$(CXX) $(CPPFLAGS) $(DEPS_CFLAGS) $(CXXFLAGS) -c $< -o $@
 
@@ -69,7 +75,7 @@ $(BUILD)/firmware.o: src/firmware.S $(FIRMWARE)/dt295-direct-fr.bin $(FIRMWARE)/
 		$(FIRMWARE)/xz3-bootstrap.bin $(FIRMWARE)/xz3-runtime.bin $(FIRMWARE)/xz3-hook.bin | $(BUILD)
 	$(CC) -c -Wa,-I$(FIRMWARE) $< -o $@
 
-$(BUILD)/px4-cused: $(DAEMON_OBJS) $(SHARED_OBJS) $(TORNE_OBJS) $(XZ3_OBJS) $(PLATFORM_OBJS) $(UPSTREAM_OBJS)
+$(BUILD)/px4-cused: $(DAEMON_OBJS) $(SHARED_OBJS) $(TORNE_OBJS) $(XZ3_OBJS) $(PXBCUD_OBJS) $(PLATFORM_OBJS) $(UPSTREAM_OBJS)
 	$(CXX) $(CXXFLAGS) $(LDFLAGS) $^ $(DEPS_LIBS) -o $@
 
 # 自動試験 (USB と CUSE を使わない)
@@ -97,8 +103,16 @@ $(BUILD)/xz3_card_test: $(ROOT)/winusb/tests/xz3_card_test.cpp $(BUILD)/xz3/card
 $(BUILD)/xz3_stream_test: $(ROOT)/winusb/tests/xz3_stream_test.cpp | $(BUILD)
 	$(CXX) $(CPPFLAGS) $(CXXFLAGS) $< -o $@
 
+# PX-BCUD の共有コード (WinUSB 版と同じ試験) と、isochronous のパケットから TS を組み立てる処理
+$(BUILD)/pxbcud_frontend_test: $(ROOT)/winusb/tests/pxbcud_frontend_test.cpp $(PXBCUD_OBJS)
+	$(CXX) $(CPPFLAGS) $(CXXFLAGS) $^ -o $@
+
+$(BUILD)/pxbcud_stream_test: tests/pxbcud_stream_test.cpp src/pxbcud_stream.hpp $(PXBCUD)/*.hpp | $(BUILD)
+	$(CXX) $(CPPFLAGS) $(CXXFLAGS) $< -o $@
+
 check: $(BUILD)/control_channel_test $(BUILD)/channel_test $(BUILD)/platform_test $(BUILD)/torne_session_test \
-		$(BUILD)/torne_native_frontend_test $(BUILD)/xz3_card_test $(BUILD)/xz3_stream_test | $(BUILD)/torne-trace
+		$(BUILD)/torne_native_frontend_test $(BUILD)/xz3_card_test $(BUILD)/xz3_stream_test \
+		$(BUILD)/pxbcud_frontend_test $(BUILD)/pxbcud_stream_test | $(BUILD)/torne-trace
 	$(BUILD)/control_channel_test
 	$(BUILD)/channel_test
 	$(BUILD)/platform_test
@@ -107,6 +121,8 @@ check: $(BUILD)/control_channel_test $(BUILD)/channel_test $(BUILD)/platform_tes
 	$(BUILD)/torne_native_frontend_test --golden $(ROOT)/winusb/tests/data/torne_native $(BUILD)/torne-trace
 	$(BUILD)/xz3_card_test
 	$(BUILD)/xz3_stream_test
+	$(BUILD)/pxbcud_frontend_test
+	$(BUILD)/pxbcud_stream_test
 
 install: $(BUILD)/px4-cused
 	install -D -m 0755 $(BUILD)/px4-cused $(DESTDIR)$(SBINDIR)/px4-cused

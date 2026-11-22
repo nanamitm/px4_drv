@@ -1,6 +1,6 @@
-# px4-cused (PIX-DT295、Sony torne CECH-ZD1J、I-O DATA GV-MVP/XZ3 の Linux 版)
+# px4-cused (PIX-DT295、Sony torne CECH-ZD1J、I-O DATA GV-MVP/XZ3、PLEX PX-BCUD の Linux 版)
 
-PIXELA PIX-DT295 (USB ID `06b8:103b`)、Sony torne CECH-ZD1J (USB ID `054c:04b2`)、I-O DATA GV-MVP/XZ3 (USB ID `04bb:0530`) を Linux で使うためのユーザー空間のデーモンです。  
+PIXELA PIX-DT295 (USB ID `06b8:103b`)、Sony torne CECH-ZD1J (USB ID `054c:04b2`)、I-O DATA GV-MVP/XZ3 (USB ID `04bb:0530`)、PLEX PX-BCUD (USB ID `3275:0085`) を Linux で使うためのユーザー空間のデーモンです。  
 libusb で機器を動かし、CUSE (Character device in Userspace) で次のデバイスファイルを作ります。
 
 | デバイスファイル | 機種 | 利用者 | 契約 |
@@ -8,6 +8,7 @@ libusb で機器を動かし、CUSE (Character device in Userspace) で次のデ
 | `/dev/dt295videoN` | PIX-DT295 (地デジ・BS・110度CS) | recpt1、BonDriverProxy_Linux、Mirakurun など | カーネルモジュールの `ptx_chrdev` と同じ PTX の ioctl、`read`、`poll` |
 | `/dev/tornevideoN` | CECH-ZD1J (地デジ UHF 13〜62ch) | 同上 | 同上 |
 | `/dev/xz3videoN` | GV-MVP/XZ3 (地デジ・BS・110度CS) | 同上 | 同上 |
+| `/dev/pxbcudvideoN` | PX-BCUD (BS・110度CS) | 同上 | 同上 |
 | `/dev/px4card/<ID>` | 各機種の内蔵カードリーダー | px4-drv-pcsc (pcscd の IFD ハンドラー) | `include/px4_card_ioctl.h` |
 
 設計の理由、契約の詳細、実機での測定は次の文書にまとめています。
@@ -15,8 +16,9 @@ libusb で機器を動かし、CUSE (Character device in Userspace) で次のデ
 - PIX-DT295: [docs/20261120_dt295_linux_cuse_design.md](../docs/20261120_dt295_linux_cuse_design.md)
 - CECH-ZD1J と、デーモンを機種共通にした構成: [docs/20261121_torne_linux_cuse_design.md](../docs/20261121_torne_linux_cuse_design.md)
 - GV-MVP/XZ3: [docs/20261121_gv_mvp_xz3_linux_cuse_design.md](../docs/20261121_gv_mvp_xz3_linux_cuse_design.md)
+- PX-BCUD: [docs/20261122_px_bcud_linux_cuse_design.md](../docs/20261122_px_bcud_linux_cuse_design.md)
 
-制御転送、PIX-DT295 の SERVICE のループ、torne の初期化と選局、GV-MVP/XZ3 の中継プログラムと TS の取り出し、カードの操作は、WinUSB 版 (`winusb/src/DriverHost_PX4/dt295/`、`torne/`、`xz3/`) と同じコードを使います。
+制御転送、PIX-DT295 の SERVICE のループ、torne の初期化と選局、GV-MVP/XZ3 の中継プログラムと TS の取り出し、PX-BCUD の初期化と選局と TS の組み立て、カードの操作は、WinUSB 版 (`winusb/src/DriverHost_PX4/dt295/`、`torne/`、`xz3/`、`pxbcud/`) と同じコードを使います。
 
 ## ビルド
 
@@ -35,8 +37,9 @@ make -C cuse check
 - torne の共有セッション (`torne_session_test`)
 - torne の復調器の生成コードが、リポジトリにある Go の正解の記録と同じ I²C の要求列になること
 - GV-MVP/XZ3 のカード UART の手順と、TS の取り出しの境界の処理 (`xz3_card_test`、`xz3_stream_test`)
+- PX-BCUD の初期化と選局の要求列、TS の境界の獲得、前のチャンネルの TS の除外、自動復旧の回数 (`pxbcud_frontend_test`) と、isochronous のパケットから TS を組み立てる処理 (`pxbcud_stream_test`)
 
-PIX-DT295 のファームウェアと GV-MVP/XZ3 の中継プログラムは実行ファイルへ埋め込み、torne はメーカーのファームウェアを使わないため、別のファイルを配置する手順はありません。
+PIX-DT295 のファームウェアと GV-MVP/XZ3 の中継プログラムは実行ファイルへ埋め込み、torne と PX-BCUD はメーカーのファームウェアを使わないため、別のファイルを配置する手順はありません。
 
 ## 導入
 
@@ -82,6 +85,12 @@ PIX-DT295 の受信とカードのデバイスファイルの名前と ID は変
 CECH-ZD1J のブリッジは、受信とカードのどちらかが開いている間は起動したままです。  
 GV-MVP/XZ3 は、最初の選局で機器の RAM へ中継プログラムを入れ、受信のデバイスファイルを閉じるときとデーモンを止めるときに元の内容へ戻します。
 
+### PX-BCUD の注意
+
+- Linux の本体の `em28xx` ドライバーも PX-BCUD に対応しており、機器をつなぐと先に interface を取って DVB のデバイス (`/dev/dvb/adapterN`) を作ります。デーモンは機器を開くときに `em28xx` を外し (ログの `kernel driver detached`)、デーモンを止めるときに戻します (`kernel driver reattached`)。DVB API で使う場合は、デーモンを止めてください。
+- TS は isochronous 転送で受け取ります。受信の処理が遅れると TS が欠けるため、ログの `TS stopped` の `iso_errors` と `max_completion_gap_us` (転送の完了の間隔の最大。1 本は 8 ms) を確かめてください。
+- 転送の失敗と、TS が 5 秒届かない場合は、同じチャンネルのまま受信を再開します (ログの `auto recovery begin`)。再開が 8 回続けて実らない場合と、選んだ TS の PAT が 5 秒届かない場合は、`read` が `EIO` を返します。
+
 ### GV-MVP/XZ3 の注意
 
 - デーモンを強制終了 (SIGKILL) すると RAM を戻せないため、次のデーモンは RAM の照合に失敗し、USB を挿し直すまで受信できません。`systemctl restart` と `stop` は RAM を戻してから終わります。
@@ -98,7 +107,8 @@ GV-MVP/XZ3 は、最初の選局で機器の RAM へ中継プログラムを入�
 
 ## 対応していないもの
 
-- アンテナ給電 (`PTX_ENABLE_LNB_POWER` の 0 以外は `ENOSYS`)。どの機種も対応していないためです。PIX-DT295 と GV-MVP/XZ3 で BS・110度CS を受信するには外部からの給電が必要です。
+- アンテナ給電 (`PTX_ENABLE_LNB_POWER` の 0 以外は `ENOSYS`)。どの機種も対応していないためです。PIX-DT295、GV-MVP/XZ3、PX-BCUD で BS・110度CS を受信するには外部からの給電が必要です。
+- PX-BCUD の地デジ。衛星の復調器とチューナーだけを持つため、地デジの選局は `EINVAL` を返します。
 - CECH-ZD1J の BS・110度CS と CATV 帯。BS・110度CS は機器が受信できず、CATV 帯は実機で確かめていないため、選局は `EINVAL` を返します。
 - 32 ビットのプロセスからの受信の ioctl。カーネルモジュールと同じく `compat_ioctl` を提供していません。
 - PIX-DT295 W など、別の USB ID の機器。
