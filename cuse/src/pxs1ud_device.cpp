@@ -247,6 +247,13 @@ int PxS1udDevice::StartStream(bool &fatal)
 
 int PxS1udDevice::StopStream(bool &fatal)
 {
+    // 抜去の後は Session が -ECANCELED を返す。この値を受信中の異常として返すと、read が抜去の契約の EIO
+    // (VideoNode::Remove が後で設定する) ではなく ECANCELED になるため、異常なしとして止める。
+    // 配信の停止と Session の状態の破棄は、続く OnRemove の CloseSession が行う
+    if (removal_.Removed()) {
+        fatal = false;
+        return 0;
+    }
     const int rc = session_->SetCapture(false);
     fatal = rc != 0;
     return rc;
