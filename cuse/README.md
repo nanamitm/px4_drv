@@ -1,6 +1,6 @@
-# px4-cused (PIX-DT295、Sony torne CECH-ZD1J、I-O DATA GV-MVP/XZ3、PLEX PX-BCUD、PLEX PX-S1UD の Linux 版)
+# px4-cused (PIX-DT295、Sony torne CECH-ZD1J、I-O DATA GV-MVP/XZ3、PLEX PX-BCUD、PLEX PX-S1UD、RTL-SDR の Linux 版)
 
-PIXELA PIX-DT295 (USB ID `06b8:103b`)、Sony torne CECH-ZD1J (USB ID `054c:04b2`)、I-O DATA GV-MVP/XZ3 (USB ID `04bb:0530`)、PLEX PX-BCUD (USB ID `3275:0085`)、PLEX PX-S1UD (USB ID `3275:0080`) を Linux で使うためのユーザー空間のデーモンです。  
+PIXELA PIX-DT295 (USB ID `06b8:103b`)、Sony torne CECH-ZD1J (USB ID `054c:04b2`)、I-O DATA GV-MVP/XZ3 (USB ID `04bb:0530`)、PLEX PX-BCUD (USB ID `3275:0085`)、PLEX PX-S1UD (USB ID `3275:0080`)、RTL-SDR (RTL2838UHIDIR、USB ID `0bda:2838`、チューナー R820T) のワンセグを Linux で使うためのユーザー空間のデーモンです。  
 libusb で機器を動かし、CUSE (Character device in Userspace) で次のデバイスファイルを作ります。
 
 | デバイスファイル | 機種 | 利用者 | 契約 |
@@ -10,6 +10,7 @@ libusb で機器を動かし、CUSE (Character device in Userspace) で次のデ
 | `/dev/xz3videoN` | GV-MVP/XZ3 (地デジ・BS・110度CS) | 同上 | 同上 |
 | `/dev/pxbcudvideoN` | PX-BCUD (BS・110度CS) | 同上 | 同上 |
 | `/dev/pxs1udvideoN` | PX-S1UD (地デジ、J.83B は実験的) | 同上 | 同上。J.83B はカーネルモジュールと同じ拡張 ioctl (`PTXT_SET_PARAMS`、`PTXT_TUNE`) |
+| `/dev/rtlsdrvideoN` | RTL-SDR (地デジのワンセグ、UHF 13〜52ch) | 同上 | 同上。使う機器を接続位置で指定する (「RTL-SDR の注意」) |
 | `/dev/px4card/<ID>` | 各機種の内蔵カードリーダー | px4-drv-pcsc (pcscd の IFD ハンドラー) | `include/px4_card_ioctl.h` |
 
 設計の理由、契約の詳細、実機での測定は次の文書にまとめています。
@@ -19,8 +20,9 @@ libusb で機器を動かし、CUSE (Character device in Userspace) で次のデ
 - GV-MVP/XZ3: [docs/20261121_gv_mvp_xz3_linux_cuse_design.md](../docs/20261121_gv_mvp_xz3_linux_cuse_design.md)
 - PX-BCUD: [docs/20261122_px_bcud_linux_cuse_design.md](../docs/20261122_px_bcud_linux_cuse_design.md)
 - PX-S1UD: [docs/20261122_px_s1ud_linux_cuse_design.md](../docs/20261122_px_s1ud_linux_cuse_design.md)
+- RTL-SDR: [docs/20261122_rtlsdr_linux_cuse_design.md](../docs/20261122_rtlsdr_linux_cuse_design.md)
 
-制御転送、PIX-DT295 の SERVICE のループ、torne の初期化と選局、GV-MVP/XZ3 の中継プログラムと TS の取り出し、PX-BCUD の初期化と選局と TS の組み立て、PX-S1UD の firmware の切り替えと選局、カードの操作は、WinUSB 版 (`winusb/src/DriverHost_PX4/dt295/`、`torne/`、`xz3/`、`pxbcud/`、`siano/`) と同じコードを使います。
+制御転送、PIX-DT295 の SERVICE のループ、torne の初期化と選局、GV-MVP/XZ3 の中継プログラムと TS の取り出し、PX-BCUD の初期化と選局と TS の組み立て、PX-S1UD の firmware の切り替えと選局、RTL-SDR の helper の監視と起動し直し、カードの操作は、WinUSB 版 (`winusb/src/DriverHost_PX4/dt295/`、`torne/`、`xz3/`、`pxbcud/`、`siano/`、`rtlsdr/`) と同じコードを使います。
 
 ## ビルド
 
@@ -41,6 +43,7 @@ make -C cuse check
 - GV-MVP/XZ3 のカード UART の手順と、TS の取り出しの境界の処理 (`xz3_card_test`、`xz3_stream_test`)
 - PX-BCUD の初期化と選局の要求列、TS の境界の獲得、前のチャンネルの TS の除外、自動復旧の回数 (`pxbcud_frontend_test`) と、isochronous のパケットから TS を組み立てる処理 (`pxbcud_stream_test`)
 - PX-S1UD の firmware の転送と選局と統計の要求 (`siano_frontend_test`)、地デジと J.83B の firmware の切り替えの順序とメッセージの振り分け (`siano_session_test`)、J.83B の helper の子プロセスの起動と停止 (`iq_process_test`、模擬の helper のシェルスクリプトを使う)
+- RTL-SDR の helper の出力の形式 (`rtlsdr_protocol_test`)、周波数の換算とロックと helper の起動し直しの回数 (`rtlsdr_session_test`)、helper の子プロセスの標準入力の I/Q と停止とキューのあふれ (`rtlsdr_helper_test`、模擬の helper のシェルスクリプトを使う)
 
 PIX-DT295 のファームウェアと GV-MVP/XZ3 の中継プログラムは実行ファイルへ埋め込み、torne と PX-BCUD はメーカーのファームウェアを使わないため、別のファイルを配置する手順はありません。  
 PX-S1UD の地デジは、linux-firmware の `isdbt_rio.inp` (`/lib/firmware`) を使います。Debian 系では `firmware-siano` パッケージに含まれます。
@@ -59,6 +62,21 @@ sudo make -C cuse install-j83b
 `install-j83b` は helper と firmware を `/usr/local/lib/px4-cused/` へ置きます。  
 helper の処理量は大きく、Ryzen 9 5900X の 1 スレッドで実時間の約 0.64 倍 (前処理と復調) と別スレッドの約 0.45 倍 (誤り訂正) です。実時間に間に合わない CPU では TS が欠けます。  
 Intel N150 (ほかの仮想マシンが動く状態) では前処理と復調のスレッドが 1 コアを使い切り、約 60 秒を超えるとデーモンと helper の間のキューがあふれて TS が欠けました。Raspberry Pi 4 は対象外です。ログの helper の終了の行の `queue_dropped_blocks` が 0 であることを確かめてください。
+
+### RTL-SDR のワンセグ
+
+RTL-SDR は復調器を持たず、デーモンが USB から受けた I/Q をホストの helper (`rtlsdr_frontend --stdin`) で復調します。  
+helper は WinUSB 版と同じソース (`winusb/tools/rtlsdr_frontend`、GPL-3.0-or-later) から作り、デーモン (GPL-2.0-only) とは別のプロセスとして動きます。  
+RTL2832U と R820T の設定には、RTL-SDR Blog V1.4.0 の librtlsdr (`third_party/rtl-sdr-blog`、GPL-2.0-or-later、WinUSB 版の `rtlsdr.dll` と同じ版) をデーモンへ組み込んで使います。
+
+```bash
+sudo apt install cargo
+make -C cuse rtlsdr
+sudo make -C cuse install-rtlsdr
+```
+
+`install-rtlsdr` は helper を `/usr/local/lib/px4-cused/` へ置きます。  
+Intel N150 では、helper の復調のスレッドが 1 コアの約 66% を使いました (設計文書の「Linux 版の実機確認」)。
 
 ## 導入
 
@@ -117,6 +135,24 @@ GV-MVP/XZ3 は、最初の選局で機器の RAM へ中継プログラムを入�
 - `PTX_GET_CNR` は、地デジは firmware の SNR、J.83B は helper の復調器の MER を、recpt1 などの地デジの換算式で同じ dB になる値で返します。
 - 制御の応答が届かない場合と形式の異常の後は、WinUSB 版と同じく自動では復旧せず、デバイスファイルを閉じるまで `EIO` を返します。helper だけが異常終了した場合は、次の選局で起動し直します。
 
+### RTL-SDR の注意
+
+- RTL2838 は SDR の用途に広く使われ、多くの製品が同じシリアル番号 (`00000001`) を持つため、デーモンは環境変数 `PX4_CUSED_RTLSDR_PORTS` に書いた接続位置の機器だけを開きます。指定がなければ RTL2838 を 1 本も開かず、指定のない機器には制御転送も送りません (ログの `not listed in PX4_CUSED_RTLSDR_PORTS; left untouched`)。
+- 接続位置は sysfs と同じ「バス番号-ポートの経路」です。`lsusb -t` の `Bus 003` の `Port 004` なら `3-4`、ハブの先は `3-2.1` のように書き、複数はカンマで区切ります。`/sys/bus/usb/devices/3-4/idProduct` が `2838` であることで確かめられます。別のポートへ挿し替えた場合は、指定も変えてください。
+
+  ```bash
+  sudo systemctl edit px4-cused
+  # [Service]
+  # Environment=PX4_CUSED_RTLSDR_PORTS=3-4
+  sudo systemctl restart px4-cused
+  ```
+
+- Linux の本体の `dvb_usb_rtl28xxu` ドライバーも RTL2838 に対応しており、DVB-T と SDR (`/dev/swradioN`) のデバイスを作ります。デーモンは指定した機器だけ、開くときにこのドライバーを外し、デーモンを止めるときに戻します。
+- チューナーが R820T (R820T2 を含む) でない機器は、確かめていないため開いた後に断ります。
+- 選局は UHF 13〜52ch (`freq_no` 63〜102、`slot` は 0) だけで、最初の TS が届くまで最大 15 秒待ちます。届かない場合は `EAGAIN` を返します。選局から最初の TS までは約 4 秒かかります。
+- `PTX_GET_CNR` は、helper の復調器の MER を recpt1 などの地デジの換算式で同じ dB になる値で返します。MER は RF の C/N とは異なり、入力が過大だと下がります。利得は環境変数 `PX4_CUSED_RTLSDR_GAIN` (0.1 dB 単位、既定 297) で変えられます。
+- helper が予期せず終わった場合と USB の受信が失敗した場合は、同じチャンネルのまま helper と受信を起動し直します (ログの `helper restart`、受信が戻ると `outage_ms`)。欠けた区間は CC の飛びとして現れます。起動し直しが 8 回続けて実らない場合は、選局し直すまでロックなしを返します。
+
 ### GV-MVP/XZ3 の注意
 
 - デーモンを強制終了 (SIGKILL) すると RAM を戻せないため、次のデーモンは RAM の照合に失敗し、USB を挿し直すまで受信できません。`systemctl restart` と `stop` は RAM を戻してから終わります。
@@ -135,6 +171,7 @@ GV-MVP/XZ3 は、最初の選局で機器の RAM へ中継プログラムを入�
 
 - アンテナ給電 (`PTX_ENABLE_LNB_POWER` の 0 以外は `ENOSYS`)。どの機種も対応していないためです。PIX-DT295、GV-MVP/XZ3、PX-BCUD で BS・110度CS を受信するには外部からの給電が必要です。
 - PX-BCUD の地デジ。衛星の復調器とチューナーだけを持つため、地デジの選局は `EINVAL` を返します。
+- RTL-SDR のフルセグ、VHF と CATV 帯、BS・110度CS、R820T 以外のチューナー。選局は `EINVAL` を返します。
 - PX-S1UD の BS・110度CS と ISDB-C (トランスモジュレーション方式の CATV)。機器と firmware が対応していないため、選局は `EINVAL` を返します。
 - CECH-ZD1J の BS・110度CS と CATV 帯。BS・110度CS は機器が受信できず、CATV 帯は実機で確かめていないため、選局は `EINVAL` を返します。
 - 32 ビットのプロセスからの受信の ioctl。カーネルモジュールと同じく `compat_ioctl` を提供していません。

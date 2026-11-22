@@ -6,6 +6,7 @@ SUBSYSTEM=="cuse", KERNEL=="tornevideo*", GROUP="video", MODE="0664"
 SUBSYSTEM=="cuse", KERNEL=="xz3video*", GROUP="video", MODE="0664"
 SUBSYSTEM=="cuse", KERNEL=="pxbcudvideo*", GROUP="video", MODE="0664"
 SUBSYSTEM=="cuse", KERNEL=="pxs1udvideo*", GROUP="video", MODE="0664"
+SUBSYSTEM=="cuse", KERNEL=="rtlsdrvideo*", GROUP="video", MODE="0664"
 # カードのデバイスファイルは DEVNAME の '!' を udev が '/' に置き換えた名前 (px4card/<ID>) で照合する。
 # pcscd が専用ユーザーで動く環境でも開けるよう、カーネルモジュールの px4card と同じく pcscd グループに許可する。
 SUBSYSTEM=="cuse", KERNEL=="px4card/*", GROUP="pcscd", MODE="0660"

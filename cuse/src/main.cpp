@@ -2,11 +2,13 @@
 // px4-cused: libusb で機器を動かし、受信とカードのデバイスファイルを CUSE で公開するデーモン。
 // 対応機種は PIX-DT295 (docs/20261120_dt295_linux_cuse_design.md) と
 // Sony torne CECH-ZD1J (docs/20261121_torne_linux_cuse_design.md)、I-O DATA GV-MVP/XZ3
-// (docs/20261121_gv_mvp_xz3_linux_cuse_design.md)、PLEX PX-BCUD (docs/20261122_px_bcud_linux_cuse_design.md)。
+// (docs/20261121_gv_mvp_xz3_linux_cuse_design.md)、PLEX PX-BCUD (docs/20261122_px_bcud_linux_cuse_design.md)、
+// PLEX PX-S1UD (docs/20261122_px_s1ud_linux_cuse_design.md)、RTL-SDR のワンセグ (docs/20261122_rtlsdr_linux_cuse_design.md)。
 #include "cuse_session.hpp"
 #include "dt295_device.hpp"
 #include "pxbcud_device.hpp"
 #include "pxs1ud_device.hpp"
+#include "rtlsdr_device.hpp"
 #include "torne_device.hpp"
 #include "xz3_device.hpp"
 #include "msg.h"
@@ -39,6 +41,8 @@ struct Model {
     std::shared_ptr<Device> (*make)(libusb_device_handle *, std::uint8_t, std::uint8_t, std::function<void()>);
     // Linux の本体のドライバーが既定で interface 0 を取る機種。開くときに外し、閉じるときに戻す。
     bool detach_kernel_driver;
+    // 開く前に機器を選ぶ機種 (ほかの用途と取り合う汎用の機器)。nullptr ならすべて開く
+    bool (*select)(libusb_device *);
 };
 
 template <class T>
@@ -49,13 +53,16 @@ std::shared_ptr<Device> Make(libusb_device_handle *handle, std::uint8_t bus, std
 }
 
 const Model Models[] = {
-    {Dt295Device::Vendor, Dt295Device::Product, "PIX-DT295", Make<Dt295Device>, false},
-    {TorneDevice::Vendor, TorneDevice::Product, "CECH-ZD1J", Make<TorneDevice>, false},
-    {Xz3Device::Vendor, Xz3Device::Product, "GV-MVP/XZ3", Make<Xz3Device>, false},
+    {Dt295Device::Vendor, Dt295Device::Product, "PIX-DT295", Make<Dt295Device>, false, nullptr},
+    {TorneDevice::Vendor, TorneDevice::Product, "CECH-ZD1J", Make<TorneDevice>, false, nullptr},
+    {Xz3Device::Vendor, Xz3Device::Product, "GV-MVP/XZ3", Make<Xz3Device>, false, nullptr},
     // PX-BCUD は Linux の本体の em28xx (DVB) が対応機種として取る (docs/20261122_px_bcud_linux_cuse_design.md)。
-    {PxBcudDevice::Vendor, PxBcudDevice::Product, "PX-BCUD", Make<PxBcudDevice>, true},
+    {PxBcudDevice::Vendor, PxBcudDevice::Product, "PX-BCUD", Make<PxBcudDevice>, true, nullptr},
     // PX-S1UD は Linux の本体の smsusb (Siano) が対応機種として取る (docs/20261122_px_s1ud_linux_cuse_design.md)。
-    {PxS1udDevice::Vendor, PxS1udDevice::Product, "PX-S1UD", Make<PxS1udDevice>, true},
+    {PxS1udDevice::Vendor, PxS1udDevice::Product, "PX-S1UD", Make<PxS1udDevice>, true, nullptr},
+    // RTL-SDR は Linux の本体の dvb_usb_rtl28xxu が取り、ほかの用途 (SDR) とも取り合う汎用の機器のため、
+    // PX4_CUSED_RTLSDR_PORTS で指定した接続位置の機器だけを開く (docs/20261122_rtlsdr_linux_cuse_design.md)。
+    {RtlSdrDevice::Vendor, RtlSdrDevice::Product, "RTL-SDR", Make<RtlSdrDevice>, true, RtlSdrPortSelected},
 };
 
 // 機器の追加と削除、デバイスファイルの解放、終了の要求を、1 つのスレッドで順に処理する。
@@ -107,6 +114,9 @@ public:
     {
         libusb_device_handle *handle = nullptr;
         const int bus = libusb_get_bus_number(usb), address = libusb_get_device_address(usb);
+        // 選ばない機器は開かず、制御転送も送らない (ほかのプロセスが使っている可能性があるため)
+        if (model.select && !model.select(usb))
+            return;
         if (int rc = libusb_open(usb, &handle)) {
             msg_err("%s %03d:%03d: open failed (%s)\n", model.name, bus, address, libusb_error_name(rc));
             return;
