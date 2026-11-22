@@ -248,11 +248,13 @@ int PxS1udDevice::StartStream(bool &fatal)
 int PxS1udDevice::StopStream(bool &fatal)
 {
     // 抜去の後は Session が -ECANCELED を返す。この値を受信中の異常として返すと、read が抜去の契約の EIO
-    // (VideoNode::Remove が後で設定する) ではなく ECANCELED になるため、異常なしとして止める。
+    // ではなく ECANCELED になるため、EIO を返す。0 を返すと、VideoNode::Remove が EIO を設定する前
+    // (続く OnRemove の CloseSession の間) に、待機中の read と poll の後の read が EOF を受け取る
+    // (RTL-SDR の実機で起きた。docs/20261122_rtlsdr_linux_cuse_design.md)。
     // 配信の停止と Session の状態の破棄は、続く OnRemove の CloseSession が行う
     if (removal_.Removed()) {
         fatal = false;
-        return 0;
+        return -EIO;
     }
     const int rc = session_->SetCapture(false);
     fatal = rc != 0;

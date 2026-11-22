@@ -377,7 +377,9 @@ PIX-DT295 の 6 時間の受信 ([20261120_dt295_linux_cuse_design.md](20261120_
 
 受信中の抜去の最初の試験では、`read` が `EIO` ではなく `ECANCELED` を返しました。  
 `VideoNode::Remove` は受信を止めてから `EIO` を設定しますが、受信を止める `PxS1udDevice::StopStream` が、抜去の後に `Session::SetCapture` の返す `-ECANCELED` を受信中の異常として返し、先にリングの終わりの値になっていたためです。  
-抜去の後の `StopStream` は異常を返さないように直し、上の表の J.83B の再試験で `EIO` になることを確かめました。地デジの受信中の抜去は修正の前の試験で、recpt1 は `read` の失敗の値を記録しないため、地デジでの値は確かめていません (同じ経路を通ります)。
+抜去の後の `StopStream` は異常を返さないように直し、上の表の J.83B の再試験で `EIO` になることを確かめました。地デジの受信中の抜去は修正の前の試験で、recpt1 は `read` の失敗の値を記録しないため、地デジでの値は確かめていません (同じ経路を通ります)。  
+その後、RTL-SDR の実機で、抜去の後の `StopStream` が 0 を返すと、`VideoNode::Remove` が `EIO` を設定する前 (`OnRemove` の間) に待機中の `read` が EOF を受け取ることが分かりました ([20261122_rtlsdr_linux_cuse_design.md](20261122_rtlsdr_linux_cuse_design.md) の「Linux 版の実機確認」)。  
+PX-S1UD の `StopStream` も抜去の後に `EIO` を返すように直しました。PX-S1UD の実機では EOF を再現しておらず、直した後の抜去も確かめていません。
 
 地デジの受信中の抜き差しの後、挿し直した機器で 13ch の 15 秒の受信を終えた約 13 秒後 (受信の再開から約 12 秒)、機器が利用者の操作なしに USB から外れ、約 1 秒後に別の機器番号で付き直しました。  
 直前の約 20 ms に Bulk IN の転送の失敗 (`LIBUSB_TRANSFER_ERROR`) が続き、デーモンはその open を形式の異常で失敗状態にしてから、付き直した機器を提供しました。  
