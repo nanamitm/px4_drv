@@ -4,6 +4,9 @@
 #include "msg.h"
 #include <algorithm>
 #include <cerrno>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
 
 namespace px4::cuse {
 namespace {
@@ -28,6 +31,55 @@ const char *FailureName(int failure)
     return failure >= 0 && failure < 6 ? names[failure] : "unknown";
 }
 }
+
+// 自動復旧の試験用の模擬の故障 (WinUSB 版の pxbcud_live_test の --auto-recover、--auto-limit、--auto-nodata に当たる)。
+// PX4_CUSED_FAULT_INJECTION を定義したビルドだけが、受信の開始時に環境変数 PX4_CUSED_PXBCUD_FAULT を読む。
+//   error:COUNT:AFTER   受信の開始から AFTER 秒後に完了した転送を失敗として扱い、再開した受信でも
+//                       データが 300 ms 届いた後に同じ故障を続けて合計 COUNT 回起こす (連続して実らない復旧)
+//   nodata:SECONDS:AFTER 受信の開始から AFTER 秒後から SECONDS 秒の間、届いたパケットの長さを 0 として扱う
+struct PxBcudDevice::Fault {
+#ifdef PX4_CUSED_FAULT_INJECTION
+    enum class Kind { Error, NoData } kind = Kind::Error;
+    unsigned remaining = 0, injected = 0;
+    std::int64_t base_ns = 0, after_ns = 0, duration_ns = 0;
+
+    static std::unique_ptr<Fault> FromEnvironment(std::int64_t now)
+    {
+        const char *text = std::getenv("PX4_CUSED_PXBCUD_FAULT");
+        char kind[16] = {};
+        unsigned value = 0, after = 0;
+        if (!text || std::sscanf(text, "%15[a-z]:%u:%u", kind, &value, &after) != 3)
+            return nullptr;
+        auto fault = std::make_unique<Fault>();
+        if (!std::strcmp(kind, "error"))
+            fault->remaining = value;
+        else if (!std::strcmp(kind, "nodata")) {
+            fault->kind = Kind::NoData;
+            fault->duration_ns = static_cast<std::int64_t>(value) * 1000000000;
+        } else
+            return nullptr;
+        fault->base_ns = now;
+        fault->after_ns = static_cast<std::int64_t>(after) * 1000000000;
+        return fault;
+    }
+    // 完了した転送を失敗として扱うか。最初は AFTER の後、以降は再開した受信でデータが 300 ms 届いた後。
+    bool Error(std::int64_t now, const Stream &s)
+    {
+        if (kind != Kind::Error || !remaining)
+            return false;
+        if (!injected ? now - base_ns < after_ns
+                      : !s.received_any || now - s.first_data_ns < 300000000)
+            return false;
+        --remaining;
+        ++injected;
+        return true;
+    }
+    bool NoData(std::int64_t now) const
+    {
+        return kind == Kind::NoData && now - base_ns >= after_ns && now - base_ns < after_ns + duration_ns;
+    }
+#endif
+};
 
 // pxbcud::Io を libusb の同期制御転送で実装する。WinUSB 版の UsbIo と同じく、Begin() で設定した期限を
 // 操作全体の絶対期限とし、USB の抜去では待機と転送が -ECANCELED で直ちに戻る。
@@ -280,6 +332,12 @@ int PxBcudDevice::StartStream(bool &fatal)
     s.terminal_error = 0;
     s.recovery_count = 0;
     s.recovering = false;
+#ifdef PX4_CUSED_FAULT_INJECTION
+    fault_ = Fault::FromEnvironment(NowNs());
+    if (fault_)
+        msg_warn("%s: fault injection enabled PX4_CUSED_PXBCUD_FAULT=%s\n", label_.c_str(),
+                 std::getenv("PX4_CUSED_PXBCUD_FAULT"));
+#endif
     int rc;
     {
         std::lock_guard<std::mutex> lock(control_);
@@ -377,7 +435,20 @@ void LIBUSB_CALL PxBcudDevice::IsoDone(libusb_transfer *transfer)
 {
     auto &self = *static_cast<PxBcudDevice *>(transfer->user_data);
     auto &s = self.stream_;
-    if (transfer->status == LIBUSB_TRANSFER_COMPLETED) {
+    bool no_data = false, injected = false;
+#ifdef PX4_CUSED_FAULT_INJECTION
+    if (self.fault_ && transfer->status == LIBUSB_TRANSFER_COMPLETED) {
+        const auto now = NowNs();
+        no_data = self.fault_->NoData(now);
+        injected = !s.error && self.fault_->Error(now, s);
+        if (injected)
+            msg_warn("%s: injected isoch transfer failure injected=%u remaining=%u\n", self.label_.c_str(),
+                     self.fault_->injected, self.fault_->remaining);
+    }
+#endif
+    if (injected) {
+        self.SetFailure(-EIO, Failure::Complete);
+    } else if (transfer->status == LIBUSB_TRANSFER_COMPLETED) {
         const auto now = NowNs();
         if (s.previous_completion_ns)
             s.max_gap_us = std::max<std::uint64_t>(s.max_gap_us, (now - s.previous_completion_ns) / 1000);
@@ -386,9 +457,9 @@ void LIBUSB_CALL PxBcudDevice::IsoDone(libusb_transfer *transfer)
         for (int i = 0; i < transfer->num_iso_packets && valid; ++i) {
             const auto &packet = transfer->iso_packet_desc[i];
             const bool ok = packet.status == LIBUSB_TRANSFER_COMPLETED;
-            data = data || (ok && packet.actual_length);
-            valid = s.ts->Packet(ok, libusb_get_iso_packet_buffer_simple(transfer, static_cast<unsigned>(i)),
-                                 packet.actual_length);
+            const unsigned length = no_data ? 0 : packet.actual_length;
+            data = data || (ok && length);
+            valid = s.ts->Packet(ok, libusb_get_iso_packet_buffer_simple(transfer, static_cast<unsigned>(i)), length);
             if (!valid)
                 msg_err("%s: invalid isoch descriptor packet=%d status=%d length=%u\n", self.label_.c_str(), i,
                         packet.status, packet.actual_length);

@@ -66,6 +66,10 @@ private:
     void LogStreamEnd(Failure failure);
     static void LIBUSB_CALL IsoDone(libusb_transfer *transfer);
 
+    // 自動復旧の試験用の模擬の故障。PX4_CUSED_FAULT_INJECTION を定義したビルド (make fault) だけが使い、
+    // 配布するデーモンでは常に空のまま。定義の有無で型の大きさが変わらないよう、メンバーは常に置く。
+    struct Fault;
+    std::unique_ptr<Fault> fault_;
     std::unique_ptr<UsbIo> io_;
     // frontend_ と io_ の期限を、VideoNode の操作と受信の worker の自動復旧の間で直列化する。
     std::mutex control_;

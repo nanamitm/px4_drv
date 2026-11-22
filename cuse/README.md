@@ -89,7 +89,7 @@ GV-MVP/XZ3 は、最初の選局で機器の RAM へ中継プログラムを入�
 
 - Linux の本体の `em28xx` ドライバーも PX-BCUD に対応しており、機器をつなぐと先に interface を取って DVB のデバイス (`/dev/dvb/adapterN`) を作ります。デーモンは機器を開くときに `em28xx` を外し (ログの `kernel driver detached`)、デーモンを止めるときに戻します (`kernel driver reattached`)。DVB API で使う場合は、デーモンを止めてください。
 - TS は isochronous 転送で受け取ります。受信の処理が遅れると TS が欠けるため、ログの `TS stopped` の `iso_errors` と `max_completion_gap_us` (転送の完了の間隔の最大。1 本は 8 ms) を確かめてください。
-- 転送の失敗と、TS が 5 秒届かない場合は、同じチャンネルのまま受信を再開します (ログの `auto recovery begin`)。再開が 8 回続けて実らない場合と、選んだ TS の PAT が 5 秒届かない場合は、`read` が `EIO` を返します。
+- 転送の失敗と、TS が 5 秒届かない場合は、同じチャンネルのまま受信を再開します (ログの `auto recovery begin`)。再開が 8 回続けて実らない場合と、選んだ TS の PAT が 5 秒届かない場合は、`read` が `EIO` を返します。この動作は、`make -C cuse fault` で作る試験用のデーモン (`build/px4-cused-fault`、導入の対象外) に模擬の故障を入れて確かめられます (設計文書の「模擬の故障による自動復旧の確認」)。
 
 ### GV-MVP/XZ3 の注意
 

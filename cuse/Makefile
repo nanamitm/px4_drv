@@ -45,7 +45,7 @@ DAEMON_OBJS := $(BUILD)/main.o $(BUILD)/device.o $(BUILD)/video_node.o $(BUILD)/
 
 all: $(BUILD)/px4-cused
 
-$(BUILD) $(BUILD)/shared $(BUILD)/upstream $(BUILD)/torne $(BUILD)/torne-trace $(BUILD)/xz3 $(BUILD)/pxbcud:
+$(BUILD) $(BUILD)/shared $(BUILD)/upstream $(BUILD)/torne $(BUILD)/torne-trace $(BUILD)/xz3 $(BUILD)/pxbcud $(BUILD)/fault:
 	mkdir -p $@
 
 $(BUILD)/upstream/%.o: $(UPSTREAM)/core/%.c | $(BUILD)/upstream
@@ -77,6 +77,17 @@ $(BUILD)/firmware.o: src/firmware.S $(FIRMWARE)/dt295-direct-fr.bin $(FIRMWARE)/
 
 $(BUILD)/px4-cused: $(DAEMON_OBJS) $(SHARED_OBJS) $(TORNE_OBJS) $(XZ3_OBJS) $(PXBCUD_OBJS) $(PLATFORM_OBJS) $(UPSTREAM_OBJS)
 	$(CXX) $(CXXFLAGS) $(LDFLAGS) $^ $(DEPS_LIBS) -o $@
+
+# PX-BCUD の自動復旧を模擬の故障で試すデーモン (make fault)。配布するデーモンへ故障の処理を含めないため、
+# 別の実行ファイルとして作り、install の対象にしない。使い方は cuse/src/pxbcud_device.cpp の Fault を参照。
+$(BUILD)/fault/pxbcud_device.o: src/pxbcud_device.cpp src/*.hpp | $(BUILD)/fault
+	$(CXX) $(CPPFLAGS) $(DEPS_CFLAGS) $(CXXFLAGS) -DPX4_CUSED_FAULT_INJECTION -c $< -o $@
+
+$(BUILD)/px4-cused-fault: $(filter-out $(BUILD)/pxbcud_device.o,$(DAEMON_OBJS)) $(BUILD)/fault/pxbcud_device.o \
+		$(SHARED_OBJS) $(TORNE_OBJS) $(XZ3_OBJS) $(PXBCUD_OBJS) $(PLATFORM_OBJS) $(UPSTREAM_OBJS)
+	$(CXX) $(CXXFLAGS) $(LDFLAGS) $^ $(DEPS_LIBS) -o $@
+
+fault: $(BUILD)/px4-cused-fault
 
 # 自動試験 (USB と CUSE を使わない)
 $(BUILD)/control_channel_test: $(ROOT)/winusb/tests/dt295_control_channel_test.cpp $(SHARED_OBJS) $(PLATFORM_OBJS) $(UPSTREAM_OBJS)
@@ -132,4 +143,4 @@ install: $(BUILD)/px4-cused
 clean:
 	rm -rf $(BUILD)
 
-.PHONY: all check install clean
+.PHONY: all check fault install clean
