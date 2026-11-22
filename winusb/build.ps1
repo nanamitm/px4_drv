@@ -197,6 +197,11 @@ foreach ($build_platform in $build_platforms) {
     & "build/$build_platform/Release-static/siano_frontend_test.exe"
     if ($LASTEXITCODE -ne 0) { throw "Siano frontend test failed: $build_platform" }
 
+    msbuild tests/siano_session_test.vcxproj /p:"Configuration=Release-static;Platform=$build_platform;PlatformToolset=v143"
+    if ($LASTEXITCODE -ne 0) { throw "Siano session test build failed: $build_platform" }
+    & "build/$build_platform/Release-static/siano_session_test.exe"
+    if ($LASTEXITCODE -ne 0) { throw "Siano session test failed: $build_platform" }
+
     # 実機試験ツールはビルドだけ行い、USB を開く試験は利用者が対象機器を選んで実行する。
     foreach ($siano_tool in @('siano_live_test', 'siano_switch_test')) {
         msbuild "tests/$siano_tool.vcxproj" /p:"Configuration=Release-static;Platform=$build_platform;PlatformToolset=v143"

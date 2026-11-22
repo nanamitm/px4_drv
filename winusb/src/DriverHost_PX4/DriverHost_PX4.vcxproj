@@ -287,6 +287,9 @@
       <ObjectFileName>$(IntDir)siano_iq_helper.obj</ObjectFileName>
     </ClCompile>
     <ClCompile Include="siano\protocol.c" />
+    <ClCompile Include="siano\session.cpp">
+      <ObjectFileName>$(IntDir)siano_session.obj</ObjectFileName>
+    </ClCompile>
     <ClCompile Include="xz3\device.cpp"><ObjectFileName>$(IntDir)xz3_device.obj</ObjectFileName></ClCompile>
     <ClCompile Include="xz3\frontend.cpp"><ObjectFileName>$(IntDir)xz3_frontend.obj</ObjectFileName></ClCompile>
     <ClCompile Include="xz3\card_uart.cpp"><ObjectFileName>$(IntDir)xz3_card_uart.obj</ObjectFileName></ClCompile>
@@ -368,6 +371,8 @@
     <ClInclude Include="siano\firmware_path.hpp" />
     <ClInclude Include="siano\frontend.hpp" />
     <ClInclude Include="siano\iq_helper.hpp" />
+    <ClInclude Include="siano\iq_helper_output.hpp" />
+    <ClInclude Include="siano\session.hpp" />
     <ClInclude Include="siano\protocol.h" />
     <ClInclude Include="rtlsdr\protocol.hpp" />
     <ClInclude Include="pxbcud\frontend.hpp" />

@@ -64,6 +64,7 @@
     <ClCompile Include="..\src\DriverHost_PX4\siano\device.cpp" />
     <ClCompile Include="..\src\DriverHost_PX4\siano\iq_helper.cpp" />
     <ClCompile Include="..\src\DriverHost_PX4\siano\protocol.c" />
+    <ClCompile Include="..\src\DriverHost_PX4\siano\session.cpp" />
     <ClCompile Include="..\src\DriverHost_PX4\device_base.cpp" />
     <ClCompile Include="..\src\DriverHost_PX4\receiver_base.cpp" />
     <ClCompile Include="..\..\driver\tsmf.c" />
