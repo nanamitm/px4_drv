@@ -275,6 +275,9 @@
     <ClCompile Include="device_manager.cpp" />
     <ClCompile Include="pxbcud\device.cpp" />
     <ClCompile Include="rtlsdr\rtl_device.cpp" />
+    <ClCompile Include="rtlsdr\session.cpp">
+      <ObjectFileName>$(IntDir)rtlsdr_session.obj</ObjectFileName>
+    </ClCompile>
     <ClCompile Include="msi2500\msi2500_device.cpp" />
     <ClCompile Include="pxbcud\frontend.cpp" />
     <ClCompile Include="siano\device.cpp">
@@ -375,6 +378,7 @@
     <ClInclude Include="siano\session.hpp" />
     <ClInclude Include="siano\protocol.h" />
     <ClInclude Include="rtlsdr\protocol.hpp" />
+    <ClInclude Include="rtlsdr\session.hpp" />
     <ClInclude Include="pxbcud\frontend.hpp" />
     <ClInclude Include="pxbcud\plain_framer.hpp" />
     <ClInclude Include="pxbcud\pat_gate.hpp" />

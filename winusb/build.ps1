@@ -209,7 +209,7 @@ foreach ($build_platform in $build_platforms) {
     }
 
     # 共通受信機の変更が RTL-SDR の非同期選局と helper の通信形式を壊していないことを検証
-    foreach ($rtl_test in @('receiver_tune_completion_test', 'rtlsdr_protocol_test')) {
+    foreach ($rtl_test in @('receiver_tune_completion_test', 'rtlsdr_protocol_test', 'rtlsdr_session_test')) {
         msbuild "tests/$rtl_test.vcxproj" /p:"Configuration=Release-static;Platform=$build_platform;PlatformToolset=v143"
         if ($LASTEXITCODE -ne 0) { throw "RTL-SDR test build failed: $rtl_test ($build_platform)" }
         & "build/$build_platform/Release-static/$rtl_test.exe"
