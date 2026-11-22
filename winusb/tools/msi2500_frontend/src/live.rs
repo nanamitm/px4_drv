@@ -446,6 +446,7 @@ fn remux_loop(rx: Receiver<RemuxMsg>, mut out: Option<Box<dyn Write + Send>>, st
 }
 
 /// プロセスの CPU 時間 (ユーザー + カーネル、秒)、ワーキングセット、コミット済みのプライベートメモリ (バイト)
+#[cfg(windows)]
 pub fn process_usage() -> (f64, usize, usize) {
     use windows_sys::Win32::Foundation::FILETIME;
     use windows_sys::Win32::System::ProcessStatus::{K32GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS};

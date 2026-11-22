@@ -20,14 +20,19 @@
 //!     capture の生ブロックを OFDM 復調と誤り訂正にかけ、MER、RS の訂正結果、段ごとの処理時間を出す。
 //!     TS_OUT_B を指定すると B 階層の TS を書き出す。終了コード: 0 TMCC と制御キャリヤーを確認、1 未確認、2 入力の誤り。
 
+// MSi2500 の USB を使うサブコマンド (capture、live、serve) は Windows だけ。Linux では PX-S1UD の serve-s1ud と demod を使う
+#![cfg_attr(not(windows), allow(dead_code, unused_imports))]
+
 use msi2500_frontend::blocks::{BlockCounter, BlockState};
 use msi2500_frontend::regs::{Format, FrontEnd, IfMode, Tuner};
+#[cfg(windows)]
 use msi2500_frontend::usb::{capture_with, CaptureLimits, CaptureStats, Device, Transfer, SDRPLAY_INTERFACE_GUID};
 use std::io::Write;
 use std::time::Instant;
 
 const SAMPLE_RATE: u32 = 8_126_984;
 
+#[cfg(windows)]
 struct Args {
     seconds: f64,
     out: Option<String>,
@@ -71,6 +76,7 @@ fn parse_system(v: &str) -> Result<bool, String> {
     }
 }
 
+#[cfg(windows)]
 fn parse_transfer(v: &str) -> Result<Transfer, String> {
     match v {
         "isoch" => Ok(Transfer::Isoch),
@@ -79,6 +85,7 @@ fn parse_transfer(v: &str) -> Result<Transfer, String> {
     }
 }
 
+#[cfg(windows)]
 fn parse(mut it: impl Iterator<Item = String>) -> Result<Args, String> {
     let mut a = Args {
         seconds: 10.0, out: None, freq: 473_142_857, gain: 40, bw: 6_000_000, front_end: FrontEnd::Default, index: 0,
@@ -144,6 +151,7 @@ fn parse(mut it: impl Iterator<Item = String>) -> Result<Args, String> {
 }
 
 /// 8,126,984 S/s・384 形式・ゼロ IF の設定列
+#[cfg(windows)]
 fn tuner_setup(a: &Args) -> Vec<msi2500_frontend::regs::Op> {
     let mut t = Tuner::new();
     t.front_end = a.front_end;
@@ -157,6 +165,7 @@ fn tuner_setup(a: &Args) -> Vec<msi2500_frontend::regs::Op> {
     t.configure_sequence()
 }
 
+#[cfg(windows)]
 fn run_capture(a: Args) -> i32 {
     let setup = tuner_setup(&a);
 
@@ -346,6 +355,7 @@ fn run_demod(path: &str, ts_out: Option<&str>) -> i32 {
 }
 
 /// 取り込み (または録画ファイル) から OFDM 復調と誤り訂正までを別スレッドで実時間に処理する。
+#[cfg(windows)]
 fn run_live(a: Args) -> i32 {
     use msi2500_frontend::live::{process_usage, Live, LiveConfig, LiveStats};
     let open_out = |p: &Option<String>| -> Result<Option<Box<dyn Write + Send>>, String> {
@@ -470,6 +480,7 @@ fn j83b_line(s: &msi2500_frontend::live_j83b::J83bLiveStats) -> String {
 }
 
 /// J.83B の受信を取り込み (または録画ファイル) から TS まで実時間に処理する。
+#[cfg(windows)]
 fn run_live_j83b(a: Args) -> i32 {
     use msi2500_frontend::live::process_usage;
     use msi2500_frontend::live_j83b::{J83bLive, J83bLiveConfig};
@@ -735,6 +746,7 @@ fn serve_output(
 
 /// DriverHost_PX4 から起動される受信。標準出力へ hostproto の形式で TS と状態を出し、
 /// 標準入力の終わり (または 1 バイト) を停止要求として扱う。終了コード: 0 正常、1 失敗、2 引数の誤り。
+#[cfg(windows)]
 fn run_serve(mut it: impl Iterator<Item = String>) -> i32 {
     use msi2500_frontend::hostproto::{write_frame, Kind};
     use msi2500_frontend::live::{Live, LiveConfig};
@@ -1018,6 +1030,7 @@ fn main() {
                 2
             }
         },
+        #[cfg(windows)]
         Some("capture") => match parse(args) {
             Ok(a) => run_capture(a),
             Err(e) => {
@@ -1025,8 +1038,10 @@ fn main() {
                 2
             }
         },
+        #[cfg(windows)]
         Some("serve") => run_serve(args),
         Some("serve-s1ud") => run_serve_s1ud(args),
+        #[cfg(windows)]
         Some("live") => match parse(args) {
             Ok(a) if a.j83b => run_live_j83b(a),
             Ok(a) => run_live(a),
