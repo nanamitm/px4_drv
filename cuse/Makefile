@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-2.0-only
-# px4-cused: PIX-DT295、Sony torne CECH-ZD1J、I-O DATA GV-MVP/XZ3、PLEX PX-BCUD の CUSE デーモン。
+# px4-cused: PIX-DT295、Sony torne CECH-ZD1J、I-O DATA GV-MVP/XZ3、PLEX PX-BCUD、PLEX PX-S1UD の CUSE デーモン。
 # WinUSB 版と共有するコードは winusb/src/DriverHost_PX4 から参照する。
 CC ?= cc
 CXX ?= c++
@@ -11,6 +11,7 @@ DT295 := $(SHARED)/dt295
 TORNE := $(SHARED)/torne
 XZ3 := $(SHARED)/xz3
 PXBCUD := $(SHARED)/pxbcud
+SIANO := $(SHARED)/siano
 UPSTREAM := $(DT295)/upstream
 FIRMWARE := $(ROOT)/winusb/pkg/DriverHost_PX4/firmware
 
@@ -18,10 +19,13 @@ PREFIX ?= /usr/local
 SBINDIR ?= $(PREFIX)/sbin
 UNITDIR ?= /lib/systemd/system
 UDEVDIR ?= /lib/udev/rules.d
+# PX-S1UD の J.83B の helper と firmware の置き場所 (make install-j83b)
+LIBDIR ?= $(PREFIX)/lib/px4-cused
 
 DEPS_CFLAGS := $(shell $(PKG_CONFIG) --cflags libusb-1.0 fuse3)
 DEPS_LIBS := $(shell $(PKG_CONFIG) --libs libusb-1.0 fuse3)
 CPPFLAGS += -I$(ROOT)/include -I$(SHARED) -I$(DT295) -I$(UPSTREAM)/include -I$(ROOT)/winusb/src/common -Isrc
+CPPFLAGS += -DPX4_CUSED_LIBDIR='"$(LIBDIR)"'
 CXXFLAGS ?= -O2 -g
 CXXFLAGS += -std=c++17 -Wall -pthread
 CFLAGS ?= -O2 -g
@@ -38,14 +42,17 @@ TORNE_OBJS := $(BUILD)/torne/session.o $(BUILD)/torne/frontend_native_client.o $
 XZ3_OBJS := $(BUILD)/xz3/session.o $(BUILD)/xz3/frontend.o $(BUILD)/xz3/card_uart.o
 # PX-BCUD の共有コード。xz3/frontend.cpp と名前が重なるため、出力先を分ける。
 PXBCUD_OBJS := $(BUILD)/pxbcud/frontend.o
+# PX-S1UD の共有コード。frontend.cpp と session.cpp はほかの機種と名前が重なるため、出力先を分ける。
+SIANO_OBJS := $(BUILD)/siano/protocol.o $(BUILD)/siano/frontend.o $(BUILD)/siano/session.o
 PLATFORM_OBJS := $(BUILD)/platform_linux.o $(BUILD)/firmware.o
 DAEMON_OBJS := $(BUILD)/main.o $(BUILD)/device.o $(BUILD)/video_node.o $(BUILD)/card_node.o \
 	$(BUILD)/dt295_device.o $(BUILD)/torne_device.o $(BUILD)/torne_port.o $(BUILD)/xz3_device.o $(BUILD)/pxbcud_device.o \
+	$(BUILD)/pxs1ud_device.o $(BUILD)/iq_process.o \
 	$(BUILD)/cuse_session.o $(BUILD)/usb_transport.o $(BUILD)/log.o
 
 all: $(BUILD)/px4-cused
 
-$(BUILD) $(BUILD)/shared $(BUILD)/upstream $(BUILD)/torne $(BUILD)/torne-trace $(BUILD)/xz3 $(BUILD)/pxbcud $(BUILD)/fault:
+$(BUILD) $(BUILD)/shared $(BUILD)/upstream $(BUILD)/torne $(BUILD)/torne-trace $(BUILD)/xz3 $(BUILD)/pxbcud $(BUILD)/siano $(BUILD)/fault:
 	mkdir -p $@
 
 $(BUILD)/upstream/%.o: $(UPSTREAM)/core/%.c | $(BUILD)/upstream
@@ -67,6 +74,12 @@ $(BUILD)/xz3/%.o: $(XZ3)/%.cpp $(XZ3)/*.hpp | $(BUILD)/xz3
 $(BUILD)/pxbcud/%.o: $(PXBCUD)/%.cpp $(PXBCUD)/*.hpp | $(BUILD)/pxbcud
 	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -c $< -o $@
 
+$(BUILD)/siano/%.o: $(SIANO)/%.cpp $(SIANO)/*.hpp $(SIANO)/*.h | $(BUILD)/siano
+	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -c $< -o $@
+
+$(BUILD)/siano/%.o: $(SIANO)/%.c $(SIANO)/*.h | $(BUILD)/siano
+	$(CC) $(CPPFLAGS) $(CFLAGS) -c $< -o $@
+
 $(BUILD)/%.o: src/%.cpp src/*.hpp | $(BUILD)
 	$(CXX) $(CPPFLAGS) $(DEPS_CFLAGS) $(CXXFLAGS) -c $< -o $@
 
@@ -75,7 +88,7 @@ $(BUILD)/firmware.o: src/firmware.S $(FIRMWARE)/dt295-direct-fr.bin $(FIRMWARE)/
 		$(FIRMWARE)/xz3-bootstrap.bin $(FIRMWARE)/xz3-runtime.bin $(FIRMWARE)/xz3-hook.bin | $(BUILD)
 	$(CC) -c -Wa,-I$(FIRMWARE) $< -o $@
 
-$(BUILD)/px4-cused: $(DAEMON_OBJS) $(SHARED_OBJS) $(TORNE_OBJS) $(XZ3_OBJS) $(PXBCUD_OBJS) $(PLATFORM_OBJS) $(UPSTREAM_OBJS)
+$(BUILD)/px4-cused: $(DAEMON_OBJS) $(SHARED_OBJS) $(TORNE_OBJS) $(XZ3_OBJS) $(PXBCUD_OBJS) $(SIANO_OBJS) $(PLATFORM_OBJS) $(UPSTREAM_OBJS)
 	$(CXX) $(CXXFLAGS) $(LDFLAGS) $^ $(DEPS_LIBS) -o $@
 
 # PX-BCUD の自動復旧を模擬の故障で試すデーモン (make fault)。配布するデーモンへ故障の処理を含めないため、
@@ -84,7 +97,7 @@ $(BUILD)/fault/pxbcud_device.o: src/pxbcud_device.cpp src/*.hpp | $(BUILD)/fault
 	$(CXX) $(CPPFLAGS) $(DEPS_CFLAGS) $(CXXFLAGS) -DPX4_CUSED_FAULT_INJECTION -c $< -o $@
 
 $(BUILD)/px4-cused-fault: $(filter-out $(BUILD)/pxbcud_device.o,$(DAEMON_OBJS)) $(BUILD)/fault/pxbcud_device.o \
-		$(SHARED_OBJS) $(TORNE_OBJS) $(XZ3_OBJS) $(PXBCUD_OBJS) $(PLATFORM_OBJS) $(UPSTREAM_OBJS)
+		$(SHARED_OBJS) $(TORNE_OBJS) $(XZ3_OBJS) $(PXBCUD_OBJS) $(SIANO_OBJS) $(PLATFORM_OBJS) $(UPSTREAM_OBJS)
 	$(CXX) $(CXXFLAGS) $(LDFLAGS) $^ $(DEPS_LIBS) -o $@
 
 fault: $(BUILD)/px4-cused-fault
@@ -121,9 +134,38 @@ $(BUILD)/pxbcud_frontend_test: $(ROOT)/winusb/tests/pxbcud_frontend_test.cpp $(P
 $(BUILD)/pxbcud_stream_test: tests/pxbcud_stream_test.cpp src/pxbcud_stream.hpp $(PXBCUD)/*.hpp | $(BUILD)
 	$(CXX) $(CPPFLAGS) $(CXXFLAGS) $< -o $@
 
+# PX-S1UD の共有コード (WinUSB 版と同じ試験) と、J.83B の helper の子プロセスの扱い (模擬の helper のシェルスクリプト)
+$(BUILD)/siano_frontend_test: $(ROOT)/winusb/tests/siano_frontend_test.cpp $(BUILD)/siano/protocol.o $(BUILD)/siano/frontend.o
+	$(CXX) $(CPPFLAGS) $(CXXFLAGS) $^ -o $@
+
+$(BUILD)/siano_session_test: $(ROOT)/winusb/tests/siano_session_test.cpp $(SIANO_OBJS) $(BUILD)/log.o
+	$(CXX) $(CPPFLAGS) $(CXXFLAGS) $^ -o $@
+
+$(BUILD)/iq_process_test: tests/iq_process_test.cpp $(BUILD)/iq_process.o $(SIANO_OBJS) $(BUILD)/log.o
+	$(CXX) $(CPPFLAGS) $(CXXFLAGS) $^ -o $@
+
+# PX-S1UD の J.83B に使う helper (winusb/tools/msi2500_frontend の serve-s1ud、GPL-3.0-or-later) と firmware
+# (fwtool/s1ud/capture_probe.S から作る s1ud_j83b.inp、GPL-2.0-only)。地デジだけを使う場合は不要で、
+# Rust (cargo) と ARC の binutils (binutils-arc-linux-gnu) が必要なため、既定の all には含めない。
+HELPER_DIR := $(ROOT)/winusb/tools/msi2500_frontend
+$(BUILD)/cargo/release/msi2500_frontend: $(HELPER_DIR)/Cargo.toml $(HELPER_DIR)/Cargo.lock $(HELPER_DIR)/src/*.rs | $(BUILD)
+	cargo build --release --locked --manifest-path $(HELPER_DIR)/Cargo.toml --target-dir $(BUILD)/cargo --bin msi2500_frontend
+
+# build_probe.py は既存のファイルを上書きしないため、作り直す前に消す
+$(BUILD)/s1ud_j83b.inp: $(ROOT)/fwtool/s1ud/capture_probe.S $(ROOT)/fwtool/s1ud/build_probe.py | $(BUILD)
+	rm -f $@
+	python3 $(ROOT)/fwtool/s1ud/build_probe.py --probe capture $@
+
+j83b: $(BUILD)/cargo/release/msi2500_frontend $(BUILD)/s1ud_j83b.inp
+
+install-j83b: j83b
+	install -D -m 0755 $(BUILD)/cargo/release/msi2500_frontend $(DESTDIR)$(LIBDIR)/msi2500_frontend
+	install -D -m 0644 $(BUILD)/s1ud_j83b.inp $(DESTDIR)$(LIBDIR)/s1ud_j83b.inp
+
 check: $(BUILD)/control_channel_test $(BUILD)/channel_test $(BUILD)/platform_test $(BUILD)/torne_session_test \
 		$(BUILD)/torne_native_frontend_test $(BUILD)/xz3_card_test $(BUILD)/xz3_stream_test \
-		$(BUILD)/pxbcud_frontend_test $(BUILD)/pxbcud_stream_test | $(BUILD)/torne-trace
+		$(BUILD)/pxbcud_frontend_test $(BUILD)/pxbcud_stream_test $(BUILD)/siano_frontend_test $(BUILD)/siano_session_test \
+		$(BUILD)/iq_process_test | $(BUILD)/torne-trace
 	$(BUILD)/control_channel_test
 	$(BUILD)/channel_test
 	$(BUILD)/platform_test
@@ -134,6 +176,10 @@ check: $(BUILD)/control_channel_test $(BUILD)/channel_test $(BUILD)/platform_tes
 	$(BUILD)/xz3_stream_test
 	$(BUILD)/pxbcud_frontend_test
 	$(BUILD)/pxbcud_stream_test
+	$(BUILD)/siano_frontend_test
+	$(BUILD)/siano_session_test
+	install -m 0755 tests/fake_iq_helper.sh $(BUILD)/fake_iq_helper
+	$(BUILD)/iq_process_test $(BUILD)/fake_iq_helper
 
 install: $(BUILD)/px4-cused
 	install -D -m 0755 $(BUILD)/px4-cused $(DESTDIR)$(SBINDIR)/px4-cused
@@ -143,4 +189,4 @@ install: $(BUILD)/px4-cused
 clean:
 	rm -rf $(BUILD)
 
-.PHONY: all check fault install clean
+.PHONY: all check fault j83b install install-j83b clean

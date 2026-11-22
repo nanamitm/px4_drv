@@ -6,6 +6,7 @@
 #include "cuse_session.hpp"
 #include "dt295_device.hpp"
 #include "pxbcud_device.hpp"
+#include "pxs1ud_device.hpp"
 #include "torne_device.hpp"
 #include "xz3_device.hpp"
 #include "msg.h"
@@ -53,6 +54,8 @@ const Model Models[] = {
     {Xz3Device::Vendor, Xz3Device::Product, "GV-MVP/XZ3", Make<Xz3Device>, false},
     // PX-BCUD は Linux の本体の em28xx (DVB) が対応機種として取る (docs/20261122_px_bcud_linux_cuse_design.md)。
     {PxBcudDevice::Vendor, PxBcudDevice::Product, "PX-BCUD", Make<PxBcudDevice>, true},
+    // PX-S1UD は Linux の本体の smsusb (Siano) が対応機種として取る (docs/20261122_px_s1ud_linux_cuse_design.md)。
+    {PxS1udDevice::Vendor, PxS1udDevice::Product, "PX-S1UD", Make<PxS1udDevice>, true},
 };
 
 // 機器の追加と削除、デバイスファイルの解放、終了の要求を、1 つのスレッドで順に処理する。
