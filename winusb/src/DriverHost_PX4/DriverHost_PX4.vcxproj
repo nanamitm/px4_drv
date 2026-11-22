@@ -298,6 +298,7 @@
     <ClCompile Include="dt295\platform_win32.cpp"><ObjectFileName>$(IntDir)dt295_platform_win32.obj</ObjectFileName></ClCompile>
     <ClCompile Include="dt295\control_channel.cpp"><ObjectFileName>$(IntDir)dt295_control_channel.obj</ObjectFileName></ClCompile>
     <ClCompile Include="torne\experimental_device.cpp" />
+    <ClCompile Include="torne\session.cpp" />
     <ClCompile Include="torne\frontend_native_client.cpp" />
     <ClCompile Include="torne\dib8096_native.cpp" />
     <ClCompile Include="torne\winusb_control.cpp" />

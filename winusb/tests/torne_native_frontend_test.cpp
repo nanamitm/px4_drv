@@ -1,15 +1,26 @@
 // Copyright 2026 Till0196
 // SPDX-License-Identifier: GPL-2.0-only
 #include "../src/DriverHost_PX4/torne/dib8096_native.hpp"
+#ifdef _WIN32
 #include "../src/DriverHost_PX4/torne/frontend_wait.hpp"
+#endif
 #include <fstream>
 #include <iomanip>
 #include <map>
 #include <deque>
 #include <iostream>
+#include <string>
 #include <thread>
+#include <vector>
 using namespace px4::torne;
 using namespace px4::torne::dibnative;
+#ifdef _WIN32
+static const char NullDevice[] = "NUL";
+#else
+static const char NullDevice[] = "/dev/null";
+#endif
+// 正解の記録 (Go の模擬バスの出力) と比べる条件。check_torne_native.py と同じ並び。
+static const char* const TraceModes[] = {"locked","nosignal","timeout","unknown","iofail","waitfail","cband","jobs","retune"};
 class FakeBus final:public Bus {
 public:
     std::map<std::uint16_t,std::uint16_t> regs{{896,0x01b3},{897,0x8002}};
@@ -30,7 +41,7 @@ public:
     std::tuple<Slice<std::uint8_t>,Error> WriteRead(std::uint8_t address,Slice<std::uint8_t> data,std::int64_t length) override {
         ++count;
         out<<(length?"R ":"W ")<<unsigned(address)<<" ";Hex(data);
-        if(failIO&&count==12){out<<(length?" IOFAIL\n":"\nIOFAIL\n");return {{},MakeError("injected bus failure")};}
+        if(failIO&&count==12){out<<(length?" IOFAIL\n":"\nIOFAIL\n");return {Slice<std::uint8_t>(),MakeError("injected bus failure")};}
         if(address!=0x12&&(address!=0xc0||regs[1025]!=0xc000))throw std::runtime_error("invalid gate/address");
         if(length==0){
             ++writes;
@@ -42,7 +53,7 @@ public:
                 if(reg==357 && value==0x111)fftStart=now;
             }
             else{if(data.size()!=3)throw std::runtime_error("tuner write shape");tuner[data[0]]=(data[1]<<8)|data[2];}
-            out<<"\n";return {{},nullptr};
+            out<<"\n";return {Slice<std::uint8_t>(),nullptr};
         }
         if(length!=2||data.size()!=(address==0x12?2:1))throw std::runtime_error("read shape");
         std::uint16_t value;
@@ -69,6 +80,8 @@ public:
 int RunFixture(int argc,char** argv){
     try{
         if(argc==1){
+#ifdef _WIN32
+            // 高精度の待機は WinUSB 版のフロントエンドの待機の実装で、Linux 版は別の実装を持つ。
             using Clock=std::chrono::steady_clock;
             HANDLE cancel=CreateEventW(nullptr,TRUE,FALSE,nullptr);if(!cancel)throw std::runtime_error("cancel event");
             auto begin=Clock::now();auto waited=WaitFrontendDelay(cancel,begin+std::chrono::seconds(1),10000000);
@@ -77,14 +90,15 @@ int RunFixture(int argc,char** argv){
             std::thread stopper([cancel](){Sleep(5);SetEvent(cancel);});
             waited=WaitFrontendDelay(cancel,Clock::now()+std::chrono::seconds(1),500000000);stopper.join();
             if(waited!=ERROR_OPERATION_ABORTED)throw std::runtime_error("cancelled wait");CloseHandle(cancel);
+#endif
             if(Add<std::uint16_t>(65535,1)!=0||Sub<std::uint32_t>(0,1)!=0xffffffffu||Mul<std::int32_t>(INT32_MAX,2)!=-2||Shl<std::uint32_t>(1,32)!=0||Shr<std::int32_t>(-1,40)!=-1)throw std::runtime_error("integer semantics");
             std::array<int,2> array{};bool bounded=false;try{At(array,2);}catch(const std::out_of_range&){bounded=true;}if(!bounded)throw std::runtime_error("array bounds");
             Slice<int> original{1,2};auto shared=original.sub(1,2);shared[0]=3;if(original[1]!=3)throw std::runtime_error("slice ownership");
             for(const auto* mode:{"locked","nosignal","timeout","unknown","iofail","waitfail","cband","jobs","retune","passive"}){
-                char* fixture[]={argv[0],const_cast<char*>(mode),const_cast<char*>("NUL")};if(RunFixture(3,fixture))return 1;
+                char* fixture[]={argv[0],const_cast<char*>(mode),const_cast<char*>(NullDevice)};if(RunFixture(3,fixture))return 1;
             }
             const auto fftStart=[](bool bulk) {
-                FakeBus bus("NUL");
+                FakeBus bus(NullDevice);
                 bus.Locked();
                 NativeFrontend frontend(bus);
                 frontend.SetClock([&](){return bus.now;});
@@ -153,4 +167,33 @@ int RunFixture(int argc,char** argv){
         return 0;
     }catch(const std::exception& e){std::cerr<<e.what()<<"\n";return 1;}
 }
-int main(int argc,char** argv){return RunFixture(argc,argv);}
+static std::vector<std::string> Lines(const std::string& path){
+    std::ifstream in(path);std::vector<std::string> lines;std::string line;
+    // Windows の ofstream は CRLF で書くため、行末の CR を除いてから比べる。
+    while(std::getline(in,line)){if(!line.empty()&&line.back()=='\r')line.pop_back();lines.push_back(line);}
+    return lines;
+}
+// Go の模擬バスが作った正解の記録 (tests/data/torne_native) と C++ の要求列を比べる。
+// 正解の記録はリポジトリにあるため、Go のない環境 (build.ps1、Linux の make check) でも実行できる。
+// 記録の作り直しは tests/check_torne_native.py --update-golden で行う。
+static int CompareGolden(char* self,const std::string& golden,const std::string& output){
+    bool failed=false;
+    for(const auto* mode:TraceModes){
+        const auto actual_path=output+"/"+mode+".cpp.trace";
+        char* fixture[]={self,const_cast<char*>(mode),const_cast<char*>(actual_path.c_str())};
+        if(RunFixture(3,fixture)){std::cerr<<"FAIL: fixture "<<mode<<"\n";failed=true;continue;}
+        const auto expected=Lines(golden+"/"+mode+".go.trace"),actual=Lines(actual_path);
+        if(expected.empty()){std::cerr<<"FAIL: missing golden trace "<<mode<<"\n";failed=true;continue;}
+        if(expected!=actual){
+            std::size_t i=0;while(i<expected.size()&&i<actual.size()&&expected[i]==actual[i])++i;
+            std::cerr<<"FAIL: "<<mode<<" differs at event "<<i+1<<" (Go "<<expected.size()<<" events, C++ "<<actual.size()<<")\n";
+            failed=true;continue;
+        }
+        std::cout<<"PASS: "<<mode<<" "<<actual.size()<<" I2C/wait/result events match the Go golden trace\n";
+    }
+    return failed?1:0;
+}
+int main(int argc,char** argv){
+    if(argc==4&&std::string(argv[1])=="--golden")return CompareGolden(argv[0],argv[2],argv[3]);
+    return RunFixture(argc,argv);
+}

@@ -34,14 +34,7 @@
     <ClCompile Include="..\src\DriverHost_PX4\torne\winusb_control.cpp" />
     <ClCompile Include="..\src\DriverHost_PX4\torne\mb86h47_bootstrap.cpp" />
     <ClCompile Include="..\src\DriverHost_PX4\torne\mb86h47_i2c.cpp" />
-    <ClCompile Include="torne_reference_client.cpp" />
-    <ClCompile Include="torne_capture.cpp" />
-    <ClCompile Include="torne_receiver_adapter.cpp" />
-    <ClCompile Include="..\..\driver\tsmf.c" />
-    <ClCompile Include="..\src\DriverHost_PX4\receiver_base.cpp"><TreatWarningAsError>false</TreatWarningAsError></ClCompile>
-    <ClCompile Include="..\src\DriverHost_PX4\ringbuffer.cpp"><TreatWarningAsError>false</TreatWarningAsError></ClCompile>
     <ClCompile Include="..\src\common\msg.c"><TreatWarningAsError>false</TreatWarningAsError></ClCompile>
-    <ClCompile Include="..\src\DriverHost_PX4\torne\mb86h47_stream.cpp" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
 </Project>

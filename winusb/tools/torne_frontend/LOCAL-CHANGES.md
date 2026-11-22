@@ -1,7 +1,10 @@
 # Local adapter changes
 
 The normal DriverHost now uses a generated C++ port (`dib8096_native_generated.inc`)
-and a native bus adapter. The Go executable remains a diagnostic reference only.
+and a native bus adapter. The former Go diagnostic executable (`cmd/torne_frontend`)
+has been removed; the Go package remains the generation source and the reference
+for `tests/check_torne_native.py`, whose recorded traces (`tests/data/torne_native`)
+let the C++ port be compared without Go.
 `port_native.go.txt` is the development-only AST/type-aware porting tool;
 `tests/check_torne_native.py` compares all mock I2C/wait/result events with the
 independent Go fakeChip/fakeClock fixtures in `native_trace_test.go`.
