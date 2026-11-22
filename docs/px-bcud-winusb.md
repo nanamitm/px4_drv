@@ -11,7 +11,7 @@ alternate setting 0 の同 endpoint は最大長0で、bulk endpoint はあり�
 Windows 10 / 11 用の実装は `winusb/src/DriverHost_PX4/pxbcud/` にあります。
 `DeviceBase`、`ReceiverBase`、`ReceiverManager` と既存の BonDriver を利用し、
 EM28178 の通信と機種固有の初期化は IT930x の受信経路から独立させています。
-Linux / macOS 版の PX-BCUD 対応は含まれていません。
+Linux 版は、ユーザー空間のデーモン `px4-cused` が同じ `frontend.cpp` などを使って対応しています ([20261122_px_bcud_linux_cuse_design.md](20261122_px_bcud_linux_cuse_design.md))。macOS 版の対応は含まれていません。
 
 `Type="PXBCUD"` のデバイス定義がある場合だけ登録されます。
 通常配布の INF は `winusb/pkg/inf/PX-BCUD.inf`、BonDriver の設定は
