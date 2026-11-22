@@ -118,6 +118,7 @@ struct rtlsdr_dev {
 	/* status */
 	int dev_lost;
 	int driver_active;
+	int external_handle; /* px4-cused: opened with rtlsdr_open_handle() */
 	unsigned int xfer_errors;
 	char manufact[256];
 	char product[256];
@@ -1491,7 +1492,8 @@ int rtlsdr_check_dongle_model(void *dev, char *manufact_check, char *product_che
 }
 
 
-int rtlsdr_open(rtlsdr_dev_t **out_dev, uint32_t index)
+/* px4-cused: external is a handle the caller opened, detached and claimed (interface 0) */
+static int rtlsdr_open_impl(rtlsdr_dev_t **out_dev, uint32_t index, libusb_device_handle *external)
 {
 	int r;
 	int i;
@@ -1510,6 +1512,12 @@ int rtlsdr_open(rtlsdr_dev_t **out_dev, uint32_t index)
 
 	memset(dev, 0, sizeof(rtlsdr_dev_t));
 	memcpy(dev->fir, fir_default, sizeof(fir_default));
+
+	if (external) {
+		dev->devh = external;
+		dev->external_handle = 1;
+		goto claimed;
+	}
 
 	r = libusb_init(&dev->ctx);
 	if(r < 0){
@@ -1579,6 +1587,7 @@ int rtlsdr_open(rtlsdr_dev_t **out_dev, uint32_t index)
 		goto err;
 	}
 
+claimed:
 	dev->rtl_xtal = DEF_RTL_XTAL_FREQ;
 
 	/* perform a dummy write, if it fails, reset the device */
@@ -1707,7 +1716,7 @@ found:
 	return 0;
 err:
 	if (dev) {
-		if (dev->devh)
+		if (dev->devh && !dev->external_handle)
 			libusb_close(dev->devh);
 
 		if (dev->ctx)
@@ -1717,6 +1726,18 @@ err:
 	}
 
 	return r;
+}
+
+int rtlsdr_open(rtlsdr_dev_t **out_dev, uint32_t index)
+{
+	return rtlsdr_open_impl(out_dev, index, NULL);
+}
+
+int rtlsdr_open_handle(rtlsdr_dev_t **out_dev, libusb_device_handle *devh)
+{
+	if (!devh)
+		return -EINVAL;
+	return rtlsdr_open_impl(out_dev, 0, devh);
 }
 
 int rtlsdr_close(rtlsdr_dev_t *dev)
@@ -1735,6 +1756,12 @@ int rtlsdr_close(rtlsdr_dev_t *dev)
 		}
 
 		rtlsdr_deinit_baseband(dev);
+	}
+
+	/* px4-cused: the caller releases, reattaches and closes a handle it opened */
+	if (dev->external_handle) {
+		free(dev);
+		return 0;
 	}
 
 	libusb_release_interface(dev->devh, 0);

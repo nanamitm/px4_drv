@@ -69,6 +69,11 @@ RTLSDR_API int rtlsdr_get_index_by_serial(const char *serial);
 
 RTLSDR_API int rtlsdr_open(rtlsdr_dev_t **dev, uint32_t index);
 
+/* px4-cused: initialise a device the caller has already opened, detached and
+ * claimed (interface 0). rtlsdr_close() then leaves the handle to the caller. */
+struct libusb_device_handle;
+RTLSDR_API int rtlsdr_open_handle(rtlsdr_dev_t **dev, struct libusb_device_handle *devh);
+
 RTLSDR_API int rtlsdr_close(rtlsdr_dev_t *dev);
 
 /* configuration functions */
