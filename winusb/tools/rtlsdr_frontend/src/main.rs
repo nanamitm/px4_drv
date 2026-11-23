@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 mod pat;
 use isdbt_dsp::StreamingDecoder;
+#[cfg(windows)]
 use std::ffi::{c_char, c_void, CStr};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -18,11 +19,16 @@ enum Input {
     Error(String),
 }
 #[derive(Default)]
+// serial と gain は librtlsdr で USB を開く Windows 版だけが使う
+#[cfg_attr(not(windows), allow(dead_code))]
 struct Options {
     serial: String,
     frequency: u32,
     gain: i32,
     replay: Option<PathBuf>,
+    // 標準入力から CU8 の I/Q を受ける (Linux の px4-cused が USB を持つ場合)。
+    // 標準入力の EOF を停止要求とし、ライブ入力と同じく I/Q の停止とキューの満杯を失敗とする。
+    stdin: bool,
 }
 fn options() -> Result<Options, String> {
     let mut out = Options {
@@ -31,6 +37,10 @@ fn options() -> Result<Options, String> {
     };
     let mut args = std::env::args_os().skip(1);
     while let Some(key) = args.next() {
+        if key.to_str() == Some("--stdin") {
+            out.stdin = true;
+            continue;
+        }
         let value = args.next().ok_or("Missing argument value")?;
         match key.to_str() {
             Some("--serial") => out.serial = value.into_string().map_err(|_| "Invalid serial")?,
@@ -52,7 +62,11 @@ fn options() -> Result<Options, String> {
             _ => return Err("Unknown argument".into()),
         }
     }
+    if out.stdin && out.replay.is_some() {
+        return Err("Specify either --stdin or --replay".into());
+    }
     if out.replay.is_none()
+        && !out.stdin
         && (out.serial.is_empty() || !(473_142_000..=707_143_000).contains(&out.frequency))
     {
         return Err("Specify --serial and a UHF channel centre with --frequency".into());
@@ -63,25 +77,40 @@ fn options() -> Result<Options, String> {
     Ok(out)
 }
 
+#[cfg(windows)]
 #[link(name = "kernel32")]
 extern "system" {
     fn LoadLibraryExW(name: *const u16, file: *mut c_void, flags: u32) -> *mut c_void;
     fn GetProcAddress(module: *mut c_void, name: *const u8) -> *mut c_void;
     fn FreeLibrary(module: *mut c_void) -> i32;
 }
+#[cfg(windows)]
 type Dev = *mut c_void;
+#[cfg(windows)]
 type Count = unsafe extern "C" fn() -> u32;
+#[cfg(windows)]
 type Strings = unsafe extern "C" fn(u32, *mut c_char, *mut c_char, *mut c_char) -> i32;
+#[cfg(windows)]
 type Open = unsafe extern "C" fn(*mut Dev, u32) -> i32;
+#[cfg(windows)]
 type Close = unsafe extern "C" fn(Dev) -> i32;
+#[cfg(windows)]
 type DeviceStrings = unsafe extern "C" fn(Dev, *mut c_char, *mut c_char, *mut c_char) -> i32;
+#[cfg(windows)]
 type SetU32 = unsafe extern "C" fn(Dev, u32) -> i32;
+#[cfg(windows)]
 type SetInt = unsafe extern "C" fn(Dev, i32) -> i32;
+#[cfg(windows)]
 type GetInt = unsafe extern "C" fn(Dev) -> i32;
+#[cfg(windows)]
 type Gains = unsafe extern "C" fn(Dev, *mut i32) -> i32;
+#[cfg(windows)]
 type Cancel = unsafe extern "C" fn(Dev) -> i32;
+#[cfg(windows)]
 type Callback = unsafe extern "C" fn(*mut u8, u32, *mut c_void);
+#[cfg(windows)]
 type ReadAsync = unsafe extern "C" fn(Dev, Callback, *mut c_void, u32, u32) -> i32;
+#[cfg(windows)]
 struct CaptureContext<'a> {
     tx: &'a mpsc::SyncSender<Input>,
     stop: &'a AtomicBool,
@@ -89,6 +118,7 @@ struct CaptureContext<'a> {
     cancel: Cancel,
     error: Option<String>,
 }
+#[cfg(windows)]
 unsafe extern "C" fn on_iq(data: *mut u8, size: u32, context: *mut c_void) {
     let ctx = &mut *context.cast::<CaptureContext<'_>>();
     if ctx.stop.load(Ordering::Relaxed) {
@@ -109,11 +139,13 @@ unsafe extern "C" fn on_iq(data: *mut u8, size: u32, context: *mut c_void) {
         (ctx.cancel)(ctx.dev);
     }
 }
+#[cfg(windows)]
 struct Library {
     module: *mut c_void,
     dev: Dev,
     close: Option<Close>,
 }
+#[cfg(windows)]
 impl Drop for Library {
     fn drop(&mut self) {
         unsafe {
@@ -126,6 +158,7 @@ impl Drop for Library {
         }
     }
 }
+#[cfg(windows)]
 impl Library {
     fn new() -> Result<Self, String> {
         use std::os::windows::ffi::OsStrExt;
@@ -159,6 +192,7 @@ impl Library {
         }
     }
 }
+#[cfg(windows)]
 macro_rules! symbol {
     ($api:expr,$name:literal,$ty:ty) => {
         unsafe {
@@ -166,6 +200,7 @@ macro_rules! symbol {
         }
     };
 }
+#[cfg(windows)]
 fn checked(value: i32, what: &str) -> Result<(), String> {
     if value == 0 {
         Ok(())
@@ -173,12 +208,14 @@ fn checked(value: i32, what: &str) -> Result<(), String> {
         Err(format!("{what}: librtlsdr error {value}"))
     }
 }
+#[cfg(windows)]
 fn usb_string(value: &[c_char; 256]) -> String {
     let data: Vec<u8> = value.iter().map(|&v| v as u8).collect();
     CStr::from_bytes_until_nul(&data)
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_default()
 }
+#[cfg(windows)]
 fn capture(opts: Options, tx: &mpsc::SyncSender<Input>, stop: &AtomicBool) -> Result<(), String> {
     let mut api = Library::new()?;
     let count = symbol!(api, "rtlsdr_get_device_count", Count);
@@ -296,6 +333,54 @@ fn replay(path: &Path, tx: &mpsc::SyncSender<Input>, stop: &AtomicBool) -> Resul
     }
     Ok(())
 }
+// USB を持つ親 (Linux の px4-cused) から標準入力で CU8 の I/Q を受ける。標準入力の EOF を停止要求とする。
+// ライブ入力と同じく、キューが満杯なら I/Q を捨てて復調を続けずに失敗とする (欠落を隠さないため)。
+fn stdin_input(tx: &mpsc::SyncSender<Input>, stop: &AtomicBool) -> Result<(), String> {
+    let mut input = std::io::stdin().lock();
+    tx.send(Input::Ready).map_err(|_| "Output closed")?;
+    // I/Q は I と Q の2バイト単位で復調器へ渡すため、パイプの読み取りの端数は次へ繰り越す
+    let mut carry = None;
+    while !stop.load(Ordering::Relaxed) {
+        let mut data = vec![0; 262_144];
+        let start = match carry.take() {
+            Some(byte) => {
+                data[0] = byte;
+                1
+            }
+            None => 0,
+        };
+        let n = match input.read(&mut data[start..]) {
+            Ok(n) => n,
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {
+                carry = (start == 1).then_some(data[0]);
+                continue;
+            }
+            Err(error) => return Err(error.to_string()),
+        };
+        if n == 0 {
+            eprintln!("Frontend stop requested via stdin EOF");
+            stop.store(true, Ordering::Relaxed);
+            return Ok(());
+        }
+        let mut size = start + n;
+        if size % 2 != 0 {
+            size -= 1;
+            carry = Some(data[size]);
+        }
+        if size == 0 {
+            continue;
+        }
+        data.truncate(size);
+        if let Err(error) = tx.try_send(Input::Iq(data)) {
+            return Err(format!("I/Q queue full or decoder stopped: {error}"));
+        }
+    }
+    Ok(())
+}
+#[cfg(not(windows))]
+fn capture(_: Options, _: &mpsc::SyncSender<Input>, _: &AtomicBool) -> Result<(), String> {
+    Err("USB capture through librtlsdr is only built for Windows; use --stdin".into())
+}
 fn frame(
     out: &mut impl Write,
     kind: u32,
@@ -326,13 +411,18 @@ fn run() -> Result<(), String> {
     let opts = options()?;
     let is_replay = opts.replay.is_some();
     let stop = Arc::new(AtomicBool::new(false));
-    let input_stop = stop.clone();
-    std::thread::spawn(move || {
-        let mut byte = [0];
-        let _ = std::io::stdin().read(&mut byte);
-        eprintln!("Frontend stop requested via stdin");
-        input_stop.store(true, Ordering::Relaxed);
-    });
+    // --stdin では標準入力が I/Q を運ぶため、停止要求は I/Q の読み取りが EOF で受ける。
+    if !opts.stdin {
+        let input_stop = stop.clone();
+        std::thread::spawn(move || {
+            let mut byte = [0];
+            let _ = std::io::stdin().read(&mut byte);
+            eprintln!("Frontend stop requested via stdin");
+            input_stop.store(true, Ordering::Relaxed);
+        });
+    } else {
+        eprintln!("RTL-SDR I/Q from stdin frequency={}", opts.frequency);
+    }
     // x86 の初期復号で約8.5秒を測定。約16.5秒分を上限とし、その間も USB を継続する。
     // 満杯時に I/Q を捨てるフォールバックは使わない。
     let (tx, rx) = mpsc::sync_channel(128);
@@ -340,6 +430,8 @@ fn run() -> Result<(), String> {
     let reader = std::thread::spawn(move || {
         let result = if let Some(ref path) = opts.replay {
             replay(path, &tx, &read_stop)
+        } else if opts.stdin {
+            stdin_input(&tx, &read_stop)
         } else {
             capture(opts, &tx, &read_stop)
         };

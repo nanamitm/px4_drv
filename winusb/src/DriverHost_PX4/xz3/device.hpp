@@ -2,7 +2,7 @@
 #pragma once
 
 #include "../device_base.hpp"
-#include "../dt295/card_response.hpp"
+#include "session.hpp"
 #include <atomic>
 #include <chrono>
 #include <cstddef>
@@ -34,16 +34,11 @@ public:
 
 private:
     class Receiver;
-    void ResetCardBuffer();
     std::unique_ptr<Receiver> receiver_;
-    // ATRとT=1ブロックの受信途中の状態。抜去・リセット・Closeで一括して破棄する。
-    std::mutex card_mutex_;
-    bool card_reader_ = false, card_open_ = false;
-    px4::dt295::CardResponse card_response_;
-    // 直前の受信FIFOの読み出しの時刻と、それが空だったか。
-    std::chrono::steady_clock::time_point card_polled_{};
-    bool card_polled_empty_ = false;
+    bool card_reader_ = false;
     std::atomic_bool available_{true};
+    // ATRとT=1ブロックの受信途中の状態。抜去・リセット・Closeで一括して破棄する。
+    CardReader card_{available_};
     HANDLE removed_ = nullptr;
     bool registered_ = false;
 };

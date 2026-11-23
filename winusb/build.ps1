@@ -197,6 +197,11 @@ foreach ($build_platform in $build_platforms) {
     & "build/$build_platform/Release-static/siano_frontend_test.exe"
     if ($LASTEXITCODE -ne 0) { throw "Siano frontend test failed: $build_platform" }
 
+    msbuild tests/siano_session_test.vcxproj /p:"Configuration=Release-static;Platform=$build_platform;PlatformToolset=v143"
+    if ($LASTEXITCODE -ne 0) { throw "Siano session test build failed: $build_platform" }
+    & "build/$build_platform/Release-static/siano_session_test.exe"
+    if ($LASTEXITCODE -ne 0) { throw "Siano session test failed: $build_platform" }
+
     # 実機試験ツールはビルドだけ行い、USB を開く試験は利用者が対象機器を選んで実行する。
     foreach ($siano_tool in @('siano_live_test', 'siano_switch_test')) {
         msbuild "tests/$siano_tool.vcxproj" /p:"Configuration=Release-static;Platform=$build_platform;PlatformToolset=v143"
@@ -204,7 +209,7 @@ foreach ($build_platform in $build_platforms) {
     }
 
     # 共通受信機の変更が RTL-SDR の非同期選局と helper の通信形式を壊していないことを検証
-    foreach ($rtl_test in @('receiver_tune_completion_test', 'rtlsdr_protocol_test')) {
+    foreach ($rtl_test in @('receiver_tune_completion_test', 'rtlsdr_protocol_test', 'rtlsdr_session_test')) {
         msbuild "tests/$rtl_test.vcxproj" /p:"Configuration=Release-static;Platform=$build_platform;PlatformToolset=v143"
         if ($LASTEXITCODE -ne 0) { throw "RTL-SDR test build failed: $rtl_test ($build_platform)" }
         & "build/$build_platform/Release-static/$rtl_test.exe"

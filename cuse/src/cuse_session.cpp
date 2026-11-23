@@ -35,7 +35,7 @@ std::unique_ptr<CuseSession> CuseSession::Start(const std::string &devname, cons
     ci.dev_info_argc = 1;
     ci.dev_info_argv = info_argv;
     ci.flags = flags;
-    char arg0[] = "px4-dt295d";
+    char arg0[] = "px4-cused";
     char *argv[] = {arg0, nullptr};
     struct fuse_args args = FUSE_ARGS_INIT(1, argv);
     self->session_ = cuse_lowlevel_new(&args, &ci, &ops, userdata);

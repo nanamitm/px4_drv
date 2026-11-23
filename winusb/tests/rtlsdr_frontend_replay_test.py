@@ -47,9 +47,15 @@ def main():
                     break
                 magic, kind, size, quality, accepted, rejected = struct.unpack("<6I", header)
                 assert magic == 0x31545352 and 1 <= kind <= 4 and quality <= 10000
-                assert (kind == 2 and 0 < size <= 188 * 2048 and size % 188 == 0) or (kind in (1, 3) and size == 0) or (kind == 4 and 0 < size <= 1024)
+                # 状態 (kind 3) の payload は rtlsdr/protocol.hpp の MaxStatus と同じく、4 の倍数で 64 バイトまで。
+                # TS の出力中は先頭 4 バイトに復調器の MER (dB×100、0〜10000) が載る
+                assert ((kind == 2 and 0 < size <= 188 * 2048 and size % 188 == 0) or (kind == 1 and size == 0) or
+                        (kind == 3 and size <= 64 and size % 4 == 0) or (kind == 4 and 0 < size <= 1024))
                 payload = read_exact(process.stdout, size) if size else b""
                 assert payload is not None
+                if kind == 3 and size:
+                    assert struct.unpack_from("<I", payload)[0] <= 10000
+                    report["mer_status"] = report.get("mer_status", 0) + 1
                 if kind == 4:
                     raise AssertionError(payload.decode("utf-8", errors="replace"))
                 if kind == 1:

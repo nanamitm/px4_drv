@@ -4,6 +4,7 @@
 #include "capture_gate.hpp"
 #include "firmware_path.hpp"
 #include "iq_helper.hpp"
+#include "session.hpp"
 #include "ts_diagnostic_log.hpp"
 #include "../stream_overflow.hpp"
 #include "msg.h"
@@ -19,9 +20,6 @@ namespace {
 using Clock=std::chrono::steady_clock;
 // 上流 Windows と同じ 32 x 16 KiB。制御応答と TS は同じ bulk IN を通る。
 constexpr std::size_t TransferSize=16384, TransferCount=32;
-// 受信の開始時に読み飛ばす、前のホストの残りの転送の上限。実機の残りは 1 回の転送だった。
-// 上限を超えても解釈できない場合は、残りではなく形式の異常として受信を止める
-constexpr unsigned MaxStaleTransfers=4;
 int UsbError(DWORD e)
 {
     if (e==ERROR_DEVICE_NOT_CONNECTED || e==ERROR_OPERATION_ABORTED || e==ERROR_INVALID_HANDLE) return -ECANCELED;
@@ -35,7 +33,7 @@ std::filesystem::path HostDirectory()
     if (!n || n==path.size()) throw DeviceError("PX-S1UD: cannot resolve DriverHost directory");
     return std::filesystem::path(path.data()).parent_path();
 }
-int ReadFirmware(const std::filesystem::path& path,std::vector<std::uint8_t>& firmware)
+int ReadFirmwareFile(const std::filesystem::path& path,std::vector<std::uint8_t>& firmware)
 {
     std::ifstream f(path,std::ios::binary|std::ios::ate);
     if (!f) return -ENOENT;
@@ -45,16 +43,18 @@ int ReadFirmware(const std::filesystem::path& path,std::vector<std::uint8_t>& fi
     return f.read(reinterpret_cast<char*>(firmware.data()),n) ? 0 : -EIO;
 }
 }
-class Receiver final : public ReceiverBase, private Io {
+// USB の転送と待機、配信のバッファー、firmware のファイルの探索を受け持ち、制御の順序は Session (session.cpp) が持つ。
+class Receiver final : public ReceiverBase, private SessionPort {
 public:
     // J.83B は、利用者が用意した IQ を送出する firmware と helper を指定したときだけ受け付ける
     struct J83bConfig {std::filesystem::path firmware,helper,log;};
     Receiver(HANDLE file,WINUSB_INTERFACE_HANDLE usb,HANDLE removed,UCHAR in,std::size_t alignment,
              const std::filesystem::path& directory,const std::filesystem::path& firmware,const J83bConfig* j83b)
         : ReceiverBase(0),file_(file),usb_(usb),removed_(removed),in_(in),alignment_(alignment),
-          host_directory_(directory),firmware_(firmware),frontend_(*this)
+          host_directory_(directory),firmware_(firmware),
+          session_(*this,j83b ? &iq_helper_ : nullptr,static_cast<unsigned>(TransferCount))
     {
-        if (j83b) {j83b_=*j83b;j83b_supported_=true;}
+        if (j83b) {j83b_=*j83b;iq_helper_.Configure(j83b_.helper.wstring(),j83b_.log.wstring());}
     }
     ~Receiver() override
     {
@@ -66,56 +66,22 @@ public:
     void Disconnected()
     {
         stream_buf_->StopRequest();
-        responses_changed_.notify_all();
+        session_.Interrupt();
     }
     int Open() override
     {
         std::lock_guard<std::mutex> lock(mutex_);
         if (open_) return -EBUSY;
-        if (Removed()) return -ECANCELED;
-        // 配置変更後の再オープンでも、INI 指定先・EXE 直下・配布用サブフォルダーを再探索する。
-        const auto firmware_path=ResolveFirmwarePath(host_directory_,firmware_);
-        std::vector<std::uint8_t> firmware;
-        const int read=ReadFirmware(firmware_path,firmware);
-        if (read && read!=-ENOENT) return read;
-        if (read) {
-            for (const auto& candidate:FirmwareCandidates(host_directory_,firmware_))
-                msg_warn("PX-S1UD: firmware candidate: %ls\n",candidate.c_str());
-            msg_warn("PX-S1UD: firmware not found; only an already initialized device can open\n");
-        }
-        int ret=StartWorker();
-        if (!ret) ret=frontend_.Initialize(firmware);
-        if (ret==-EIO && !firmware.empty()) {
-            // J.83B 用の firmware が稼働したままの機器 (この DriverHost や BonDriver_S1UD.dll が読み込んだもの) は、
-            // ISDB-T の INIT_DEVICE を受けても ISDB-T のモードへ移らない。通常の firmware を読み込み直す
-            msg_warn("PX-S1UD: device did not enter ISDB-T mode; reloading the ISDB-T firmware\n");
-            ret=frontend_.Initialize(firmware,true);
-        }
-        if (ret) {
-            msg_err("PX-S1UD: initialization failed ret=%d firmware=%ls\n",ret,firmware_path.c_str());
-            StopWorker(); return ret;
-        }
-        open_=true; tuned_=false; capture_=false; locked_=false; cnr_=0;
-        // Initialize は ISDB-T のモードを確かめてから成功を返す。前の open が失敗状態のまま閉じると、Close は
-        // 通常の firmware への読み込み直しを省き、loaded_ に J.83B が残る。そのままでは J.83B の選局が
-        // J.83B 用の firmware を読み込まずに IQ の送出を要求し、通常の firmware が応答せずに失敗する
-        loaded_=Loaded::Isdbt;
-        signal_log_=(msg_get_mode() & (MSG_MODE_LOG_FILE | MSG_MODE_CONSOLE))!=0; signal_={}; signal_base_={};
-        msg_info("PX-S1UD: opened firmware=%u.%u\n",frontend_.Version()>>8,frontend_.Version()&255);
+        const int ret=session_.Open();
+        if (ret) return ret;
+        open_=true; capturing_=false; cnr_=0;
         return 0;
     }
     void Close() override
     {
         std::lock_guard<std::mutex> lock(mutex_);
         if (!open_) return;
-        capture_=false; tuned_=false; DisableOutput();
-        // IQ の送出を止めてから受信を止める。送出を止めずに閉じると、次の open で IQ のメッセージが
-        // 制御応答と同じ bulk IN を埋め続ける
-        StopIq();
-        // J.83B 用の firmware のまま閉じると、受信を止めて開き直した後の GET_VERSION に応答しなかった。
-        // 他のホストやアプリも ISDB-T の firmware を前提に開くため、受信を動かしている間に通常の firmware へ戻す
-        if (loaded_==Loaded::J83b && !error_ && !Removed() && ReloadIsdbt())
-            msg_warn("PX-S1UD: closed with the J.83B firmware still running\n");
+        session_.Close();
         stream_buf_->Stop(); StopWorker(); open_=false; closed_.notify_all();
     }
     int SetLnbVoltage(std::int32_t voltage) override { return voltage ? -ENOSYS : 0; }
@@ -124,58 +90,25 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         if (!open_) return -EINVAL;
         if (Removed()) return -ECANCELED;
-        if (capture==capture_) return capture ? -EALREADY : 0;
+        if (capture==capturing_) return capture ? -EALREADY : 0;
         if (capture) {
             if (!stream_buf_->Alloc(188*8192)) return -ENOMEM;
             stream_buf_->SetThresholdSize(188*32);
             stream_buf_->SetDiscardNullPacketsOnOutput(false);
-            stream_buf_->Start(); capture_=true;
-            if (iq_) iq_output_.SetEnabled(true);
-            else if (tuned_ && locked_) EnableOutput();
-        } else {
-            capture_=false; DisableOutput(); iq_output_.SetEnabled(false); stream_buf_->Stop();
+            stream_buf_->Start(); capturing_=true;
+            return session_.SetCapture(true);
         }
-        return error_.load();
+        capturing_=false;
+        const int ret=session_.SetCapture(false);
+        stream_buf_->Stop();
+        return ret;
     }
     int CheckLock(bool& locked) override
     {
         std::lock_guard<std::mutex> lock(mutex_);
         locked=false;
         if (!open_) return -EINVAL;
-        if (Removed()) return -ECANCELED;
-        if (error_) return error_;
-        if (!tuned_) return 0;
-        if (iq_) {
-            // J.83B の復調は helper が行い、firmware の統計は ISDB-T のもののため使わない。
-            // MSi2500 と同じく、helper の TS が 3 秒以内に届いていればロックとする。
-            // C/N には helper が報告する復調器の MER (dB) を ISDB-T の CNR と同じ dB×1000 で返す。
-            // RS の成功割合は正常受信中にほぼ 100% で変わらず、C/N の目安にならないため。
-            // MER をまだ報告していない間 (起動直後と MER を送らない古い helper) は、従来どおり RS の成功割合を返す
-            // helperだけの異常終了では配信接続を閉じず、次の選局でhelperを作り直せるようにする。
-            if (iq_helper_.Failed()) return -ECANCELED;
-            const auto last=iq_helper_.LastTs();
-            locked_=iq_helper_.Ready() && last && GetTickCount64()-last<3000;
-            const auto mer=iq_helper_.MerX100();
-            cnr_=!locked_ ? 0 : mer>=0 ? mer*10 : static_cast<std::int32_t>(iq_helper_.Quality()*10);
-            locked=locked_;
-            return 0;
-        }
-        const auto now=Clock::now();
-        if (now-last_stats_>=std::chrono::milliseconds(100)) {
-            std::vector<std::uint8_t> p;
-            int ret=frontend_.RequestStats(p);
-            if (!ret) ret=frontend_.DecodeStats(p,locked_,cnr_);
-            if (ret) {
-                error_=ret;stream_buf_->StopRequest();
-                msg_err("PX-S1UD: statistics failed ret=%d\n",ret);
-                return ret;
-            }
-            if (signal_log_) LogSignal(p);
-            last_stats_=Clock::now();
-        }
-        locked=locked_;
-        if (locked && capture_ && !output_) EnableOutput();
-        return 0;
+        return session_.CheckLock(locked,cnr_);
     }
     int ReadStat(command::StatType type,std::int32_t& value) override
     {
@@ -193,34 +126,8 @@ protected:
         std::lock_guard<std::mutex> lock(mutex_);
         const bool j83b=params_.system==SystemType::J83B;
         if (!open_) return -EINVAL;
-        if (j83b) {
-            // J.83B はチャンネル定義の中心周波数 (kHz) をそのまま使う (MSi2500 と同じ範囲)
-            if (!j83b_supported_ || params_.freq<90000 || params_.freq>775000) return -EINVAL;
-        } else if (params_.system!=SystemType::ISDB_T || (params_.bandwidth && params_.bandwidth!=6)) return -EINVAL;
-        if (Removed()) return -ECANCELED;
-        if (error_) return error_;
-        DisableOutput(); tuned_=false; locked_=false; cnr_=0;
-        // 前のチャンネルの IQ の送出と helper を止めてから世代を切り替え、前の TS と復調状態を次へ持ち込まない
-        int ret=StopIq();
-        // Siano の制御応答と TS は同じ bulk IN を通る。選局ごとの取消・flush は
-        // メッセージ途中の USB パケットを残し、再開後に TS の端数をヘッダーとして
-        // 読むことがある。受信要求を継続し、Gate の世代で選局前とロック前の TS を除く。
-        if (!ret && !stream_buf_->AdvanceEpoch()) return -EIO;
-        // helperの起動失敗はUSB通信の異常ではない。ファームウェアを切り替える前に起動し、
-        // 失敗時も同じ接続で次の選局を受け付ける。
-        if (!ret && j83b) {
-            if (const int helper_error=StartIqHelper()) return helper_error;
-        }
-        if (!ret) ret=j83b ? TuneJ83b() : TuneIsdbt();
-        if (ret) {
-            msg_err("PX-S1UD: tune failed system=%s frequency_khz=%u ret=%d\n",j83b ? "J.83B" : "ISDB-T",params_.freq,ret);
-            // 失敗した後の要求と応答の対応は保証できないため、この open を失敗状態にする
-            StopIq();
-            error_=ret;stream_buf_->StopRequest();
-            return ret;
-        }
-        tuned_=true; last_stats_=Clock::time_point{}; signal_={}; signal_base_={};
-        return 0;
+        if (!j83b && (params_.system!=SystemType::ISDB_T || (params_.bandwidth && params_.bandwidth!=6))) return -EINVAL;
+        return session_.Tune(j83b ? Session::System::J83b : Session::System::Isdbt,params_.freq);
     }
     int SetStreamId() override { return 0; }
     // J.83B は helper がブロック間の欠落の長さを推定できるまで復調を始めず、その後に等化器を収束させるため、
@@ -233,178 +140,28 @@ protected:
         return params_.system==SystemType::J83B ? 2000 : ReceiverBase::IsdbCLockWaitLimit();
     }
 private:
-    bool Removed() const { return WaitForSingleObject(removed_,0)==WAIT_OBJECT_0; }
-    // J.83B 用の firmware から通常の firmware へ読み込み直す
-    int ReloadIsdbt()
-    {
-        std::vector<std::uint8_t> firmware;
-        const auto path=ResolveFirmwarePath(host_directory_,firmware_);
-        int ret=ReadFirmware(path,firmware);
-        if (!ret) ret=frontend_.Initialize(firmware,true);
-        if (ret) {msg_err("PX-S1UD: ISDB-T firmware reload failed ret=%d firmware=%ls\n",ret,path.c_str());return ret;}
-        loaded_=Loaded::Isdbt;
-        msg_info("PX-S1UD: ISDB-T firmware reloaded firmware=%u.%u\n",frontend_.Version()>>8,frontend_.Version()&255);
-        return 0;
-    }
-    int TuneIsdbt()
-    {
-        if (loaded_==Loaded::J83b) {
-            const int ret=ReloadIsdbt();
-            if (ret) return ret;
-        }
-        return frontend_.Tune(params_.freq);
-    }
-    int StartIqHelper()
-    {
-        // helper を先に起動し、IQ の送出の始めのブロックから渡す
-        // helper の読み取りスレッドだけが呼ぶため、記録はこの起動の間だけ callback が持つ。
-        auto overflow=std::make_shared<px4::StreamOverflowLog>("PX-S1UD J.83B");
-        int ret=iq_helper_.Start(j83b_.helper.wstring(),j83b_.log.wstring(),
-            [this,overflow](const std::uint8_t* data,std::size_t size) {
-                iq_output_.Write([&] {
-                    std::size_t bytes=size;
-                    const bool written=stream_buf_->Write(data,bytes);
-                    overflow->Record(written,size,bytes);
-                    stream_buf_->NotifyWrite();
-                });
-                return true;
-            });
-        if (ret) {msg_err("PX-S1UD: J.83B helper start failed ret=%d helper=%ls\n",ret,j83b_.helper.c_str());return ret;}
-        return 0;
-    }
-    int TuneJ83b()
-    {
-        if (loaded_!=Loaded::J83b) {
-            // J.83B 用の firmware は配布物に含めず、利用者が J83BFirmwarePath で指定する
-            std::vector<std::uint8_t> firmware;
-            int ret=ReadFirmware(j83b_.firmware,firmware);
-            if (ret) {msg_err("PX-S1UD: J.83B firmware read failed ret=%d firmware=%ls\n",ret,j83b_.firmware.c_str());return ret;}
-            ret=frontend_.Initialize(firmware,true,false);
-            if (ret) {msg_err("PX-S1UD: J.83B firmware load failed ret=%d\n",ret);return ret;}
-            loaded_=Loaded::J83b;
-            msg_info("PX-S1UD: J.83B firmware loaded firmware=%u.%u\n",frontend_.Version()>>8,frontend_.Version()&255);
-        }
-        iq_min_pending_=static_cast<unsigned>(TransferCount); iq_max_resubmit_us_=0;
-        iq_feed_=true;
-        const int ret=frontend_.SetIqStream(params_.freq*1000);
-        if (ret) {
-            if (ret==-ETIMEDOUT) msg_err("PX-S1UD: the firmware does not answer the IQ stream request\n");
-            return ret;
-        }
-        iq_=true; iq_output_.SetEnabled(capture_);
-        msg_info("PX-S1UD: J.83B started frequency_khz=%u\n",params_.freq);
-        return 0;
-    }
-    // IQ の送出と helper を止める。送出の停止要求の失敗は、この open の失敗として返す
-    int StopIq()
-    {
-        int ret=0;
-        iq_output_.SetEnabled(false);
-        if (iq_) {
-            iq_=false;
-            std::vector<std::uint8_t> p;
-            if (!error_ && !Removed()) ret=frontend_.SetIqStream(0,&p);
-            // 停止の応答は送出中のチップのバッファーの統計。BonDriver_S1UD.dll のログの書式に合わせると、
-            // 結果、溜めた数、送った数、不明、捨てた数、タイムアウト、エラーの順 (実機で filled - sent = dropped)。
-            // チップが捨てたブロックは USB へ送り切れなかったもので、ホストの受信要求が尽きたか (min_pending が 0) と
-            // あわせて欠落の原因の切り分けに使う
-            const auto w=[&](std::size_t i) {return p.size()>=4*(i+1) ? sms_get_le32(p.data()+4*i) : 0U;};
-            msg_info("PX-S1UD: J.83B chip result=%u filled=%u sent=%u dropped=%u timeouts=%u errors=%u bytes=%zu "
-                "host min_pending=%u max_resubmit_us=%llu\n",w(0),w(1),w(2),w(4),w(5),w(6),p.size(),
-                iq_min_pending_.load(),static_cast<unsigned long long>(iq_max_resubmit_us_.load()));
-        }
-        iq_feed_=false;
-        if (iq_helper_.Running()) {
-            const auto dropped=iq_helper_.Dropped();
-            iq_helper_.Stop();
-            if (dropped) msg_warn("PX-S1UD: J.83B helper queue dropped %llu blocks\n",static_cast<unsigned long long>(dropped));
-        }
-        return ret;
-    }
-    // 受信品質を TS 異常と同じ時刻軸で照合する。統計はアプリの信号レベル取得で送る既存要求を流用し、
-    // TS と同じ bulk IN を使う制御転送を増やさない。誤り・ロック外れの応答は即時に、
-    // それ以外は約10秒ごとに集計する。解釈できない応答でも受信は止めない。
-    // 実機の err・total・tmcc はロック時に0へ戻る累積値のため、前回応答からの増分で判定・集計する。
-    void LogSignal(const std::vector<std::uint8_t>& p)
-    {
-        SignalStats s{};
-        if (const int ret=frontend_.DecodeSignal(p,s)) {
-            if (!signal_.decode_warned) msg_warn("PX-S1UD: signal stats unavailable bytes=%zu ret=%d\n",p.size(),ret);
-            signal_.decode_warned=true;
-            return;
-        }
-        const auto now=Clock::now();
-        if (!signal_.polls) {signal_.window=now;signal_.min_snr=signal_.max_snr=s.snr;}
-        ++signal_.polls; if (!s.demod_locked) ++signal_.unlocked;
-        signal_.min_snr=(std::min)(signal_.min_snr,s.snr); signal_.max_snr=(std::max)(signal_.max_snr,s.snr);
-        signal_.frequency=s.frequency; signal_.layers=s.layers;
-        // 初回は基準だけを取り、値が減った場合はロックし直しによる0からの再計数とみなす。
-        const auto delta=[this](std::uint32_t current,std::uint32_t& previous) {
-            const auto d=!signal_base_.valid ? 0U : current>=previous ? current-previous : current;
-            previous=current; return d;
-        };
-        bool bad=!s.demod_locked;
-        char detail[384]={}; std::size_t used=0;
-        for (std::size_t i=0;i<3;++i) {
-            const auto& l=s.layer[i];
-            if (l.segments>13) continue;
-            const auto err=delta(l.error_ts,signal_base_.error_ts[i]);
-            const auto total=delta(l.total_ts,signal_base_.total_ts[i]);
-            const auto tmcc=delta(l.tmcc_errors,signal_base_.tmcc[i]);
-            signal_.error_ts[i]+=err; signal_.total_ts[i]+=total; signal_.tmcc[i]+=tmcc;
-            bad=bad || err || tmcc;
-            const int n=sprintf_s(detail+used,sizeof(detail)-used," %c:seg=%u err=+%u(%u) total=+%u(%u) ber=%lld tmcc=+%u(%u)",
-                static_cast<char>('A'+i),l.segments,err,l.error_ts,total,l.total_ts,
-                l.ber==0xffffffff ? -1LL : static_cast<long long>(l.ber),tmcc,l.tmcc_errors);
-            if (n>0) used+=static_cast<std::size_t>(n);
-        }
-        signal_base_.valid=true;
-        if (bad) msg_warn("PX-S1UD: signal errors rf_locked=%d demod_locked=%d snr=%d rssi=%d%s\n",
-            s.rf_locked,s.demod_locked,s.snr,s.rssi,detail);
-        if (now-signal_.window<std::chrono::seconds(10)) return;
-        char summary[256]={}; used=0;
-        for (std::size_t i=0;i<3;++i) {
-            if (!signal_.total_ts[i] && !signal_.error_ts[i] && !signal_.tmcc[i]) continue;
-            const int n=sprintf_s(summary+used,sizeof(summary)-used," %c:err=%llu total=%llu tmcc=%llu",
-                static_cast<char>('A'+i),signal_.error_ts[i],signal_.total_ts[i],signal_.tmcc[i]);
-            if (n>0) used+=static_cast<std::size_t>(n);
-        }
-        msg_info("PX-S1UD: signal summary polls=%u unlocked=%u snr_min=%d snr_max=%d frequency=%u layers=%u%s\n",
-            signal_.polls,signal_.unlocked,signal_.min_snr,signal_.max_snr,signal_.frequency,signal_.layers,summary);
-        const bool warned=signal_.decode_warned; signal_={}; signal_.decode_warned=warned;
-    }
-    void DisableOutput()
-    {
-        // Feed/Write と同じロックで閉じ、呼び出しから戻った後の旧 TS 書込みを防ぐ。
-        gate_.SetEnabled(false); output_=false;
-    }
-    void EnableOutput()
-    {
-        gate_.SetEnabled(true); output_=true;
-    }
-    void Reloading(bool on) override
-    {
-        if (on) reload_recoveries_=0;
-        reloading_=on;
-    }
+    struct Read {
+        OVERLAPPED op{};
+        std::array<std::uint8_t,TransferSize> data{};
+        bool pending=false;
+        std::uint64_t generation=0;
+    };
+    using Reads=std::array<Read,TransferCount>;
+    bool Removed() const override { return WaitForSingleObject(removed_,0)==WAIT_OBJECT_0; }
     int Delay(unsigned ms) override
     {
         return WaitForSingleObject(removed_,ms)==WAIT_TIMEOUT ? 0 : -ECANCELED;
     }
-    int Exchange(const std::vector<std::uint8_t>& message,std::uint16_t response,
-                 std::vector<std::uint8_t>& payload,unsigned ms) override
+    int Send(const std::uint8_t* data,std::size_t size,Clock::time_point deadline) override
     {
         if (Removed()) return -ECANCELED;
-        if (error_) return error_;
-        const auto deadline=Clock::now()+std::chrono::milliseconds(ms);
-        {
-            std::lock_guard<std::mutex> lock(response_mutex_);
-            expected_=response; received_=false; response_.clear();
-        }
+        const auto left=deadline-Clock::now();
+        const auto ms=left<=Clock::duration::zero() ? DWORD{0} :
+            static_cast<DWORD>(std::chrono::duration_cast<std::chrono::milliseconds>(left).count());
         OVERLAPPED op{}; op.hEvent=CreateEventW(nullptr,TRUE,FALSE,nullptr);
         if (!op.hEvent) return -ENOMEM;
         ULONG bytes=0;
-        BOOL ok=WinUsb_WritePipe(usb_,2,const_cast<PUCHAR>(message.data()),static_cast<ULONG>(message.size()),nullptr,&op);
+        BOOL ok=WinUsb_WritePipe(usb_,2,const_cast<PUCHAR>(data),static_cast<ULONG>(size),nullptr,&op);
         DWORD e=ok ? ERROR_SUCCESS : GetLastError();
         if (ok || e==ERROR_IO_PENDING) {
             HANDLE events[]={removed_,op.hEvent};
@@ -418,27 +175,56 @@ private:
             }
         }
         CloseHandle(op.hEvent);
-        int ret=ok ? (bytes==message.size() ? 0 : -EIO) : UsbError(e);
-        if (!ret && response) {
-            std::unique_lock<std::mutex> lock(response_mutex_);
-            if (!responses_changed_.wait_until(lock,deadline,[&]{return received_ || error_ || Removed();})) ret=-ETIMEDOUT;
-            else if (Removed()) ret=-ECANCELED;
-            else if (error_) ret=error_;
-            else payload=response_;
-            expected_=0;
+        const int ret=ok ? (bytes==size ? 0 : -EIO) : UsbError(e);
+        if (ret) msg_err("PX-S1UD: USB write failed bytes=%zu ret=%d win32=%lu\n",size,ret,e);
+        return ret;
+    }
+    void Failed(int) override {stream_buf_->StopRequest();}
+    bool AdvanceEpoch() override {return stream_buf_->AdvanceEpoch();}
+    int ReadFirmware(FirmwareKind kind,std::vector<std::uint8_t>& firmware) override
+    {
+        if (kind==FirmwareKind::J83b) {
+            // J.83B 用の firmware は J83BFirmwarePath で指定する
+            const int ret=ReadFirmwareFile(j83b_.firmware,firmware);
+            if (ret) msg_err("PX-S1UD: J.83B firmware read failed ret=%d firmware=%ls\n",ret,j83b_.firmware.c_str());
+            return ret;
         }
-        if (ret) {
-            // 通し番号のない応答を次の要求へ誤対応させないため、この open を失敗状態にする。
-            error_=ret; stream_buf_->StopRequest();
-            msg_err("PX-S1UD: command=%u response=%u failed ret=%d win32=%lu\n",sms_get_le16(message.data()),response,ret,e);
+        // 配置変更後の再オープンでも、INI 指定先・EXE 直下・配布用サブフォルダーを再探索する。
+        const auto path=ResolveFirmwarePath(host_directory_,firmware_);
+        const int ret=ReadFirmwareFile(path,firmware);
+        if (ret==-ENOENT) {
+            for (const auto& candidate:FirmwareCandidates(host_directory_,firmware_))
+                msg_warn("PX-S1UD: firmware candidate: %ls\n",candidate.c_str());
+        } else if (ret) {
+            msg_err("PX-S1UD: firmware read failed ret=%d firmware=%ls\n",ret,path.c_str());
         }
         return ret;
     }
-    int StartWorker()
+    std::function<void(const std::uint8_t*,std::size_t)> HelperWriter() override
+    {
+        // 記録は helper の起動ごとに作り、その起動の間だけ helper の読み取りスレッドが使う
+        auto overflow=std::make_shared<px4::StreamOverflowLog>("PX-S1UD J.83B");
+        return [this,overflow](const std::uint8_t* data,std::size_t size) {
+            std::size_t bytes=size;
+            const bool written=stream_buf_->Write(data,bytes);
+            overflow->Record(written,size,bytes);
+            stream_buf_->NotifyWrite();
+        };
+    }
+    // 受信のスレッドの中 (Session::Receive の IQ の処理) からだけ呼ばれる
+    unsigned PendingReads() override
+    {
+        unsigned outstanding=0;
+        if (const auto* reads=reads_.load())
+            for (const auto& q:*reads) if (q.pending && WaitForSingleObject(q.op.hEvent,0)!=WAIT_OBJECT_0) ++outstanding;
+        return outstanding;
+    }
+    bool SignalLogEnabled() override {return (msg_get_mode() & (MSG_MODE_LOG_FILE | MSG_MODE_CONSOLE))!=0;}
+    int StartReceive() override
     {
         if (Removed()) return -ECANCELED;
         if (worker_.joinable()) return -EALREADY;
-        error_=0; stop_=false;
+        stop_=false;
         if (!WinUsb_ResetPipe(usb_,in_) || !WinUsb_ResetPipe(usb_,2) || !WinUsb_FlushPipe(usb_,in_)) {
             msg_err("PX-S1UD: pipe reset/flush failed in=0x%02x win32=%lu\n",in_,GetLastError());
             return -EIO;
@@ -447,6 +233,7 @@ private:
         catch (...) {stop_=true;return -ENOMEM;}
         return 0;
     }
+    void StopReceive() override {StopWorker();}
     void StopWorker()
     {
         stop_=true;
@@ -458,25 +245,19 @@ private:
         // チップの送信枠は約 7 ms 分しかないため、TS の配信スレッドと同じく優先度を上げて読み取りを途切れさせない
         SetThreadPriority(GetCurrentThread(),THREAD_PRIORITY_TIME_CRITICAL);
         try { RunTransfers(); }
-        catch (const std::bad_alloc&) { error_=-ENOMEM;msg_err("PX-S1UD: receive allocation failed\n"); }
-        catch (const std::exception& e) { error_=-EIO;msg_err("PX-S1UD: receive exception: %s\n",e.what()); }
-        catch (...) { error_=-EIO;msg_err("PX-S1UD: unknown receive exception\n"); }
-        if (error_) {stream_buf_->StopRequest();responses_changed_.notify_all();}
+        catch (const std::bad_alloc&) { session_.Fail(-ENOMEM);msg_err("PX-S1UD: receive allocation failed\n"); }
+        catch (const std::exception& e) { session_.Fail(-EIO);msg_err("PX-S1UD: receive exception: %s\n",e.what()); }
+        catch (...) { session_.Fail(-EIO);msg_err("PX-S1UD: unknown receive exception\n"); }
     }
     void RunTransfers()
     {
-        struct Read {
-            OVERLAPPED op{};
-            std::array<std::uint8_t,TransferSize> data{};
-            bool pending=false;
-            std::uint64_t generation=0;
-        };
         // 32要求は x86 の既定スタックを圧迫するためヒープへ確保する。
-        auto reads=std::make_unique<std::array<Read,TransferCount>>();
+        auto reads=std::make_unique<Reads>();
         // 例外経路でも取消完了まで OVERLAPPED とバッファの寿命を保つ。
         struct Cleanup {
-            Receiver& owner; std::array<Read,TransferCount>& reads;
+            Receiver& owner; Reads& reads;
             ~Cleanup() {
+                owner.reads_=nullptr;
                 for (auto& r:reads) {
                     if (r.pending) {CancelIoEx(owner.file_,&r.op);ULONG n=0;WinUsb_GetOverlappedResult(owner.usb_,&r.op,&n,TRUE);}
                     if (r.op.hEvent) CloseHandle(r.op.hEvent);
@@ -488,7 +269,7 @@ private:
         const bool diagnostic_enabled=(msg_get_mode() & (MSG_MODE_LOG_FILE | MSG_MODE_CONSOLE))!=0;
         diagnostics.Enable(diagnostic_enabled);
         diagnostics.SetReadyProbe([](void* context) noexcept {
-            const auto& requests=*static_cast<std::array<Read,TransferCount>*>(context);
+            const auto& requests=*static_cast<Reads*>(context);
             int ready=0;
             for (const auto& request:requests)
                 if (request.pending && WaitForSingleObject(request.op.hEvent,0)==WAIT_OBJECT_0) ++ready;
@@ -499,10 +280,10 @@ private:
         std::uint64_t last_gap_us=0;
         auto submit=[&](Read& r) {
             if (stop_ || Removed()) return false;
-            ResetEvent(r.op.hEvent); r.generation=gate_.Ticket();
+            ResetEvent(r.op.hEvent); r.generation=session_.Ticket();
             BOOL ok=WinUsb_ReadPipe(usb_,in_,r.data.data(),static_cast<ULONG>(r.data.size()),nullptr,&r.op);
             if (!ok && GetLastError()!=ERROR_IO_PENDING) {
-                const auto e=GetLastError();error_=UsbError(e);
+                const auto e=GetLastError();session_.Fail(UsbError(e));
                 msg_err("PX-S1UD: USB read submission failed endpoint=0x%02x win32=%lu\n",in_,e);
                 return false;
             }
@@ -515,22 +296,19 @@ private:
         };
         for (auto& r:*reads) {
             r.op.hEvent=CreateEventW(nullptr,TRUE,FALSE,nullptr);
-            if (!r.op.hEvent) {error_=-ENOMEM;return;}
-            if (!submit(r)) return;
+            if (!r.op.hEvent) {session_.Fail(-ENOMEM);return;}
         }
-        std::uint64_t malformed=0,iq_malformed=0,iq_blocks_seen=0;
-        // 受信の開始後に最初のメッセージを解釈したか、それまでに読み飛ばした転送の数
-        bool synchronized=false; unsigned stale=0;
-        Clock::time_point last_iq{};
+        reads_=reads.get();
+        for (auto& r:*reads) if (!submit(r)) return;
         std::size_t next=0;
-        while (!stop_ && !Removed() && !error_) {
+        while (!stop_ && !Removed() && !session_.Error()) {
             auto& r=(*reads)[next];
             HANDLE events[]={removed_,r.op.hEvent};
             auto result=WaitForMultipleObjects(2,events,FALSE,100);
             if (result==WAIT_TIMEOUT) continue;
             if (result!=WAIT_OBJECT_0+1) {
                 if (!stop_) {
-                    error_=result==WAIT_OBJECT_0 ? -ECANCELED : -EIO;
+                    session_.Fail(result==WAIT_OBJECT_0 ? -ECANCELED : -EIO);
                     msg_err("PX-S1UD: USB receive wait failed result=%lu win32=%lu\n",result,GetLastError());
                 }
                 break;
@@ -540,10 +318,9 @@ private:
                 const auto e=GetLastError();
                 // firmware の読み込み直しで J.83B 用の firmware が ROM へ戻るとき、受信が ERROR_GEN_FAILURE で失敗し、
                 // パイプのリセットで残りの要求も取り消される。BonDriver_S1UD.dll と同じく IN をリセットして要求を出し直す。
-                // 読み込み直しの間だけ、要求の数の 4 倍までに限る
-                if (!stop_ && reloading_ && (e==ERROR_GEN_FAILURE || e==ERROR_OPERATION_ABORTED) &&
-                    reload_recoveries_<TransferCount*4) {
-                    ++reload_recoveries_;r.pending=false;
+                // 読み込み直しの間だけ、要求の数の 4 倍までに限る (Session::ReloadRecovery)
+                if (!stop_ && (e==ERROR_GEN_FAILURE || e==ERROR_OPERATION_ABORTED) && session_.ReloadRecovery()) {
+                    r.pending=false;
                     if (e==ERROR_GEN_FAILURE) {
                         msg_warn("PX-S1UD: USB read failed during firmware reload win32=%lu; resetting the IN pipe\n",e);
                         WinUsb_ResetPipe(usb_,in_);
@@ -552,9 +329,8 @@ private:
                     next=(next+1)%TransferCount;
                     continue;
                 }
-                SetLastError(e);
                 if (!stop_) {
-                    const auto e=GetLastError();error_=UsbError(e);
+                    session_.Fail(UsbError(e));
                     msg_err("PX-S1UD: USB read completion failed endpoint=0x%02x win32=%lu\n",in_,e);
                 }
                 break;
@@ -568,108 +344,55 @@ private:
                 t.completed_at=(static_cast<std::uint64_t>(ft.dwHighDateTime)<<32)|ft.dwLowDateTime;
                 t.slot=static_cast<unsigned>(next);t.bytes=n;trace=&tracer.Begin(t);
             }
-            sms_frame frame{};
-            const auto parse=n ? sms_frame_message(r.data.data(),n,alignment_,&frame) : 0;
-            if (parse && !synchronized && stale<MaxStaleTransfers) {
-                // 前のホストが受信を止めたとき、メッセージの途中で取り消した読み取りの残りは機器側に残り、
-                // ホストのパイプのリセットでは消えない。実機では、先頭が TS の途中の 1 回の転送だけで、
-                // その後は境界から読めた。最初のメッセージを解釈するまでは、この残りを読み飛ばす
-                ++stale;
-                msg_warn("PX-S1UD: skipped a stale USB transfer bytes=%lu ret=%d\n",n,parse);
-            } else if (n) {
-                if (parse) {
-                    ++malformed;error_=-EBADMSG;
-                    msg_err("PX-S1UD: invalid USB frame bytes=%lu alignment=%zu ret=%d\n",n,alignment_,parse);
-                    break;
-                }
-                synchronized=true;
-                if (trace) {trace->frame_type=frame.type;trace->frame_length=frame.length;trace->frame_flags=frame.flags;}
-                const auto* p=r.data.data()+frame.payload_offset;
-                if (frame.type==MSG_IQ_DATA) {
-                    // J.83B の IQ のブロック。復調は helper が行い、ここでは待たずにキューへ積む
-                    if (frame.payload_length!=IqBlockBytes) ++iq_malformed;
-                    else if (iq_feed_) {
-                        iq_helper_.Feed(p,frame.payload_length);
-                        // 欠落の切り分け用: 前の IQ の処理からの間隔の最大と、8 ブロックごとに数えた、
-                        // ホストコントローラーに残っている (未完了の) 受信要求の最小数
-                        const auto now=Clock::now();
-                        if (iq_blocks_seen++) {
-                            const auto us=static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(now-last_iq).count());
-                            if (us>iq_max_resubmit_us_) iq_max_resubmit_us_=us;
-                        }
-                        last_iq=now;
-                        if (!(iq_blocks_seen&7)) {
-                            unsigned outstanding=0;
-                            for (const auto& q:*reads) if (q.pending && WaitForSingleObject(q.op.hEvent,0)!=WAIT_OBJECT_0) ++outstanding;
-                            if (outstanding<iq_min_pending_) iq_min_pending_=outstanding;
+            const auto received=session_.Receive(r.generation,r.data.data(),n,alignment_,
+                [this,&diagnostics,&overflow,&r,&last_submit,&last_gap_us,diagnostic_enabled,trace](const std::uint8_t* data,std::size_t size) {
+                    // 異常検出とメタデータだけを記録し、TS 本体と転送条件には触れない。
+                    if (diagnostic_enabled) {
+                        const auto elapsed=static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(Clock::now()-last_submit).count());
+                        diagnostics.Context((std::max)(elapsed,last_gap_us));
+                        // framer の再同期で捨てたバイトは TS に残らないため、CC 異常と並べて記録する。
+                        diagnostics.Source(session_.DiagnosticsInWrite().discarded);
+                        diagnostics.Feed(data,size,r.generation);
+                        if (trace && size>=188) {
+                            const auto* last=data+(size/188-1)*188;
+                            trace->packets=static_cast<unsigned>(size/188);
+                            trace->first_pid=((data[1]&31)<<8)|data[2];trace->first_cc=data[3]&15;
+                            trace->last_pid=((last[1]&31)<<8)|last[2];trace->last_cc=last[3]&15;
                         }
                     }
-                } else if (frame.type==MSG_SMS_DVBT_BDA_DATA) {
-                    if (!gate_.Feed(r.generation,p,frame.payload_length,[this,&diagnostics,&overflow,&r,&last_submit,&last_gap_us,diagnostic_enabled,trace](const std::uint8_t* data,std::size_t size) {
-                        // 異常検出とメタデータだけを記録し、TS 本体と転送条件には触れない。
-                        if (diagnostic_enabled) {
-                            const auto elapsed=static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(Clock::now()-last_submit).count());
-                            diagnostics.Context((std::max)(elapsed,last_gap_us));
-                            // framer の再同期で捨てたバイトは TS に残らないため、CC 異常と並べて記録する。
-                            diagnostics.Source(gate_.DiagnosticsInWrite().discarded);
-                            diagnostics.Feed(data,size,r.generation);
-                            if (trace && size>=188) {
-                                const auto* last=data+(size/188-1)*188;
-                                trace->packets=static_cast<unsigned>(size/188);
-                                trace->first_pid=((data[1]&31)<<8)|data[2];trace->first_cc=data[3]&15;
-                                trace->last_pid=((last[1]&31)<<8)|last[2];trace->last_cc=last[3]&15;
-                            }
-                        }
-                        std::size_t bytes=size;
-                        const bool written=stream_buf_->Write(data,bytes);
-                        stream_buf_->NotifyWrite();
-                        overflow.Record(written,size,bytes);
-                        return true;
-                    })) error_=-ENOBUFS;
-                } else {
-                    std::lock_guard<std::mutex> lock(response_mutex_);
-                    if (frame.type==expected_) {
-                        response_.assign(p,p+frame.payload_length);received_=true;responses_changed_.notify_all();
-                    }
-                }
+                    std::size_t bytes=size;
+                    const bool written=stream_buf_->Write(data,bytes);
+                    stream_buf_->NotifyWrite();
+                    overflow.Record(written,size,bytes);
+                    return true;
+                });
+            if (trace && received.parsed) {
+                trace->frame_type=received.frame.type;trace->frame_length=received.frame.length;trace->frame_flags=received.frame.flags;
             }
+            if (received.error) break;
             if (trace) tracer.End(diagnostics,diagnostics.AnomalyCount()!=anomalies,GetTickCount64());
             if (!submit(r)) break;
             next=(next+1)%TransferCount;
         }
         diagnostics.Reset();
-        const auto& framer=gate_.Diagnostics();
+        const auto framer=session_.Diagnostics();
         msg_info("PX-S1UD: RX stopped packets=%llu tei=%llu discarded=%llu malformed=%llu iq_malformed=%llu ret=%d\n",
             static_cast<unsigned long long>(framer.packets),static_cast<unsigned long long>(framer.tei),
-            static_cast<unsigned long long>(framer.discarded),static_cast<unsigned long long>(malformed),
-            static_cast<unsigned long long>(iq_malformed),error_.load());
+            static_cast<unsigned long long>(framer.discarded),static_cast<unsigned long long>(session_.Malformed()),
+            static_cast<unsigned long long>(session_.IqMalformed()),session_.Error());
     }
     HANDLE file_; WINUSB_INTERFACE_HANDLE usb_; HANDLE removed_; UCHAR in_; std::size_t alignment_;
-    std::filesystem::path host_directory_,firmware_; Frontend frontend_;
-    std::mutex mutex_,response_mutex_; std::condition_variable closed_,responses_changed_;
-    bool open_=false,capture_=false,tuned_=false,locked_=false;
-    std::int32_t cnr_=0; Clock::time_point last_stats_{};
-    struct SignalLog {
-        Clock::time_point window{}; unsigned polls=0,unlocked=0; std::int32_t min_snr=0,max_snr=0;
-        std::uint32_t frequency=0,layers=0; std::array<unsigned long long,3> error_ts{},total_ts{},tmcc{};
-        bool decode_warned=false;
-    } signal_;
-    struct SignalBase {bool valid=false; std::array<std::uint32_t,3> error_ts{},total_ts{},tmcc{};} signal_base_;
-    bool signal_log_=false;
-    std::atomic_bool stop_{true},output_{false}; std::atomic_int error_{0};
-    CaptureGate gate_;
-    std::uint16_t expected_=0; bool received_=false; std::vector<std::uint8_t> response_;
-    // J.83B。iq_ と loaded_ は mutex_ で保護し、iq_feed_ と iq_output_ は受信と helper の読み取りのスレッドが読む。
-    // loaded_ の Unknown は、この DriverHost が読み込んでいない (open 前から稼働中の) firmware
-    enum class Loaded {Unknown,Isdbt,J83b};
-    J83bConfig j83b_; bool j83b_supported_=false,iq_=false; Loaded loaded_=Loaded::Unknown;
-    std::atomic_bool iq_feed_{false};
-    IqOutputGate iq_output_;
-    // firmware の読み込み直しの間か (Io::Reloading) と、その間に回復させた受信の失敗の数
-    std::atomic_bool reloading_{false}; std::atomic_uint reload_recoveries_{0};
-    // IQ の送出中に観測した、未完了の受信要求の最小数と、完了から出し直すまでの最大時間 (受信のスレッドが書く)
-    std::atomic_uint iq_min_pending_{0}; std::atomic<std::uint64_t> iq_max_resubmit_us_{0};
+    std::filesystem::path host_directory_,firmware_;
+    J83bConfig j83b_;
+    // session_ より先に作り、後に壊す (session_ が helper を参照する)
     IqHelper iq_helper_;
+    Session session_;
+    std::mutex mutex_; std::condition_variable closed_;
+    bool open_=false,capturing_=false;
+    std::int32_t cnr_=0;
+    std::atomic_bool stop_{true};
+    // 受信のスレッドが持つ受信要求。IQ の欠落の切り分けで、受信のスレッドの中から数える
+    std::atomic<Reads*> reads_{nullptr};
     std::thread worker_;
 };
 

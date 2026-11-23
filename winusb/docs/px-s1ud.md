@@ -3,6 +3,8 @@
 対象は PLEX PX-S1UD（USB ID `3275:0080`）、地上デジタル放送の1チューナーです。
 Windows の DriverHost_PX4 が WinUSB を直接制御するため、libusb DLL や
 sianod の起動は不要です。Linux カーネル版と macOS 版への対応は対象外です。
+Linux ではユーザー空間のデーモン px4-cused が、この WinUSB 版と同じ制御のコード (`siano/session.cpp`) で
+PX-S1UD を扱います (`docs/20261122_px_s1ud_linux_cuse_design.md`)。
 
 ## 導入
 

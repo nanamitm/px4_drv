@@ -28,12 +28,15 @@ private:
 
 /*
  * 同じ機種を複数台つないだときに VID と PID だけでは区別できないため、sysfs で USB のバス番号とデバイス番号まで照合する
- * PIX-DT295 のカードは CUSE のデーモン (cuse/) が作り、USB 機器を親に持たないため、デーモンが書く対応表 (readers) で照合する
+ * PIX-DT295、CECH-ZD1J、GV-MVP/XZ3 のカードは CUSE のデーモン (cuse/) が作り、USB 機器を親に持たないため、デーモンが書く対応表 (readers) で照合する
+ * 既定の対応表を使う場合は、デーモンの名前を px4-dt295d から px4-cused へ変える前の表 (LegacyCardReaderMap) も読む
  */
+constexpr const char *CardReaderMap = "/run/px4-cused/readers";
+constexpr const char *LegacyCardReaderMap = "/run/px4-dt295/readers";
 int ResolveCardDevice(const std::string &name, std::string &path,
 		      const std::string &sysfs = "/sys/class/px4card",
 		      const std::string &devdir = "/dev",
 		      const std::string &usbsys = "/sys/bus/usb/devices",
-		      const std::string &readers = "/run/px4-dt295/readers");
+		      const std::string &readers = CardReaderMap);
 
 } // namespace px4

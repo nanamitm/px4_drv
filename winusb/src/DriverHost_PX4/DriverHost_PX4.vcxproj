@@ -275,6 +275,9 @@
     <ClCompile Include="device_manager.cpp" />
     <ClCompile Include="pxbcud\device.cpp" />
     <ClCompile Include="rtlsdr\rtl_device.cpp" />
+    <ClCompile Include="rtlsdr\session.cpp">
+      <ObjectFileName>$(IntDir)rtlsdr_session.obj</ObjectFileName>
+    </ClCompile>
     <ClCompile Include="msi2500\msi2500_device.cpp" />
     <ClCompile Include="pxbcud\frontend.cpp" />
     <ClCompile Include="siano\device.cpp">
@@ -287,9 +290,13 @@
       <ObjectFileName>$(IntDir)siano_iq_helper.obj</ObjectFileName>
     </ClCompile>
     <ClCompile Include="siano\protocol.c" />
+    <ClCompile Include="siano\session.cpp">
+      <ObjectFileName>$(IntDir)siano_session.obj</ObjectFileName>
+    </ClCompile>
     <ClCompile Include="xz3\device.cpp"><ObjectFileName>$(IntDir)xz3_device.obj</ObjectFileName></ClCompile>
     <ClCompile Include="xz3\frontend.cpp"><ObjectFileName>$(IntDir)xz3_frontend.obj</ObjectFileName></ClCompile>
     <ClCompile Include="xz3\card_uart.cpp"><ObjectFileName>$(IntDir)xz3_card_uart.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="xz3\session.cpp"><ObjectFileName>$(IntDir)xz3_session.obj</ObjectFileName></ClCompile>
     <ClCompile Include="dt295\device.cpp"><ObjectFileName>$(IntDir)dt295_device.obj</ObjectFileName></ClCompile>
     <ClCompile Include="dt295\winusb_transport.cpp" />
     <ClCompile Include="dt295\card_uart.cpp"><ObjectFileName>$(IntDir)dt295_card_uart.obj</ObjectFileName></ClCompile>
@@ -354,6 +361,7 @@
     <ClInclude Include="xz3\device.hpp" />
     <ClInclude Include="xz3\frontend.hpp" />
     <ClInclude Include="xz3\card_uart.hpp" />
+    <ClInclude Include="xz3\session.hpp" />
     <ClInclude Include="device_base.hpp" />
     <ClInclude Include="device_definition_set.hpp" />
     <ClInclude Include="device_manager.hpp" />
@@ -366,8 +374,11 @@
     <ClInclude Include="siano\firmware_path.hpp" />
     <ClInclude Include="siano\frontend.hpp" />
     <ClInclude Include="siano\iq_helper.hpp" />
+    <ClInclude Include="siano\iq_helper_output.hpp" />
+    <ClInclude Include="siano\session.hpp" />
     <ClInclude Include="siano\protocol.h" />
     <ClInclude Include="rtlsdr\protocol.hpp" />
+    <ClInclude Include="rtlsdr\session.hpp" />
     <ClInclude Include="pxbcud\frontend.hpp" />
     <ClInclude Include="pxbcud\plain_framer.hpp" />
     <ClInclude Include="pxbcud\pat_gate.hpp" />

@@ -27,6 +27,8 @@ public:
     }
     // milliseconds 待つ。切断されたら -ENODEV、待ち終えたら 0 を返す。
     int Wait(unsigned milliseconds);
+    // until まで待つ。torne の復調器の待機はミリ秒より短い単位で指定されるため、時刻で受け取る。
+    int WaitUntil(std::chrono::steady_clock::time_point until);
 
 private:
     mutable std::mutex mutex_;

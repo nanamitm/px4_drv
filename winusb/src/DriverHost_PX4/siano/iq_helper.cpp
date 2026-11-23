@@ -1,6 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-only
 #include "iq_helper.hpp"
-#include "../rtlsdr/protocol.hpp"
 #include "msg.h"
 #include <algorithm>
 #include <array>
@@ -30,8 +29,10 @@ std::wstring Quote(const std::wstring& input)
 void CloseIf(HANDLE& h) {if (h && h!=INVALID_HANDLE_VALUE) CloseHandle(h);h=nullptr;}
 }
 
-int IqHelper::Start(const std::wstring& exe,const std::wstring& log,TsHandler ts)
+int IqHelper::Start(TsHandler ts)
 {
+    const std::wstring& exe=exe_;
+    const std::wstring& log=log_;
     Stop();
     ts_=std::move(ts);
     SECURITY_ATTRIBUTES sa{sizeof(sa),nullptr,TRUE};
@@ -73,7 +74,7 @@ int IqHelper::Start(const std::wstring& exe,const std::wstring& log,TsHandler ts
         std::lock_guard<std::mutex> lock(mutex_);
         closing_=false;queue_.clear();
     }
-    ready_=false;failed_=false;stopping_=false;last_ts_=0;quality_=0;mer_x100_=-1;dropped_=0;
+    output_state_.Reset();failed_=false;stopping_=false;dropped_=0;
     const bool resumed=ResumeThread(process.hThread)!=static_cast<DWORD>(-1);
     CloseHandle(process.hThread);
     if (!resumed) {Stop();return -EIO;}
@@ -128,37 +129,11 @@ void IqHelper::Write() noexcept
 void IqHelper::Read() noexcept
 {
     try {
-        rtlsdr::Frames frames;
         std::array<std::uint8_t,65536> bytes{};
         for (;;) {
             DWORD got=0;
             if (!ReadFile(output_,bytes.data(),static_cast<DWORD>(bytes.size()),&got,nullptr) || !got) break;
-            bool valid=true;
-            // Frames::Feed は 1 回の入力を MaxTs までに制限するため、分けて渡す
-            for (DWORD offset=0;valid && offset<got;) {
-                const DWORD part=(std::min)(got-offset,static_cast<DWORD>(rtlsdr::MaxTs));
-                valid=frames.Feed(bytes.data()+offset,part,[&](const rtlsdr::Frame& frame,const std::uint8_t* data) {
-                    if (frame.kind==1) ready_=true;
-                    if (frame.kind==4) {
-                        msg_err("PX-S1UD: J.83B helper error: %.*s\n",static_cast<int>(frame.size),reinterpret_cast<const char*>(data));
-                        return false;
-                    }
-                    if (frame.kind==3) {
-                        quality_=frame.quality;
-                        // 判定帰還から外れた間など MER が載らない状態は、直前の値を残す。
-                        // ロックの判定は TS の到着で行い、MER は表示だけに使うため
-                        std::uint32_t mer=0;
-                        if (rtlsdr::StatusMer(frame,data,mer)) mer_x100_=static_cast<std::int32_t>(mer);
-                    }
-                    if (frame.kind==2) {
-                        quality_=frame.quality;last_ts_=GetTickCount64();
-                        if (!stopping_ && !ts_(data,frame.size)) return false;
-                    }
-                    return true;
-                });
-                offset+=part;
-            }
-            if (!valid) {Fail("invalid or failed helper frame");return;}
+            if (!output_state_.Feed(bytes.data(),got,MonotonicMs(),!stopping_,ts_)) {Fail("invalid or failed helper frame");return;}
         }
     } catch (const std::exception& e) {
         msg_err("PX-S1UD: J.83B helper reader failed: %s\n",e.what());
@@ -170,7 +145,7 @@ void IqHelper::Fail(const char* reason)
 {
     if (stopping_ || failed_.exchange(true)) return;
     msg_err("PX-S1UD: J.83B %s\n",reason);
-    quality_=0;
+    output_state_.ClearQuality();
     // 書き込み中の WriteFile を終わらせるため、helper を止める
     if (job_) TerminateJobObject(job_,ERROR_INVALID_DATA);
 }
@@ -192,6 +167,6 @@ void IqHelper::Stop()
     if (writer_.joinable()) writer_.join();
     if (reader_.joinable()) reader_.join();
     CloseIf(input_);CloseIf(output_);CloseIf(process_);CloseIf(job_);
-    running_=false;ready_=false;last_ts_=0;quality_=0;mer_x100_=-1;
+    running_=false;output_state_.Clear();
 }
 }

@@ -10,6 +10,10 @@ build = "build.rs"
 isdbt-dsp = { path = "../rtlsdr_frontend/vendor/isdbt-dsp" }
 num-complex = "0.4"
 rustfft = "6"
+
+# MSi2500 の USB (usb.rs) と、CPU 時間・スレッドの優先度の取得は Windows だけで使う。
+# PX-S1UD の J.83B の復調 (serve-s1ud) は Linux の px4-cused からも起動する
+[target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_Devices_DeviceAndDriverInstallation",
