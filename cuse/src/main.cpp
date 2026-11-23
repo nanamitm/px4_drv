@@ -3,9 +3,11 @@
 // 対応機種は PIX-DT295 (docs/20261120_dt295_linux_cuse_design.md) と
 // Sony torne CECH-ZD1J (docs/20261121_torne_linux_cuse_design.md)、I-O DATA GV-MVP/XZ3
 // (docs/20261121_gv_mvp_xz3_linux_cuse_design.md)、PLEX PX-BCUD (docs/20261122_px_bcud_linux_cuse_design.md)、
-// PLEX PX-S1UD (docs/20261122_px_s1ud_linux_cuse_design.md)、RTL-SDR のワンセグ (docs/20261122_rtlsdr_linux_cuse_design.md)。
+// PLEX PX-S1UD (docs/20261122_px_s1ud_linux_cuse_design.md)、RTL-SDR のワンセグ (docs/20261122_rtlsdr_linux_cuse_design.md)、
+// MSi2500 (RSP1 互換機) のフルセグ (docs/20261123_msi2500_linux_cuse_design.md)。
 #include "cuse_session.hpp"
 #include "dt295_device.hpp"
+#include "msi2500_device.hpp"
 #include "pxbcud_device.hpp"
 #include "pxs1ud_device.hpp"
 #include "rtlsdr_device.hpp"
@@ -63,6 +65,9 @@ const Model Models[] = {
     // RTL-SDR は Linux の本体の dvb_usb_rtl28xxu が取り、ほかの用途 (SDR) とも取り合う汎用の機器のため、
     // PX4_CUSED_RTLSDR_PORTS で指定した接続位置の機器だけを開く (docs/20261122_rtlsdr_linux_cuse_design.md)。
     {RtlSdrDevice::Vendor, RtlSdrDevice::Product, "RTL-SDR", Make<RtlSdrDevice>, true, RtlSdrPortSelected},
+    // MSi2500 (RSP1 互換機) は Linux の本体の msi2500 (V4L2 の SDR) が取り、ほかの用途とも取り合う汎用の機器のため、
+    // PX4_CUSED_MSI2500_PORTS で指定した接続位置の機器だけを開く (docs/20261123_msi2500_linux_cuse_design.md)。
+    {Msi2500Device::Vendor, Msi2500Device::Product, "MSi2500", Make<Msi2500Device>, true, Msi2500PortSelected},
 };
 
 // 機器の追加と削除、デバイスファイルの解放、終了の要求を、1 つのスレッドで順に処理する。

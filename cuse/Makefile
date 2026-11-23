@@ -53,7 +53,7 @@ LIBRTLSDR_OBJS := $(BUILD)/librtlsdr/librtlsdr.o $(BUILD)/librtlsdr/tuner_e4k.o 
 PLATFORM_OBJS := $(BUILD)/platform_linux.o $(BUILD)/firmware.o
 DAEMON_OBJS := $(BUILD)/main.o $(BUILD)/device.o $(BUILD)/video_node.o $(BUILD)/card_node.o \
 	$(BUILD)/dt295_device.o $(BUILD)/torne_device.o $(BUILD)/torne_port.o $(BUILD)/xz3_device.o $(BUILD)/pxbcud_device.o \
-	$(BUILD)/pxs1ud_device.o $(BUILD)/iq_process.o $(BUILD)/rtlsdr_device.o $(BUILD)/rtlsdr_helper.o \
+	$(BUILD)/pxs1ud_device.o $(BUILD)/iq_process.o $(BUILD)/rtlsdr_device.o $(BUILD)/rtlsdr_helper.o $(BUILD)/msi2500_device.o \
 	$(BUILD)/cuse_session.o $(BUILD)/usb_transport.o $(BUILD)/log.o
 
 all: $(BUILD)/px4-cused
@@ -182,6 +182,13 @@ $(BUILD)/s1ud_j83b.inp: $(ROOT)/fwtool/s1ud/capture_probe.S $(ROOT)/fwtool/s1ud/
 
 j83b: $(BUILD)/cargo/release/msi2500_frontend $(BUILD)/s1ud_j83b.inp
 
+# MSi2500 (RSP1 互換機) のフルセグと J.83B に使う helper (serve --stdin と ops)。PX-S1UD の J.83B と同じ実行ファイルで、
+# firmware は使わない。MSi2500 を使わない場合は不要で、Rust (cargo) が必要なため、既定の all には含めない
+msi2500: $(BUILD)/cargo/release/msi2500_frontend
+
+install-msi2500: msi2500
+	install -D -m 0755 $(BUILD)/cargo/release/msi2500_frontend $(DESTDIR)$(LIBDIR)/msi2500_frontend
+
 install-j83b: j83b
 	install -D -m 0755 $(BUILD)/cargo/release/msi2500_frontend $(DESTDIR)$(LIBDIR)/msi2500_frontend
 	install -D -m 0644 $(BUILD)/s1ud_j83b.inp $(DESTDIR)$(LIBDIR)/s1ud_j83b.inp
@@ -228,4 +235,4 @@ install: $(BUILD)/px4-cused
 clean:
 	rm -rf $(BUILD)
 
-.PHONY: all check fault j83b rtlsdr install install-j83b install-rtlsdr clean
+.PHONY: all check fault j83b msi2500 rtlsdr install install-j83b install-msi2500 install-rtlsdr clean

@@ -1,6 +1,6 @@
-# px4-cused (PIX-DT295、Sony torne CECH-ZD1J、I-O DATA GV-MVP/XZ3、PLEX PX-BCUD、PLEX PX-S1UD、RTL-SDR の Linux 版)
+# px4-cused (PIX-DT295、Sony torne CECH-ZD1J、I-O DATA GV-MVP/XZ3、PLEX PX-BCUD、PLEX PX-S1UD、RTL-SDR、MSi2500 の Linux 版)
 
-PIXELA PIX-DT295 (USB ID `06b8:103b`)、Sony torne CECH-ZD1J (USB ID `054c:04b2`)、I-O DATA GV-MVP/XZ3 (USB ID `04bb:0530`)、PLEX PX-BCUD (USB ID `3275:0085`)、PLEX PX-S1UD (USB ID `3275:0080`)、RTL-SDR (RTL2838UHIDIR、USB ID `0bda:2838`、チューナー R820T) のワンセグを Linux で使うためのユーザー空間のデーモンです。  
+PIXELA PIX-DT295 (USB ID `06b8:103b`)、Sony torne CECH-ZD1J (USB ID `054c:04b2`)、I-O DATA GV-MVP/XZ3 (USB ID `04bb:0530`)、PLEX PX-BCUD (USB ID `3275:0085`)、PLEX PX-S1UD (USB ID `3275:0080`)、RTL-SDR (RTL2838UHIDIR、USB ID `0bda:2838`、チューナー R820T) のワンセグ、SDRplay RSP1 の互換機 (Mirics MSi2500 + MSi001、USB ID `1df7:2500`) のフルセグと J.83B を Linux で使うためのユーザー空間のデーモンです。  
 libusb で機器を動かし、CUSE (Character device in Userspace) で次のデバイスファイルを作ります。
 
 | デバイスファイル | 機種 | 利用者 | 契約 |
@@ -11,6 +11,7 @@ libusb で機器を動かし、CUSE (Character device in Userspace) で次のデ
 | `/dev/pxbcudvideoN` | PX-BCUD (BS・110度CS) | 同上 | 同上 |
 | `/dev/pxs1udvideoN` | PX-S1UD (地デジ、J.83B は実験的) | 同上 | 同上。J.83B はカーネルモジュールと同じ拡張 ioctl (`PTXT_SET_PARAMS`、`PTXT_TUNE`) |
 | `/dev/rtlsdrvideoN` | RTL-SDR (地デジのワンセグ、UHF 13〜52ch) | 同上 | 同上。使う機器を接続位置で指定する (「RTL-SDR の注意」) |
+| `/dev/msi2500videoN` | RSP1 互換機 (地デジのフルセグ、UHF 13〜52ch、J.83B) | 同上 | 同上。J.83B は PX-S1UD と同じ拡張 ioctl。使う機器を接続位置で指定する (「MSi2500 の注意」) |
 | `/dev/px4card/<ID>` | 各機種の内蔵カードリーダー | px4-drv-pcsc (pcscd の IFD ハンドラー) | `include/px4_card_ioctl.h` |
 
 設計の理由、契約の詳細、実機での測定は次の文書にまとめています。
@@ -21,8 +22,9 @@ libusb で機器を動かし、CUSE (Character device in Userspace) で次のデ
 - PX-BCUD: [docs/20261122_px_bcud_linux_cuse_design.md](../docs/20261122_px_bcud_linux_cuse_design.md)
 - PX-S1UD: [docs/20261122_px_s1ud_linux_cuse_design.md](../docs/20261122_px_s1ud_linux_cuse_design.md)
 - RTL-SDR: [docs/20261122_rtlsdr_linux_cuse_design.md](../docs/20261122_rtlsdr_linux_cuse_design.md)
+- MSi2500: [docs/20261123_msi2500_linux_cuse_design.md](../docs/20261123_msi2500_linux_cuse_design.md)
 
-制御転送、PIX-DT295 の SERVICE のループ、torne の初期化と選局、GV-MVP/XZ3 の中継プログラムと TS の取り出し、PX-BCUD の初期化と選局と TS の組み立て、PX-S1UD の firmware の切り替えと選局、RTL-SDR の helper の監視と起動し直し、カードの操作は、WinUSB 版 (`winusb/src/DriverHost_PX4/dt295/`、`torne/`、`xz3/`、`pxbcud/`、`siano/`、`rtlsdr/`) と同じコードを使います。
+制御転送、PIX-DT295 の SERVICE のループ、torne の初期化と選局、GV-MVP/XZ3 の中継プログラムと TS の取り出し、PX-BCUD の初期化と選局と TS の組み立て、PX-S1UD の firmware の切り替えと選局、RTL-SDR と MSi2500 の helper の監視と起動し直し、カードの操作は、WinUSB 版 (`winusb/src/DriverHost_PX4/dt295/`、`torne/`、`xz3/`、`pxbcud/`、`siano/`、`rtlsdr/`) と同じコードを使います。
 
 ## ビルド
 
@@ -77,6 +79,21 @@ sudo make -C cuse install-rtlsdr
 
 `install-rtlsdr` は helper を `/usr/local/lib/px4-cused/` へ置きます。  
 Intel N150 では、helper の復調のスレッドが 1 コアの約 66% を使いました (設計文書の「Linux 版の実機確認」)。
+
+### MSi2500 のフルセグと J.83B
+
+RSP1 互換機は復調器を持たず、デーモンが USB の等時転送で受けた生ブロックを、ホストの helper (`msi2500_frontend serve --stdin`) で復調します。  
+helper は WinUSB 版と同じソース (`winusb/tools/msi2500_frontend`、GPL-3.0-or-later) から作り、PX-S1UD の J.83B と同じ実行ファイルです (MSi2500 には firmware は不要です)。  
+MSi2500 と MSi001 のレジスターの設定値も helper が計算し (`msi2500_frontend ops`)、デーモンはそれを送るだけです。
+
+```bash
+sudo apt install cargo
+make -C cuse msi2500
+sudo make -C cuse install-msi2500
+```
+
+`install-msi2500` は helper を `/usr/local/lib/px4-cused/` へ置きます (`install-j83b` で置いた場合は同じファイルです)。  
+helper はフルセグの復調と誤り訂正に、Intel N150 で約 1.2 コアを使います。Raspberry Pi 4 は処理量が足りないため対象外です。
 
 ## 導入
 
@@ -153,6 +170,15 @@ GV-MVP/XZ3 は、最初の選局で機器の RAM へ中継プログラムを入�
 - `PTX_GET_CNR` は、helper の復調器の MER を recpt1 などの地デジの換算式で同じ dB になる値で返します。MER は RF の C/N とは異なり、入力が過大だと下がります。利得は環境変数 `PX4_CUSED_RTLSDR_GAIN` (0.1 dB 単位、既定 297) で変えられます。
 - helper が予期せず終わった場合と USB の受信が失敗した場合は、同じチャンネルのまま helper と受信を起動し直します (ログの `helper restart`、受信が戻ると `outage_ms`)。欠けた区間は CC の飛びとして現れます。起動し直しが 8 回続けて実らない場合は、選局し直すまでロックなしを返します。
 
+### MSi2500 の注意
+
+- MSi2500 は汎用の SDR で、シリアル番号を返さない個体もあるため、RTL-SDR と同じく環境変数 `PX4_CUSED_MSI2500_PORTS` に書いた接続位置の機器だけを開きます。書き方は `PX4_CUSED_RTLSDR_PORTS` と同じです (`/sys/bus/usb/devices/3-4/idProduct` が `2500` であることで確かめられます)。
+- Linux の本体の `msi2500` ドライバー (V4L2 の SDR、`/dev/swradioN`) も対応しています。デーモンは指定した機器だけ、開くときにこのドライバーを外し、デーモンを止めるときに戻します。
+- 地デジは UHF 13〜52ch (`freq_no` 63〜102、`slot` は 0) です。J.83B は PX-S1UD と同じく `PTXT_SET_PARAMS` で放送方式 `PTX_J83B_SYSTEM` と中心周波数 (kHz、90,000〜775,000) を指定し、`PTXT_TUNE` で選局します。どちらも最初の TS が届くまで最大 15 秒待ち、届かない場合は `EAGAIN` を返します。地デジは約 2 秒、J.83B は 1 秒未満で TS が届きます。
+- `PTX_GET_CNR` は helper の復調器の MER を、recpt1 などの地デジの換算式で同じ dB になる値で返します。利得は環境変数 `PX4_CUSED_MSI2500_GAIN` (地デジ、既定 40) と `PX4_CUSED_MSI2500_GAIN_J83B` (J.83B、既定 46) で変えられます (MSi001 の合計の dB、0〜102)。
+- USB の等時転送の失敗したパケットは捨て、helper が欠落として扱います。ログの `usb transfers=... bad_packets=...` を確かめてください。helper が予期せず終わった場合と、データが 3 秒届かない場合、転送の失敗が続いた場合は、RTL-SDR と同じく同じチャンネルのまま起動し直します。
+- 等時転送は 1 マイクロフレームに 3 KiB の帯域を予約します。同じ USB のバスの等時転送の機器 (PX-BCUD など) と同時に使う場合の帯域は確かめていません。
+
 ### GV-MVP/XZ3 の注意
 
 - デーモンを強制終了 (SIGKILL) すると RAM を戻せないため、次のデーモンは RAM の照合に失敗し、USB を挿し直すまで受信できません。`systemctl restart` と `stop` は RAM を戻してから終わります。
@@ -173,6 +199,7 @@ GV-MVP/XZ3 は、最初の選局で機器の RAM へ中継プログラムを入�
 - PX-BCUD の地デジ。衛星の復調器とチューナーだけを持つため、地デジの選局は `EINVAL` を返します。
 - RTL-SDR のフルセグ、VHF と CATV 帯、BS・110度CS、R820T 以外のチューナー。選局は `EINVAL` を返します。
 - PX-S1UD の BS・110度CS と ISDB-C (トランスモジュレーション方式の CATV)。機器と firmware が対応していないため、選局は `EINVAL` を返します。
+- MSi2500 の VHF と CATV 帯の地デジ、BS・110度CS、ISDB-C。helper の復調が対応していないため、選局は `EINVAL` を返します。
 - CECH-ZD1J の BS・110度CS と CATV 帯。BS・110度CS は機器が受信できず、CATV 帯は実機で確かめていないため、選局は `EINVAL` を返します。
 - 32 ビットのプロセスからの受信の ioctl。カーネルモジュールと同じく `compat_ioctl` を提供していません。
 - PIX-DT295 W など、別の USB ID の機器。
