@@ -275,7 +275,7 @@ fn run_demod(path: &str, ts_out: Option<&str>) -> i32 {
                 batch.clear();
                 segments += 1;
                 if let Some((a, b)) = pipes.take() {
-                    done_stats.push((a.stats, b.stats));
+                    done_stats.push((a.post.stats, b.post.stats));
                 }
             }
             decode_block(&blk, &mut batch);
@@ -285,7 +285,7 @@ fn run_demod(path: &str, ts_out: Option<&str>) -> i32 {
             let syms = ofdm.push(&batch);
             ofdm_time += t_ofdm.elapsed().as_secs_f64();
             let t_fec = Instant::now();
-            let steady = pipes.as_ref().is_some_and(|(a, b)| a.stats.acquired && b.stats.acquired);
+            let steady = pipes.as_ref().is_some_and(|(a, b)| a.post.stats.acquired && b.post.stats.acquired);
             if steady {
                 steady_symbols += syms.len() as u64;
             }
@@ -333,7 +333,7 @@ fn run_demod(path: &str, ts_out: Option<&str>) -> i32 {
         let _ = w.flush();
     }
     if let Some((a, b)) = pipes.take() {
-        done_stats.push((a.stats, b.stats));
+        done_stats.push((a.post.stats, b.post.stats));
     }
     let mut unc = 0u64;
     for (i, (a, b)) in done_stats.iter().enumerate() {

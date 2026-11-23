@@ -167,13 +167,13 @@ fn recorded_iq_decodes_without_rs_failures() {
     }
     feed(&mut samples, &mut ofdm, &mut pipes, &mut ts_b);
     for (pa, pb) in &finished {
-        assert_eq!(pa.stats.uncorrectable + pb.stats.uncorrectable, 0);
+        assert_eq!(pa.post.stats.uncorrectable + pb.post.stats.uncorrectable, 0);
     }
     let (a, b) = pipes.expect("FEC started");
-    assert!(b.stats.blocks > 10_000, "B blocks {}", b.stats.blocks);
-    assert!(a.stats.blocks > 200, "A blocks {}", a.stats.blocks);
-    assert_eq!((b.stats.uncorrectable, b.stats.tei, b.stats.cc_errors), (0, 0, 0));
-    assert_eq!((a.stats.uncorrectable, a.stats.tei, a.stats.cc_errors), (0, 0, 0));
+    assert!(b.post.stats.blocks > 10_000, "B blocks {}", b.post.stats.blocks);
+    assert!(a.post.stats.blocks > 200, "A blocks {}", a.post.stats.blocks);
+    assert_eq!((b.post.stats.uncorrectable, b.post.stats.tei, b.post.stats.cc_errors), (0, 0, 0));
+    assert_eq!((a.post.stats.uncorrectable, a.post.stats.tei, a.post.stats.cc_errors), (0, 0, 0));
     assert_eq!(ts_b.len() % 188, 0);
     assert!(ts_b.chunks_exact(188).all(|p| p[0] == 0x47));
 }

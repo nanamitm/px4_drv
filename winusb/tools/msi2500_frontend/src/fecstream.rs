@@ -4,7 +4,7 @@
 //! ローテーション解除 (k - s)、セグメント間デインターリーブあり、ビット遅延は b0 が 120、
 //! 64QAM は b2 が内側で 1、b4 が |x|=3,5 で 1。
 
-use crate::fastvit::{Isa, StreamDecoder};
+use crate::fastvit::{best_isa, PoolDecoder, StreamDecoder};
 use crate::ofdm::{LayerParam, SymbolOut, NDC};
 use isdbt_dsp::deinterleave::FREQ_PERM_MODE3;
 use isdbt_dsp::rs;
@@ -52,28 +52,61 @@ enum ByteStage {
     },
 }
 
+/// 1 階層の誤り訂正。前段 (PreStage)、ビタビ (VitStage)、後段 (PostStage) を同じスレッドで順に呼ぶ。
+/// live.rs の B 階層は、同じ 3 段を別々のスレッドで動かす (`stages`)
 pub struct LayerPipe {
+    pre: PreStage,
+    vit: VitStage,
+    pub post: PostStage,
+    qbuf: Vec<i8>,
+    bytes: Vec<u8>,
+}
+
+/// 前段: キャリアの並べ替え、時間デインターリーブ、デマップ、量子化、ビットデインターリーブ、パンクチャの復元
+pub struct PreStage {
     nc: usize,
     mbits: usize,
     pat: &'static [u8],
     depth: usize,
     map: Vec<usize>, // 層内位置 → SymbolOut の z の添字
+    /// 時間デインターリーブのリング。1 シンボルを 1 行 (nc 個) とし、行の中は遅延の等しいキャリアの組
+    /// ((5c) mod 96 が等しいキャリア、96 組) ごとに連続して並べる (添字は スロット × nc + pos[c])。
+    /// 振幅の正規化の係数 (scale) が決まるまでは複素数と重みを ring_z と ring_w に溜め、決まった時点で
+    /// 量子化した軟判定値の ring_q へ変換する。以後は書き込み時にデマップと量子化を済ませる (読み出し時と同じ計算)。
+    /// Intel N150 (4 コアで L2 2 MB を共有) では、キャリアごとに遅延の異なる行から 12 バイトの値を読むと
+    /// 1 シンボルで約 9,000 本のキャッシュラインに触れ、OFDM とビタビと同時に動く間の前段が実時間の約 1.2 倍かかった。
+    /// 組ごとに並べると、書き込みは 1 行の連続、読み出しは組ごとに連続した範囲になる
     ring_z: Vec<Complex32>,
     ring_w: Vec<f32>,
+    ring_q: Vec<[i8; 8]>,
     t: usize,
     tdel: Vec<usize>,
+    /// キャリア c の行の中の位置
+    pos: Vec<usize>,
     delays: Vec<usize>,
-    hist: [[i8; 6]; 128],
+    hist: [[i8; 8]; 128],
     hpos: usize,
     pp: usize,
     pow_acc: f64,
     pow_n: u64,
     scale: f32,
     qscale: f32,
-    vit: StreamDecoder,
-    qbuf: Vec<i8>,
+}
+
+/// ビタビ復号と、出力ビットのバイトへのまとめ
+pub struct VitStage {
+    vit: VitDecoder,
     acc: u8,
     nb: usize,
+}
+
+enum VitDecoder {
+    Batch(StreamDecoder),
+    Pool(PoolDecoder),
+}
+
+/// 後段: バイトデインターリーブ、エネルギー拡散の解除、RS 復号、TS パケットの検査とフレーム位置の付与
+pub struct PostStage {
     stage: ByteStage,
     reset: usize,
     masks: Vec<[u8; TSP]>,
@@ -111,73 +144,106 @@ fn interleave_lag_frames(i: usize) -> u64 {
 /// バイトデインターリーブ) として見込むシンボル数。フレームの判定はこの値から ±102 シンボルの範囲で正しくなる
 const DECODE_LATENCY_SYMBOLS: i64 = 8;
 
+/// 1 階層の誤り訂正の 3 段を作る。segs: この階層の論理セグメント番号 (昇順)、threads: ビタビのスレッド数。
+/// pool に名前を指定すると、ビタビを常駐の作業スレッド (PoolDecoder) で動かす
+pub fn stages(p: &LayerParam, segs: &[usize], threads: usize, pool: Option<&str>) -> (PreStage, VitStage, PostStage) {
+    let n_l = segs.len();
+    let nc = n_l * NDC;
+    let mut map = vec![0usize; nc];
+    for (j, &s) in segs.iter().enumerate() {
+        for k in 0..NDC {
+            let kr = (k + NDC - s % NDC) % NDC;
+            let src = FREQ_PERM_MODE3[kr] as usize;
+            map[k * n_l + j] = s * NDC + src;
+        }
+    }
+    let idepth = p.idepth();
+    let depth = idepth * 95 + 1;
+    let mbits = p.mbits();
+    let reset = [48, 64, 72, 80, 84][p.rate.min(4) as usize] * mbits / 2 * n_l;
+    let mut prbs = EnergyPrbs::with_init(PRBS_INIT);
+    let masks = (0..reset).map(|_| {
+        let mut m = [0u8; TSP];
+        for b in &mut m[1..] { *b = prbs.clock(8) as u8; }
+        prbs.clock(8);
+        m
+    }).collect();
+    let pre = PreStage {
+        nc,
+        mbits,
+        pat: puncture_pattern(p.rate),
+        depth,
+        map,
+        ring_z: vec![Complex32::new(0.0, 0.0); depth * nc],
+        ring_w: vec![0.0; depth * nc],
+        ring_q: Vec::new(),
+        t: 0,
+        tdel: (0..nc).map(|c| idepth * (95 - (5 * c) % 96)).collect(),
+        // nc はセグメントあたり 384 (= 96 × 4) の倍数のため、各組は nc / 96 個のキャリアを持ち、組の中の順番は c / 96
+        pos: (0..nc).map(|c| (5 * c) % 96 * (nc / 96) + c / 96).collect(),
+        delays: (0..mbits).map(|b| 120 - 120 * b / (mbits - 1)).collect(),
+        hist: [[0; 8]; 128],
+        hpos: 0,
+        pp: 0,
+        pow_acc: 0.0,
+        pow_n: 0,
+        scale: 0.0,
+        qscale: 12.0,
+    };
+    // AVX2 版と基本版は同じ入力に同じビットを返す (tests/fec.rs の avx2_matches_base)
+    let vit = match pool {
+        Some(name) => VitDecoder::Pool(PoolDecoder::new(8192, 192, threads, best_isa(), name)),
+        None => VitDecoder::Batch(StreamDecoder::new(8192, 192, threads, best_isa())),
+    };
+    let vit = VitStage { vit, acc: 0, nb: 0 };
+    let post = PostStage {
+        stage: ByteStage::Acquire(Vec::new()),
+        reset,
+        masks,
+        checker: rs::Checker::new(),
+        last_cc: HashMap::new(),
+        stats: FecStats::default(),
+        tags: Vec::new(),
+        lag_frames: interleave_lag_frames(idepth),
+        cur_frame_symbol: None,
+    };
+    (pre, vit, post)
+}
+
 impl LayerPipe {
     /// segs: この階層の論理セグメント番号 (昇順)
     pub fn new(p: &LayerParam, segs: &[usize], threads: usize) -> Self {
-        let n_l = segs.len();
-        let nc = n_l * NDC;
-        let mut map = vec![0usize; nc];
-        for (j, &s) in segs.iter().enumerate() {
-            for k in 0..NDC {
-                let kr = (k + NDC - s % NDC) % NDC;
-                let src = FREQ_PERM_MODE3[kr] as usize;
-                map[k * n_l + j] = s * NDC + src;
-            }
-        }
-        let idepth = p.idepth();
-        let depth = idepth * 95 + 1;
-        let mbits = p.mbits();
-        let reset = [48, 64, 72, 80, 84][p.rate.min(4) as usize] * mbits / 2 * n_l;
-        let mut prbs = EnergyPrbs::with_init(PRBS_INIT);
-        let masks = (0..reset).map(|_| {
-            let mut m = [0u8; TSP];
-            for b in &mut m[1..] { *b = prbs.clock(8) as u8; }
-            prbs.clock(8);
-            m
-        }).collect();
-        Self {
-            nc,
-            mbits,
-            pat: puncture_pattern(p.rate),
-            depth,
-            map,
-            ring_z: vec![Complex32::new(0.0, 0.0); depth * nc],
-            ring_w: vec![0.0; depth * nc],
-            t: 0,
-            tdel: (0..nc).map(|c| idepth * (95 - (5 * c) % 96)).collect(),
-            delays: (0..mbits).map(|b| 120 - 120 * b / (mbits - 1)).collect(),
-            hist: [[0; 6]; 128],
-            hpos: 0,
-            pp: 0,
-            pow_acc: 0.0,
-            pow_n: 0,
-            scale: 0.0,
-            qscale: 12.0,
-            vit: StreamDecoder::new(8192, 192, threads, Isa::Base),
-            qbuf: Vec::new(),
-            acc: 0,
-            nb: 0,
-            stage: ByteStage::Acquire(Vec::new()),
-            reset,
-            masks,
-            checker: rs::Checker::new(),
-            last_cc: HashMap::new(),
-            stats: FecStats::default(),
-            tags: Vec::new(),
-            lag_frames: interleave_lag_frames(idepth),
-            cur_frame_symbol: None,
-        }
+        let (pre, vit, post) = stages(p, segs, threads, None);
+        Self { pre, vit, post, qbuf: Vec::new(), bytes: Vec::new() }
     }
 
     /// 1 シンボルを投入し、得られた TS パケット (188 バイト単位) を ts に追加する。
     pub fn push(&mut self, s: &SymbolOut, ts: &mut Vec<u8>) {
-        self.tags.clear();
-        self.cur_frame_symbol = s.frame_symbol;
+        let produced = self.pre.push(s, &mut self.qbuf);
+        if produced {
+            self.vit.push(&self.qbuf, &mut self.bytes);
+        }
+        self.post.push(s.frame_symbol, produced, &self.bytes, ts);
+    }
+}
+
+impl PreStage {
+    /// 1 シンボルを投入し、ビタビへ渡す (r1, r2) の並びを q に入れる。
+    /// 時間デインターリーブの遅延が埋まるまでは何も出さず false を返す
+    pub fn push(&mut self, s: &SymbolOut, q: &mut Vec<i8>) -> bool {
+        q.clear();
         let nc = self.nc;
-        let slot = self.t % self.depth;
-        for (li, &src) in self.map.iter().enumerate() {
-            self.ring_z[slot * nc + li] = s.z[src];
-            self.ring_w[slot * nc + li] = s.w[src];
+        let depth = self.depth;
+        let slot = self.t % depth;
+        if self.ring_q.is_empty() {
+            for (li, &src) in self.map.iter().enumerate() {
+                self.ring_z[slot * nc + self.pos[li]] = s.z[src];
+                self.ring_w[slot * nc + self.pos[li]] = s.w[src];
+            }
+        } else {
+            for (li, &src) in self.map.iter().enumerate() {
+                self.ring_q[slot * nc + self.pos[li]] = self.quantize(s.z[src], s.w[src]);
+            }
         }
         let warm = self.depth - 1;
         if self.t < warm {
@@ -186,7 +252,7 @@ impl LayerPipe {
             }
             self.pow_n += nc as u64;
             self.t += 1;
-            return;
+            return false;
         }
         if self.scale == 0.0 {
             if self.pow_n == 0 {
@@ -195,33 +261,67 @@ impl LayerPipe {
             }
             let target = if self.mbits == 6 { 42.0 } else { 2.0 };
             self.scale = (target / (self.pow_acc / self.pow_n as f64)).sqrt() as f32;
+            let ring_q = self.ring_z.iter().zip(&self.ring_w).map(|(&z, &w)| self.quantize(z, w)).collect();
+            self.ring_q = ring_q;
+            self.ring_z = Vec::new();
+            self.ring_w = Vec::new();
         }
-        self.qbuf.clear();
-        let mut soft = [0f32; 6];
         for c in 0..nc {
             let ts_ = self.t - self.tdel[c];
             let sl = ts_ % self.depth;
-            let x = self.ring_z[sl * nc + c] * self.scale;
-            let w = self.ring_w[sl * nc + c];
-            demap(x, w, self.mbits, &mut soft);
-            let mut qs = [0i8; 6];
-            for b in 0..self.mbits { qs[b] = (soft[b] * self.qscale).round().clamp(-127.0, 127.0) as i8; }
-            self.hist[self.hpos] = qs;
+            self.hist[self.hpos] = self.ring_q[sl * nc + self.pos[c]];
             for b in 0..self.mbits {
                 let v = self.hist[(self.hpos + 128 - self.delays[b]) & 127][b];
                 while self.pat[self.pp] == 0 {
-                    self.qbuf.push(0);
+                    q.push(0);
                     self.pp = (self.pp + 1) % self.pat.len();
                 }
-                self.qbuf.push(v);
+                q.push(v);
                 self.pp = (self.pp + 1) % self.pat.len();
             }
             self.hpos = (self.hpos + 1) & 127;
         }
         self.t += 1;
-        self.stats.symbols += 1;
-        let bits = self.vit.push(&self.qbuf);
-        let mut bytes = Vec::with_capacity(bits.len() / 8 + 1);
+        true
+    }
+}
+
+impl PreStage {
+    /// 1 キャリアの値をデマップして量子化する
+    /// 6 ビット分を使い、要素が 8 バイト境界に揃うよう 8 バイトにする (6 バイトでは要素がキャッシュラインをまたぎ、
+    /// Ryzen 9 5900X で録画 IQ の復調全体が約 1 割遅くなった)
+    fn quantize(&self, z: Complex32, w: f32) -> [i8; 8] {
+        let mut soft = [0f32; 6];
+        demap(z * self.scale, w, self.mbits, &mut soft);
+        let mut qs = [0i8; 8];
+        for b in 0..self.mbits { qs[b] = (soft[b] * self.qscale).round().clamp(-127.0, 127.0) as i8; }
+        qs
+    }
+}
+
+impl VitStage {
+    /// (r1, r2) の並びを復号し、まとまったバイトを bytes に入れる (端数のビットは次回へ持ち越す)
+    pub fn push(&mut self, q: &[i8], bytes: &mut Vec<u8>) {
+        let bits = match &mut self.vit {
+            VitDecoder::Batch(d) => d.push(q),
+            VitDecoder::Pool(d) => d.push(q),
+        };
+        self.pack(bits, bytes);
+    }
+
+    /// 常駐の作業スレッドで復号中のブロックを待ち、まとまったバイトを bytes に入れる。
+    /// 入力の終わりと状態の作り直しの前に呼ぶ (PoolDecoder::drain)
+    pub fn drain(&mut self, bytes: &mut Vec<u8>) {
+        let bits = match &mut self.vit {
+            VitDecoder::Batch(_) => Vec::new(),
+            VitDecoder::Pool(d) => d.drain(),
+        };
+        self.pack(bits, bytes);
+    }
+
+    fn pack(&mut self, bits: Vec<u8>, bytes: &mut Vec<u8>) {
+        bytes.clear();
+        bytes.reserve(bits.len() / 8 + 1);
         for b in bits {
             self.acc = (self.acc << 1) | (b & 1);
             self.nb += 1;
@@ -231,7 +331,22 @@ impl LayerPipe {
                 self.nb = 0;
             }
         }
-        self.push_bytes(&bytes, ts);
+    }
+}
+
+impl PostStage {
+    /// 1 シンボル分のバイトを処理し、得られた TS パケットを ts に追加する。
+    /// frame_symbol と produced は同じシンボルの SymbolOut::frame_symbol と PreStage::push の戻り値。
+    /// VitStage::drain のバイトは、直前のシンボルの frame_symbol と produced = false で渡す
+    pub fn push(&mut self, frame_symbol: Option<u64>, produced: bool, bytes: &[u8], ts: &mut Vec<u8>) {
+        self.tags.clear();
+        self.cur_frame_symbol = frame_symbol;
+        if produced {
+            self.stats.symbols += 1;
+        }
+        if !bytes.is_empty() {
+            self.push_bytes(bytes, ts);
+        }
     }
 
     fn push_bytes(&mut self, bytes: &[u8], ts: &mut Vec<u8>) {

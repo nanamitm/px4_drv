@@ -2,7 +2,8 @@
 //!
 //! スレッドの構成:
 //!   取り込み (呼び出し側) → [生ブロックのキュー] → OFDM 復調 → [シンボルのキュー] → A 階層の誤り訂正
-//!                                                                → [シンボルのキュー] → B 階層の誤り訂正 (+ ビタビの作業スレッド)
+//!                                                                → [シンボルのキュー] → B 階層の誤り訂正の前段
+//!                                                                  → ビタビ (+ 作業スレッド) → 後段 (バイトデインターリーブと RS)
 //!
 //! 取り込みのスレッドは等時転送の完了を待つため、キューが満杯でも待たずにそのチャンクを捨てる。
 //! 捨てたチャンクはブロックのサンプル番号の欠落として OFDM 側で検出され、通常の欠落と同じく
@@ -10,7 +11,7 @@
 //! 生ブロックのキューへ伝える。
 
 use crate::blocks::{BlockCounter, BlockState};
-use crate::fecstream::{FecStats, LayerPipe, TspTag};
+use crate::fecstream::{stages, FecStats, LayerPipe, PostStage, PreStage, TspTag, VitStage};
 use crate::ofdm::{self, Ofdm, SymbolOut, Tmcc};
 use crate::raw384::decode_block;
 use crate::remux::{RemuxStats, Remuxer};
@@ -174,11 +175,11 @@ impl Live {
             let out = cfg.ts_out[li].take();
             let st = stats.clone();
             let vt = if li == 1 { cfg.viterbi_threads } else { 1 };
-            let mux = mux_tx.clone();
+            let sink = LayerSink { li, out, mux: mux_tx.clone(), stats: st, ts: Vec::new(), n: 0, segment: 0 };
             fec_threads.push(
                 std::thread::Builder::new()
                     .name(format!("fec-{}", ["a", "b"][li]))
-                    .spawn(move || fec_loop(li, vt, rx, out, mux, st))
+                    .spawn(move || if li == 1 { fec_loop_staged(li, vt, rx, sink) } else { fec_loop(li, vt, rx, sink) })
                     .expect("spawn fec thread"),
             );
         }
@@ -318,70 +319,213 @@ fn ofdm_loop(
     // ここで送信側が閉じ、誤り訂正のスレッドはキューの残りを処理して終わる
 }
 
-fn fec_loop(
+/// 前段・ビタビ・後段のスレッドの間のキューの長さ (シンボル数)。段どうしの処理時間の揺れを吸収するためのもので、
+/// B 階層の前段の出力は 1 シンボル約 41 KB のため、64 シンボル (約 72 ms) で約 2.6 MB になる
+const STAGE_QUEUE: usize = 64;
+
+/// 部分受信の A 階層が先頭のセグメントを使い、B 階層が続くセグメントを使う
+fn layer_segs(li: usize, t: &Tmcc) -> Option<Vec<usize>> {
+    let na = t.layers[0].nseg as usize;
+    let nb = t.layers[1].nseg as usize;
+    let segs: Vec<usize> = if li == 0 { (0..na).collect() } else { (na..na + nb).collect() };
+    (!segs.is_empty()).then_some(segs)
+}
+
+/// 誤り訂正の出力を、階層の TS、再多重化、統計へ渡す
+struct LayerSink {
     li: usize,
-    threads: usize,
-    rx: Receiver<FecMsg>,
-    mut out: Option<Box<dyn Write + Send>>,
+    out: Option<Box<dyn Write + Send>>,
     mux: SyncSender<RemuxMsg>,
     stats: Arc<Mutex<LiveStats>>,
-) {
+    ts: Vec<u8>,
+    n: u64,
+    segment: u64,
+}
+
+impl LayerSink {
+    /// PostStage::push で ts に追加したパケットを送り出す。tmcc は同じシンボルの SymbolOut::tmcc
+    fn emit(&mut self, post: &PostStage, tmcc: Option<Tmcc>) {
+        if !self.ts.is_empty() {
+            if let Some(w) = self.out.as_mut() {
+                if w.write_all(&self.ts).is_err() {
+                    self.out = None;
+                    self.stats.lock().unwrap().write_failed[self.li] = true;
+                }
+            }
+            if let Some(tmcc) = tmcc {
+                let msg = RemuxMsg { segment: self.segment, layer: self.li, tmcc, tags: post.tags.clone(), data: std::mem::take(&mut self.ts) };
+                // 再多重化のスレッドが終わっていても受信は続ける
+                let _ = self.mux.send(msg);
+            }
+            self.ts.clear();
+        }
+        self.n += 1;
+        if self.n % 64 == 0 {
+            self.stats.lock().unwrap().layers[self.li] = post.stats.clone();
+        }
+    }
+
+    fn reset(&mut self, post: Option<PostStage>) {
+        self.segment += 1;
+        let mut s = self.stats.lock().unwrap();
+        if let Some(p) = post {
+            add_stats(&mut s.layers_done[self.li], &p.stats);
+        }
+        s.layers[self.li] = FecStats::default();
+    }
+
+    fn finish(mut self, post: Option<PostStage>) {
+        if let Some(w) = self.out.as_mut() {
+            let _ = w.flush();
+        }
+        if let Some(p) = post {
+            self.stats.lock().unwrap().layers[self.li] = p.stats;
+        }
+    }
+}
+
+/// A 階層の誤り訂正。処理量が小さいため 3 段を同じスレッドで順に処理する
+fn fec_loop(li: usize, threads: usize, rx: Receiver<FecMsg>, mut sink: LayerSink) {
     let mut pipe: Option<LayerPipe> = None;
-    let mut ts = Vec::new();
-    let mut n = 0u64;
-    let mut segment = 0u64;
     for m in rx {
         match m {
             FecMsg::Sym(s) => {
                 if pipe.is_none() {
                     if let Some(t) = s.tmcc {
-                        // 部分受信の A 階層が先頭のセグメントを使い、B 階層が続くセグメントを使う
-                        let na = t.layers[0].nseg as usize;
-                        let nb = t.layers[1].nseg as usize;
-                        let segs: Vec<usize> = if li == 0 { (0..na).collect() } else { (na..na + nb).collect() };
-                        if !segs.is_empty() {
+                        if let Some(segs) = layer_segs(li, &t) {
                             pipe = Some(LayerPipe::new(&t.layers[li], &segs, threads));
                         }
                     }
                 }
                 if let Some(p) = pipe.as_mut() {
-                    p.push(&s, &mut ts);
-                    if !ts.is_empty() {
-                        if let Some(w) = out.as_mut() {
-                            if w.write_all(&ts).is_err() {
-                                out = None;
-                                stats.lock().unwrap().write_failed[li] = true;
-                            }
-                        }
-                        if let Some(tmcc) = s.tmcc {
-                            let msg = RemuxMsg { segment, layer: li, tmcc, tags: p.tags.clone(), data: std::mem::take(&mut ts) };
-                            // 再多重化のスレッドが終わっていても受信は続ける
-                            let _ = mux.send(msg);
-                        }
-                        ts.clear();
-                    }
-                    n += 1;
-                    if n % 64 == 0 {
-                        stats.lock().unwrap().layers[li] = p.stats.clone();
-                    }
+                    p.push(&s, &mut sink.ts);
+                    sink.emit(&p.post, s.tmcc);
                 }
             }
-            FecMsg::Reset => {
-                segment += 1;
-                let mut s = stats.lock().unwrap();
-                if let Some(p) = pipe.take() {
-                    add_stats(&mut s.layers_done[li], &p.stats);
-                }
-                s.layers[li] = FecStats::default();
-            }
+            FecMsg::Reset => sink.reset(pipe.take().map(|p| p.post)),
         }
     }
-    if let Some(w) = out.as_mut() {
-        let _ = w.flush();
+    sink.finish(pipe.map(|p| p.post));
+}
+
+enum VitMsg {
+    Start(VitStage, PostStage),
+    Data { q: Vec<i8>, produced: bool, frame_symbol: Option<u64>, tmcc: Option<Tmcc> },
+    Reset,
+}
+
+enum PostMsg {
+    Start(PostStage),
+    Data { bytes: Vec<u8>, produced: bool, frame_symbol: Option<u64>, tmcc: Option<Tmcc> },
+    Reset,
+}
+
+/// B 階層の誤り訂正。前段、ビタビ、後段を別々のスレッドで動かし、処理を重ねる。
+/// 3 段を同じスレッドで順に処理すると、Intel N150 では前段と後段だけで実時間の約 0.8 倍かかり、
+/// ビタビと合わせると実時間に間に合わなかった。段の間はシンボルの順に渡すため、出力は順に処理した場合と一致する
+fn fec_loop_staged(li: usize, threads: usize, rx: Receiver<FecMsg>, mut sink: LayerSink) {
+    let name = ["a", "b"][li];
+    let (vit_tx, vit_rx) = sync_channel::<VitMsg>(STAGE_QUEUE);
+    let (post_tx, post_rx) = sync_channel::<PostMsg>(STAGE_QUEUE);
+    let vit_thread = std::thread::Builder::new()
+        .name(format!("fec-{name}-vit"))
+        .spawn(move || {
+            let mut vit: Option<VitStage> = None;
+            // 作業スレッドで復号中のブロックは、返す時点がスレッドの進み具合で変わる。入力の終わりと状態の作り直しの前に
+            // 待って後段へ流し、出力が同じ入力に対して変わらないようにする (渡す位置は直前のシンボル)
+            let mut last: (Option<u64>, Option<Tmcc>) = (None, None);
+            let drain = |vit: &mut Option<VitStage>, last: (Option<u64>, Option<Tmcc>)| {
+                let mut bytes = Vec::new();
+                if let Some(v) = vit.as_mut() {
+                    v.drain(&mut bytes);
+                }
+                (!bytes.is_empty()).then(|| PostMsg::Data { bytes, produced: false, frame_symbol: last.0, tmcc: last.1 })
+            };
+            for m in vit_rx {
+                let pm = match m {
+                    VitMsg::Start(v, p) => {
+                        vit = Some(v);
+                        PostMsg::Start(p)
+                    }
+                    VitMsg::Data { q, produced, frame_symbol, tmcc } => {
+                        let mut bytes = Vec::new();
+                        if let (true, Some(v)) = (produced, vit.as_mut()) {
+                            v.push(&q, &mut bytes);
+                        }
+                        last = (frame_symbol, tmcc);
+                        PostMsg::Data { bytes, produced, frame_symbol, tmcc }
+                    }
+                    VitMsg::Reset => {
+                        if let Some(pm) = drain(&mut vit, last) {
+                            if post_tx.send(pm).is_err() {
+                                break;
+                            }
+                        }
+                        vit = None;
+                        PostMsg::Reset
+                    }
+                };
+                if post_tx.send(pm).is_err() {
+                    break;
+                }
+            }
+            if let Some(pm) = drain(&mut vit, last) {
+                let _ = post_tx.send(pm);
+            }
+        })
+        .expect("spawn viterbi stage thread");
+    let post_thread = std::thread::Builder::new()
+        .name(format!("fec-{name}-post"))
+        .spawn(move || {
+            let mut post: Option<PostStage> = None;
+            for m in post_rx {
+                match m {
+                    PostMsg::Start(p) => post = Some(p),
+                    PostMsg::Data { bytes, produced, frame_symbol, tmcc } => {
+                        if let Some(p) = post.as_mut() {
+                            p.push(frame_symbol, produced, &bytes, &mut sink.ts);
+                            sink.emit(p, tmcc);
+                        }
+                    }
+                    PostMsg::Reset => sink.reset(post.take()),
+                }
+            }
+            sink.finish(post);
+        })
+        .expect("spawn post stage thread");
+    let mut pre: Option<PreStage> = None;
+    for m in rx {
+        let vm = match m {
+            FecMsg::Sym(s) => {
+                if pre.is_none() {
+                    if let Some(t) = s.tmcc {
+                        if let Some(segs) = layer_segs(li, &t) {
+                            let (p, v, po) = stages(&t.layers[li], &segs, threads, Some(&format!("fec-{name}-vit")));
+                            pre = Some(p);
+                            if vit_tx.send(VitMsg::Start(v, po)).is_err() {
+                                break;
+                            }
+                        }
+                    }
+                }
+                let Some(p) = pre.as_mut() else { continue };
+                let mut q = Vec::new();
+                let produced = p.push(&s, &mut q);
+                VitMsg::Data { q, produced, frame_symbol: s.frame_symbol, tmcc: s.tmcc }
+            }
+            FecMsg::Reset => {
+                pre = None;
+                VitMsg::Reset
+            }
+        };
+        if vit_tx.send(vm).is_err() {
+            break;
+        }
     }
-    if let Some(p) = pipe {
-        stats.lock().unwrap().layers[li] = p.stats;
-    }
+    // 送信側を閉じ、後ろの段がキューの残りを処理し終えるまで待つ (Live::finish はこのスレッドの終了を待つ)
+    drop(vit_tx);
+    let _ = vit_thread.join();
+    let _ = post_thread.join();
 }
 
 fn add_remux(acc: &mut RemuxStats, s: &RemuxStats) {
