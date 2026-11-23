@@ -13,6 +13,12 @@
 //!   serve --path DEVICE_PATH|--index N --frequency HZ [--system isdbt|j83b] [--gain DB] [--viterbi-threads N]
 //!     DriverHost_PX4 から起動される形。標準出力へ RTL-SDR の helper と同じ形式のフレーム (hostproto) で
 //!     再多重した TS と状態を出し、標準入力の終わりで停止する。終了コード: 0 正常、1 失敗、2 引数の誤り。
+//!   serve --stdin --frequency HZ [--system isdbt|j83b] [--gain DB] [--viterbi-threads N]
+//!     Linux の px4-cused から起動される形。USB は px4-cused が持ち、標準入力で capture と同じ生ブロック
+//!     (1024 バイト単位) を受ける。標準入力の終わりで停止する。出力と終了コードは --path の場合と同じ。
+//!   ops --frequency HZ [--system isdbt|j83b] [--gain DB]
+//!     px4-cused が送る MSi2500 の制御転送の列を出す。1 行が 1 回の制御転送 (bmRequestType 0x40) で、
+//!     「setup 要求 wValue wIndex」は取り込みの前、「stop 要求 wValue wIndex」は停止要求の後に送る (16 進数)。
 //!   serve-s1ud [--pll X]
 //!     DriverHost_PX4 の PX-S1UD の実装から起動される形。標準入力で PX-S1UD の IQ のブロック (s1ud.rs) を受け、
 //!     J.83B を復調して serve と同じ形式のフレームを標準出力へ出す。標準入力の終わりで停止する。
@@ -20,19 +26,27 @@
 //!     capture の生ブロックを OFDM 復調と誤り訂正にかけ、MER、RS の訂正結果、段ごとの処理時間を出す。
 //!     TS_OUT_B を指定すると B 階層の TS を書き出す。終了コード: 0 TMCC と制御キャリヤーを確認、1 未確認、2 入力の誤り。
 
-// MSi2500 の USB を使うサブコマンド (capture、live、serve) は Windows だけ。Linux では PX-S1UD の serve-s1ud と demod を使う
+// MSi2500 の USB を使うサブコマンド (capture、live、serve の --path) は Windows だけ。
+// Linux では serve の --stdin、ops、PX-S1UD の serve-s1ud、demod を使う
 #![cfg_attr(not(windows), allow(dead_code, unused_imports))]
 
 use msi2500_frontend::blocks::{BlockCounter, BlockState};
 use msi2500_frontend::regs::{Format, FrontEnd, IfMode, Tuner};
 #[cfg(windows)]
 use msi2500_frontend::usb::{capture_with, CaptureLimits, CaptureStats, Device, Transfer, SDRPLAY_INTERFACE_GUID};
+
+/// Linux では USB を px4-cused が持つため、転送方式の指定は受け付けるだけで使わない
+#[cfg(not(windows))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Transfer {
+    Isoch,
+    Bulk,
+}
 use std::io::Write;
 use std::time::Instant;
 
 const SAMPLE_RATE: u32 = 8_126_984;
 
-#[cfg(windows)]
 struct Args {
     seconds: f64,
     out: Option<String>,
@@ -76,7 +90,6 @@ fn parse_system(v: &str) -> Result<bool, String> {
     }
 }
 
-#[cfg(windows)]
 fn parse_transfer(v: &str) -> Result<Transfer, String> {
     match v {
         "isoch" => Ok(Transfer::Isoch),
@@ -151,7 +164,6 @@ fn parse(mut it: impl Iterator<Item = String>) -> Result<Args, String> {
 }
 
 /// 8,126,984 S/s・384 形式・ゼロ IF の設定列
-#[cfg(windows)]
 fn tuner_setup(a: &Args) -> Vec<msi2500_frontend::regs::Op> {
     let mut t = Tuner::new();
     t.front_end = a.front_end;
@@ -744,17 +756,8 @@ fn serve_output(
     (code, dropped)
 }
 
-/// DriverHost_PX4 から起動される受信。標準出力へ hostproto の形式で TS と状態を出し、
-/// 標準入力の終わり (または 1 バイト) を停止要求として扱う。終了コード: 0 正常、1 失敗、2 引数の誤り。
-#[cfg(windows)]
-fn run_serve(mut it: impl Iterator<Item = String>) -> i32 {
-    use msi2500_frontend::hostproto::{write_frame, Kind};
-    use msi2500_frontend::live::{Live, LiveConfig};
-    use msi2500_frontend::live_j83b::{J83bLive, J83bLiveConfig};
-    use std::sync::atomic::{AtomicBool, Ordering};
-    use std::sync::mpsc::sync_channel;
-    use std::sync::Arc;
-
+/// serve と ops の引数。(受信の設定, --path, --stdin)
+fn parse_serve(mut it: impl Iterator<Item = String>) -> Result<(Args, Option<String>, bool), String> {
     let mut a = Args {
         seconds: f64::INFINITY, out: None, freq: 0, gain: 40, bw: 6_000_000, front_end: FrontEnd::Default, index: 0,
         input: None, ts_a: None, ts_b: None, ts_mux: None,
@@ -765,8 +768,13 @@ fn run_serve(mut it: impl Iterator<Item = String>) -> i32 {
         pll: 1.0,
     };
     let mut path: Option<String> = None;
+    let mut stdin = false;
     let parsed: Result<(), String> = (|| {
         while let Some(k) = it.next() {
+            if k == "--stdin" {
+                stdin = true;
+                continue;
+            }
             let v = it.next().ok_or(format!("{k} needs a value"))?;
             match k.as_str() {
                 "--path" => path = Some(v),
@@ -793,17 +801,83 @@ fn run_serve(mut it: impl Iterator<Item = String>) -> i32 {
         if !(0..=102).contains(&a.gain) {
             return Err("--gain must be 0..102".into());
         }
+        if stdin && path.is_some() {
+            return Err("--stdin and --path cannot be combined".into());
+        }
         Ok(())
     })();
-    let mut stdout = std::io::stdout().lock();
-    if let Err(e) = parsed {
-        eprintln!("[serve] {e}");
-        let _ = write_frame(&mut stdout, Kind::Error, e.as_bytes(), 0, 0, 0).and_then(|_| stdout.flush());
-        return 2;
+    parsed.map(|_| (a, path, stdin))
+}
+
+/// px4-cused が送る制御転送の列を出す (ops)。WinUSB 版の取り込み (usb.rs の capture) と同じく、
+/// setup の列の後に alternate 1 へ切り替えて転送を投入し、開始要求 (0x43) を送る。停止では転送を止め、
+/// 20 ms あけて停止要求 (0x45) を送ってから stop の列 (ADC の休止) を送る。
+/// レジスターの計算を Linux のデーモンへ書き写さず、WinUSB 版と同じ計算を使うために helper が出す
+fn run_ops(it: impl Iterator<Item = String>) -> i32 {
+    use msi2500_frontend::regs::{adc_stop, write_setup, Op};
+    let a = match parse_serve(it) {
+        Ok((a, None, false)) => a,
+        Ok(_) => {
+            eprintln!("[ops] --path and --stdin are not used");
+            return 2;
+        }
+        Err(e) => {
+            eprintln!("[ops] {e}");
+            return 2;
+        }
+    };
+    let line = |stage: &str, op: &Op| match *op {
+        Op::Write(r, v) => {
+            let (value, index) = write_setup(r, v);
+            format!("{stage} 41 {value:04x} {index:04x}\n")
+        }
+        Op::Stop => format!("{stage} 45 0000 0000\n"),
+        Op::Start => format!("{stage} 43 0000 0000\n"),
+    };
+    let mut out = String::new();
+    for op in tuner_setup(&a).iter() {
+        out += &line("setup", op);
     }
+    for op in adc_stop().iter() {
+        out += &line("stop", op);
+    }
+    let mut stdout = std::io::stdout().lock();
+    if stdout.write_all(out.as_bytes()).and_then(|_| stdout.flush()).is_err() {
+        return 1;
+    }
+    0
+}
+
+/// DriverHost_PX4 (--path) と px4-cused (--stdin) から起動される受信。標準出力へ hostproto の形式で TS と状態を出す。
+/// --path では標準入力の終わり (または 1 バイト) を、--stdin では生ブロックの入力の終わりを停止要求として扱う。
+/// 終了コード: 0 正常、1 失敗、2 引数の誤り。
+fn run_serve(it: impl Iterator<Item = String>) -> i32 {
+    use msi2500_frontend::hostproto::{write_frame, Kind};
+    use msi2500_frontend::live::{Live, LiveConfig};
+    use msi2500_frontend::live_j83b::{J83bLive, J83bLiveConfig};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::mpsc::sync_channel;
+    use std::sync::Arc;
+
+    let parsed = parse_serve(it).and_then(|(a, path, stdin)| {
+        if cfg!(not(windows)) && !stdin {
+            Err("serve needs --stdin on this platform (px4-cused owns the USB device)".to_string())
+        } else {
+            Ok((a, path, stdin))
+        }
+    });
+    let mut stdout = std::io::stdout().lock();
+    let (a, path, use_stdin) = match parsed {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("[serve] {e}");
+            let _ = write_frame(&mut stdout, Kind::Error, e.as_bytes(), 0, 0, 0).and_then(|_| stdout.flush());
+            return 2;
+        }
+    };
 
     let stop = Arc::new(AtomicBool::new(false));
-    {
+    if !use_stdin {
         let stop = stop.clone();
         std::thread::spawn(move || {
             let mut b = [0u8; 1];
@@ -860,6 +934,33 @@ fn run_serve(mut it: impl Iterator<Item = String>) -> i32 {
         let otx = otx.clone();
         let stop = stop.clone();
         std::thread::Builder::new().name("capture".into()).spawn(move || {
+            if use_stdin {
+                eprintln!("[serve] stdin system={} freq={} gain={} viterbi_threads={}", if a.j83b { "j83b" } else { "isdbt" },
+                    a.freq, a.gain, a.viterbi_threads);
+                let mut ready = false;
+                let (blocks, r) = read_stdin_blocks(&stop, |blk| {
+                    if !ready {
+                        ready = true;
+                        let _ = otx.send(OutMsg::Ready);
+                    }
+                    feeder.push(blk);
+                });
+                eprintln!("[serve] stdin: blocks={blocks}");
+                eprintln!("[serve] done: {}", pipe.finish(feeder));
+                let _ = otx.send(match r {
+                    Err(e) if !stop.load(Ordering::Relaxed) => OutMsg::Error(e),
+                    _ => OutMsg::Done,
+                });
+                return;
+            }
+            #[cfg(not(windows))]
+            {
+                let _ = path;
+                let _ = otx.send(OutMsg::Error("no capture source".into()));
+                pipe.finish(feeder);
+            }
+            #[cfg(windows)]
+            {
             let setup = tuner_setup(&a);
             let dev = match path {
                 Some(p) => Device::open_path(p),
@@ -893,6 +994,7 @@ fn run_serve(mut it: impl Iterator<Item = String>) -> i32 {
                 Err(e) if !stop.load(Ordering::Relaxed) => OutMsg::Error(format!("capture stopped: {e}")),
                 _ => OutMsg::Done,
             });
+            }
         }).expect("spawn capture thread")
     };
     drop(otx);
@@ -903,6 +1005,32 @@ fn run_serve(mut it: impl Iterator<Item = String>) -> i32 {
         eprintln!("[serve] dropped {dropped} packets that DriverHost would reject (TEI or invalid adaptation field)");
     }
     code
+}
+
+/// 標準入力から生ブロック (1024 バイト) を読み、on_block へ渡す。入力の終わりは停止要求として扱い、
+/// ブロックの途中で終わった端数は捨てる。(読んだブロック数, 読み取りの失敗) を返す。
+/// 処理系のキューが満杯でも読み取りは止めない (Feeder::push がチャンクを捨て、OFDM がブロック番号の欠落として扱う)。
+/// px4-cused の USB の受信を待たせると、MSi2500 の FIFO があふれて欠落の位置が分からなくなるため
+fn read_stdin_blocks(stop: &std::sync::atomic::AtomicBool, mut on_block: impl FnMut(&[u8])) -> (u64, Result<(), String>) {
+    use msi2500_frontend::live::CHUNK_BLOCKS;
+    use std::io::Read;
+    use std::sync::atomic::Ordering;
+    const BLOCK: usize = 1024;
+    let mut stdin = std::io::BufReader::with_capacity(CHUNK_BLOCKS * BLOCK, std::io::stdin().lock());
+    let mut blk = [0u8; BLOCK];
+    let mut blocks = 0u64;
+    while !stop.load(Ordering::Relaxed) {
+        if let Err(e) = stdin.read_exact(&mut blk) {
+            if e.kind() == std::io::ErrorKind::UnexpectedEof {
+                eprintln!("[serve] stop requested by the end of stdin");
+                return (blocks, Ok(()));
+            }
+            return (blocks, Err(format!("stdin read failed: {e}")));
+        }
+        blocks += 1;
+        on_block(&blk);
+    }
+    (blocks, Ok(()))
 }
 
 /// DriverHost_PX4 の PX-S1UD の実装から起動される J.83B の復調。標準入力で s1ud.rs のブロック
@@ -1038,8 +1166,8 @@ fn main() {
                 2
             }
         },
-        #[cfg(windows)]
         Some("serve") => run_serve(args),
+        Some("ops") => run_ops(args),
         Some("serve-s1ud") => run_serve_s1ud(args),
         #[cfg(windows)]
         Some("live") => match parse(args) {
@@ -1055,6 +1183,8 @@ fn main() {
             eprintln!("       msi2500_frontend live [--seconds N] [--freq HZ|--channel N] [--gain DB] [--index N] [--input RAW_BLOCKS_FILE] [--ts PATH] [--ts-a PATH] [--ts-b PATH] [--viterbi-threads N] [--priority normal|high] [--transfer isoch|bulk]");
             eprintln!("       msi2500_frontend live --system j83b [--seconds N] [--freq HZ|--hch N] [--gain DB] [--index N] [--input RAW_BLOCKS_FILE] [--ts PATH] [--pll X] [--priority normal|high]");
             eprintln!("       msi2500_frontend serve --path DEVICE_PATH|--index N --frequency HZ [--system isdbt|j83b] [--gain DB] [--viterbi-threads N] [--pll X]");
+            eprintln!("       msi2500_frontend serve --stdin --frequency HZ [--system isdbt|j83b] [--gain DB] [--viterbi-threads N] [--pll X]");
+            eprintln!("       msi2500_frontend ops --frequency HZ [--system isdbt|j83b] [--gain DB]");
             eprintln!("       msi2500_frontend serve-s1ud [--pll X]  (PX-S1UD IQ blocks on stdin)");
             eprintln!("       msi2500_frontend demod RAW_BLOCKS_FILE [TS_OUT_B]");
             2
