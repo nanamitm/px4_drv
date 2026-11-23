@@ -625,18 +625,22 @@ enum Pipe {
 
 impl Pipe {
     /// キューの残りを処理し終えるまで待ち、最終の統計の 1 行を返す
+    /// overflow_chunks は生ブロックのキューが満杯で捨てたチャンクの数。lost と gaps には USB や機器の欠落と区別せずに含まれるため、
+    /// 処理の遅れによる欠落を見分けられるよう別に出す。finish の残りの投入は待つため、finish の前に読んでも数は変わらない
     fn finish(self, feeder: msi2500_frontend::live::Feeder) -> String {
         match self {
             Pipe::Isdbt(live) => {
+                let overflow = live.overflow_chunks();
                 let fin = live.finish(feeder);
                 let (fa, fb) = (fin.layer_total(0), fin.layer_total(1));
-                format!("blocks={} lost={} gaps={} bridged={} erased_symbols={} backward={} segments={} B blk={} unc={} | A blk={} unc={} | remux frames={} packets={} late={} forced={}",
+                format!("blocks={} lost={} gaps={} bridged={} overflow_chunks={overflow} erased_symbols={} backward={} segments={} B blk={} unc={} | A blk={} unc={} | remux frames={} packets={} late={} forced={}",
                     fin.blocks, fin.lost_samples, fin.gaps, fin.bridged, fin.ofdm.erased_symbols, fin.backward, fin.segments, fb.blocks, fb.uncorrectable, fa.blocks, fa.uncorrectable,
                     fin.remux.frames, fin.remux.packets, fin.remux.late, fin.remux.forced)
             }
             Pipe::J83b(live) => {
+                let overflow = live.overflow_chunks();
                 let fin = live.finish(feeder);
-                format!("{} first_ts={:.3}s", j83b_line(&fin), fin.first_ts_s.unwrap_or(f64::NAN))
+                format!("{} overflow_chunks={overflow} first_ts={:.3}s", j83b_line(&fin), fin.first_ts_s.unwrap_or(f64::NAN))
             }
         }
     }
