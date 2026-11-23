@@ -16,6 +16,12 @@ namespace px4::cuse {
 // (デバイスインスタンスのパスから求める) とは一致しない。
 bool PortCardId(libusb_device_handle *handle, const char *usb_id, std::string &id);
 
+// 機器の接続位置。sysfs と同じ "バス番号-ポートの経路" (例 3-4、ハブの先は 3-2.1)。機器を開かずに得られる
+std::string UsbPortPath(libusb_device *usb);
+// 接続位置が環境変数 variable (カンマ区切り) に含まれるか。ほかの用途と取り合う汎用の SDR (RTL-SDR、MSi2500) を
+// 利用者が指定した機器だけに限るために、開く前に使う。含まれなければ model の名前でログへ残す
+bool UsbPortListed(libusb_device *usb, const char *variable, const char *model);
+
 // 接続された 1 台の機器。受信のデバイスファイル (/dev/<prefix>N) とカードのデバイスファイル
 // (/dev/px4card/<ID>) を CUSE で公開し、機種ごとの処理は派生クラスが VideoBackend と CardBackend で受け持つ。
 //

@@ -1,10 +1,38 @@
 // SPDX-License-Identifier: GPL-2.0-only
 #include "device.hpp"
 #include "msg.h"
+#include <algorithm>
+#include <cctype>
 #include <cerrno>
 #include <cstdio>
+#include <cstdlib>
+#include <sstream>
 
 namespace px4::cuse {
+std::string UsbPortPath(libusb_device *usb)
+{
+    std::uint8_t ports[8] = {};
+    const int n = libusb_get_port_numbers(usb, ports, sizeof(ports));
+    std::string path = std::to_string(libusb_get_bus_number(usb));
+    for (int i = 0; i < n; ++i)
+        path += (i ? "." : "-") + std::to_string(ports[i]);
+    return path;
+}
+
+bool UsbPortListed(libusb_device *usb, const char *variable, const char *model)
+{
+    const std::string port = UsbPortPath(usb);
+    const char *list = std::getenv(variable);
+    std::istringstream in(list ? list : "");
+    for (std::string item; std::getline(in, item, ',');) {
+        item.erase(std::remove_if(item.begin(), item.end(), [](unsigned char c) { return std::isspace(c); }), item.end());
+        if (!item.empty() && item == port)
+            return true;
+    }
+    msg_info("%s %s: not listed in %s; left untouched\n", model, port.c_str(), variable);
+    return false;
+}
+
 bool PortCardId(libusb_device_handle *handle, const char *usb_id, std::string &id)
 {
     libusb_device *usb = libusb_get_device(handle);

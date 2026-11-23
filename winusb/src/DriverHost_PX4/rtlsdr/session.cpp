@@ -52,7 +52,7 @@ int Session::Start(std::uint32_t hz)
     try {
         worker_ = std::thread([this] { Supervise(); });
     } catch (const std::exception &error) {
-        msg_err("RTL-SDR: launch failed: %s\n", error.what());
+        msg_err("%s: launch failed: %s\n", name_, error.what());
         Stop();
         return -EIO;
     }
@@ -107,7 +107,7 @@ void Session::Supervise() noexcept
         while (!started) {
             if (!budget.Take()) {
                 exhausted_ = true; quality_ = 0;
-                msg_err("RTL-SDR: auto restart exhausted exit_code=%lu restart_count=%llu limit=%u; waiting for a retune\n",
+                msg_err("%s: auto restart exhausted exit_code=%lu restart_count=%llu limit=%u; waiting for a retune\n", name_,
                     static_cast<unsigned long>(exit_code), static_cast<unsigned long long>(RestartCount()),
                     static_cast<unsigned>(px4::pxbcud::RecoveryBudget::Limit));
                 return;
@@ -124,16 +124,16 @@ void Session::Supervise() noexcept
                 for (int i = 0; i < 300 && !Stopping() && !port_.DevicePresent(); ++i)
                     std::this_thread::sleep_for(std::chrono::milliseconds(10));
                 if (Stopping()) return;
-                if (!port_.DevicePresent()) { msg_warn("RTL-SDR: device interface is missing; not restarting the helper\n"); continue; }
+                if (!port_.DevicePresent()) { msg_warn("%s: device interface is missing; not restarting the helper\n", name_); continue; }
             }
             std::lock_guard<std::mutex> handles(handle_mutex_);
             if (Stopping()) return;
             ++restart_count_;
-            msg_warn("RTL-SDR: helper restart count=%llu exit_code=%lu consecutive=%u backoff_ms=%lld possible_ts_loss=1\n",
+            msg_warn("%s: helper restart count=%llu exit_code=%lu consecutive=%u backoff_ms=%lld possible_ts_loss=1\n", name_,
                 static_cast<unsigned long long>(restart_count_), static_cast<unsigned long>(exit_code),
                 static_cast<unsigned>(budget.Consecutive()), static_cast<long long>(backoff.count()));
             started = !port_.Launch(hz_, true);
-            if (!started) msg_err("RTL-SDR: helper restart failed count=%llu\n", static_cast<unsigned long long>(restart_count_));
+            if (!started) msg_err("%s: helper restart failed count=%llu\n", name_, static_cast<unsigned long long>(restart_count_));
             else ++run_;
         }
         restarted_at_ = failed_at;
@@ -154,14 +154,14 @@ Session::HelperRun Session::ReadOutput() noexcept
             const int got = port_.Read(bytes.data(), bytes.size(), std::chrono::milliseconds(10));
             if (got < 0) break;
             if (!got) {
-                if (NowMs() - last_message > 30000) { msg_err("RTL-SDR: helper heartbeat stalled\n"); break; }
+                if (NowMs() - last_message > 30000) { msg_err("%s: helper heartbeat stalled\n", name_); break; }
                 continue;
             }
             const bool valid = frames.Feed(bytes.data(), static_cast<std::size_t>(got), [&](const Frame &frame, const std::uint8_t *data) {
                 last_message = NowMs();
                 if (frame.kind == 1) ready_ = true;
                 if (frame.kind == 4) {
-                    msg_err("RTL-SDR: helper error: %.*s\n", static_cast<int>(frame.size), reinterpret_cast<const char *>(data));
+                    msg_err("%s: helper error: %.*s\n", name_, static_cast<int>(frame.size), reinterpret_cast<const char *>(data));
                     return false;
                 }
                 if (frame.kind == 3) {
@@ -177,19 +177,19 @@ Session::HelperRun Session::ReadOutput() noexcept
                     if (!first_ts) first_ts = now;
                     run.received_ms = now - first_ts;
                     if (const auto restarted = restarted_at_.exchange(0)) {
-                        msg_warn("RTL-SDR: helper restart resumed count=%llu outage_ms=%llu possible_ts_loss=1\n",
+                        msg_warn("%s: helper restart resumed count=%llu outage_ms=%llu possible_ts_loss=1\n", name_,
                             static_cast<unsigned long long>(RestartCount()), static_cast<unsigned long long>(now - restarted));
                     }
                     if (!stop_ && !drain_only_) sink_(data, frame.size, run_id);
                 }
                 return true;
             });
-            if (!valid) { msg_err("RTL-SDR: invalid or failed helper frame\n"); break; }
+            if (!valid) { msg_err("%s: invalid or failed helper frame\n", name_); break; }
         }
     } catch (const std::exception &error) {
-        msg_err("RTL-SDR: reader failed: %s\n", error.what());
+        msg_err("%s: reader failed: %s\n", name_, error.what());
     }
-    if (!Stopping()) msg_err("RTL-SDR: frontend stopped unexpectedly\n");
+    if (!Stopping()) msg_err("%s: frontend stopped unexpectedly\n", name_);
     return run;
 }
 }

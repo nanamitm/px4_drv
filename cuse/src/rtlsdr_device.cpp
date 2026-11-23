@@ -48,30 +48,11 @@ int GainTenthsDb()
     }
     return static_cast<int>(value);
 }
-
-std::string PortPath(libusb_device *usb)
-{
-    std::uint8_t ports[8] = {};
-    const int n = libusb_get_port_numbers(usb, ports, sizeof(ports));
-    std::string path = std::to_string(libusb_get_bus_number(usb));
-    for (int i = 0; i < n; ++i)
-        path += (i ? "." : "-") + std::to_string(ports[i]);
-    return path;
-}
 }
 
 bool RtlSdrPortSelected(libusb_device *usb)
 {
-    const std::string port = PortPath(usb);
-    const char *list = std::getenv("PX4_CUSED_RTLSDR_PORTS");
-    std::istringstream in(list ? list : "");
-    for (std::string item; std::getline(in, item, ',');) {
-        item.erase(std::remove_if(item.begin(), item.end(), [](unsigned char c) { return std::isspace(c); }), item.end());
-        if (!item.empty() && item == port)
-            return true;
-    }
-    msg_info("RTL-SDR %s: not listed in PX4_CUSED_RTLSDR_PORTS; left untouched\n", port.c_str());
-    return false;
+    return UsbPortListed(usb, "PX4_CUSED_RTLSDR_PORTS", "RTL-SDR");
 }
 
 RtlSdrDevice::RtlSdrDevice(libusb_device_handle *handle, std::uint8_t bus, std::uint8_t address,

@@ -51,7 +51,8 @@ public:
     // TS がこの時間内に届いていればロックとみなす
     static constexpr std::uint64_t LockWindowMs = 3000;
 
-    Session(HelperPort &port, TsSink sink) : port_(port), sink_(std::move(sink)) {}
+    // name はログの機種名。MSi2500 の Linux 版も同じ監視を使う (docs/20261123_msi2500_linux_cuse_design.md)
+    Session(HelperPort &port, TsSink sink, const char *name = "RTL-SDR") : port_(port), sink_(std::move(sink)), name_(name) {}
     ~Session() { Stop(); }
     Session(const Session &) = delete;
     Session &operator=(const Session &) = delete;
@@ -84,6 +85,7 @@ private:
 
     HelperPort &port_;
     const TsSink sink_;
+    const char *const name_;
     std::uint32_t hz_ = 0;
     std::atomic_bool available_{true}, stop_{true}, drain_only_{true}, exhausted_{false}, ready_{false};
     std::atomic<std::uint32_t> quality_{0};
