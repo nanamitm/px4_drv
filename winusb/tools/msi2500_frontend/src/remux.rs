@@ -90,6 +90,11 @@ pub struct Remuxer {
 
 /// 他の階層を待たずにフレームを出すまでの、先行する階層のフレーム数
 const MAX_LEAD_FRAMES: i64 = 3;
+/// まだ出力のない階層を待つ間の MAX_LEAD_FRAMES。13〜17ch の A 階層 (QPSK 2/3、I=4、1 セグメント) は、
+/// 時間インターリーブの遅延 (2 フレーム) と同期の捕捉に使うバイト (約 2 フレーム分) のため、最初の出力が
+/// B 階層より約 3 フレーム遅れる。3 フレームで出すと、録画 IQ を実時間の速さで流した試験で、
+/// A 階層の最初の約 1 フレーム (64 パケット) が出力済みのフレームとして捨てられた
+const MAX_START_LEAD_FRAMES: i64 = 6;
 
 impl Remuxer {
     pub fn new(t: &Tmcc) -> Self {
@@ -127,10 +132,12 @@ impl Remuxer {
             // TMCC で使われている階層がすべてこのフレームを過ぎたら揃ったとみなす。
             // まだ出力のない階層も待つ (起動直後は B 階層が A 階層より約 1 フレーム早く出力を始めるため、
             // 待たないと A 階層の最初のフレームが出力済みのフレームとして捨てられる)。
-            // 誤り訂正が同期できない階層があっても、他の階層が 3 フレーム先へ進めば出す
+            // 誤り訂正が同期できない階層があっても、他の階層が 3 フレーム (まだ出力のない階層を待つ間は 6 フレーム)
+            // 先へ進めば出す
             let expected = (0..3).filter(|&l| !self.slots[l].is_empty());
             let complete = expected.clone().all(|l| self.latest[l].is_some_and(|x| x > f));
-            let forced = self.latest.iter().flatten().any(|&x| x >= f + MAX_LEAD_FRAMES);
+            let lead = if expected.clone().any(|l| self.latest[l].is_none()) { MAX_START_LEAD_FRAMES } else { MAX_LEAD_FRAMES };
+            let forced = self.latest.iter().flatten().any(|&x| x >= f + lead);
             if !(all || complete || forced) {
                 break;
             }
@@ -252,5 +259,29 @@ mod tests {
         assert_eq!(r.stats.late, 1);
         r.finish(&mut out);
         assert_eq!(ids(&out).len(), 5);
+    }
+
+    #[test]
+    fn layer_without_output_is_waited_for_longer() {
+        let t = tmcc_13_17ch();
+        let mut r = Remuxer::new(&t);
+        let mut out = Vec::new();
+        for f in 0..6 {
+            r.push(1, &[tag(f, 0)], &pkt(1, 0), &mut out);
+        }
+        // A はまだ出力がないため、B が 3 フレーム先へ進んでも待つ
+        assert!(out.is_empty());
+        // A の最初の出力はフレーム 0 に間に合う。A が出力を始めた後は 3 フレームの上限に戻り、フレーム 0〜2 を出す
+        r.push(0, &[tag(0, 0)], &pkt(0, 0), &mut out);
+        assert_eq!(ids(&out), vec![(1, 0), (0, 0), (1, 0), (1, 0)]);
+        assert_eq!((r.stats.forced, r.stats.late), (3, 0));
+        // A が出力を始めないまま B が 6 フレーム先へ進めば出す
+        let mut r = Remuxer::new(&t);
+        let mut out = Vec::new();
+        for f in 0..7 {
+            r.push(1, &[tag(f, 0)], &pkt(1, 0), &mut out);
+        }
+        assert_eq!(ids(&out), vec![(1, 0)]);
+        assert_eq!(r.stats.forced, 1);
     }
 }
