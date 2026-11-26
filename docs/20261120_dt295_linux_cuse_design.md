@@ -105,9 +105,12 @@ Debian パッケージは、`build_pcsc_deb.sh` と同じ形の別のスクリ�
 | `PTX_ENABLE_LNB_POWER` | `arg` が 0 なら成功、0 以外なら `-ENOSYS` | `set_lnb_voltage` を持たない機種へのカーネルの応答と同じ |
 | `PTX_SET_SYSTEM_MODE`、`PTX_GET_LOCK_STATUS` | 既存の意味で応答 | |
 | `PTX_GET_TMCC_*`、`PTXT_*` | 対応しない機能は既存機種と同じ `-EOPNOTSUPP` か `-ENOSYS` | 必要な利用者の有無を確認してから追加 |
-| `read` | 受信中は 0 を返さずに待ち、`O_NONBLOCK` では `-EAGAIN`。停止後は EOF | 利用側は 0 を EOF と解釈して受信を終えるため |
+| `read` | 受信中は 0 を返さずに待ち、`O_NONBLOCK` では `-EAGAIN`。通常停止後は EOF | Bulk IN の失敗時は、残りの TS を読み終えた後に受信エラーを返す |
 | `poll` | 読み出せる量がしきい値に達したときに起床 | |
 | USB 切断後 | すべての操作に `-EIO` を返し、待機中の `read` と `poll` を起こす | 切断後にノードを消すかどうかは下記 |
+
+Bulk IN のキャンセル完了は5秒まで待つ。期限を過ぎたときは受信と制御転送を停止し、完了通知まで USB ハンドルと転送バッファーを保持する。再開には USB の挿し直しが必要になる。
+ファームウェアの初期化に失敗した場合は、制御ロックを解放する前に保存済みの設定と RAM の復元を試みる。
 
 `PTX_SET_CHANNEL` の換算式は `driver/ptx_chrdev.c` に書かれています。  
 Linux 版と同じ式を別に書くと食い違う余地が生まれるため、`driver/isdbc_channel.h` の例と同じく、ユーザー空間からも読める共有ヘッダーへ移すことを検討します。

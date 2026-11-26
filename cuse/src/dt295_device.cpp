@@ -368,6 +368,7 @@ int Dt295Device::StopTransfers(bool &fatal)
             msg_err("%s: %d bulk transfers did not complete; reconnect USB\n", label_.c_str(), s.in_flight);
             receive_->owner = nullptr;
             receive_->deferred = static_cast<unsigned>(s.in_flight);
+            s.in_flight = 0;
             // 遅れて完了した転送はデバイスに触れず、コールバックがバッファごと解放する。
             for (auto &transfer : s.transfers)
                 if (transfer->pending)
