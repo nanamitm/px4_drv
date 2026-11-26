@@ -77,9 +77,18 @@ private:
     int StartTune(bool j83b, std::uint32_t hz, std::uint32_t khz, bool streaming);
     static void LIBUSB_CALL IsoDone(libusb_transfer *transfer);
 
+    struct ReceiveState {
+        explicit ReceiveState(Msi2500Device *device) : owner(device) {}
+        std::mutex mutex;
+        // 停止の期限を過ぎたら、残ったコールバックからデバイスへの参照を切る。
+        Msi2500Device *owner;
+    };
+
     struct Transfer {
-        Msi2500Device *owner = nullptr;
+        ~Transfer() { libusb_free_transfer(transfer); }
+        std::shared_ptr<ReceiveState> state;
         libusb_transfer *transfer = nullptr;
+        bool in_flight = false; // ReceiveState::mutex で保護する
         std::vector<std::uint8_t> buffer;
         // 完了したパケットのうち、1024 バイトのブロックだけを集めて helper へ渡す
         std::vector<std::uint8_t> blocks;
@@ -95,9 +104,9 @@ private:
     bool powered_ = false;
     RtlSdrHelperProcess helper_;
     std::vector<std::unique_ptr<Transfer>> transfers_;
-    std::mutex receive_mutex_;
+    std::shared_ptr<ReceiveState> receive_ = std::make_shared<ReceiveState>(this);
     std::condition_variable receive_changed_;
-    std::atomic_int in_flight_{0};
+    int in_flight_ = 0; // ReceiveState::mutex で保護する
     std::atomic_bool resubmit_{false};
     // 受信の失敗 (抜去、転送の失敗の連続、3 秒の無受信)。Read が失敗を返し、Session が helper と受信を起動し直す
     std::atomic_bool usb_failed_{false};

@@ -3,7 +3,7 @@
 //! - 制御転送は bmRequestType 0x40 (vendor、宛先=デバイス) で送る。libmirisdr の 0x42 (宛先=エンドポイント) は、
 //!   WinUSB が wIndex の下位バイトを実在のエンドポイントとして検査するため、レジスター値を詰めた書き込みの多くが拒否される。
 //! - 取り込みは alternate setting 1 (エンドポイント 0x81、1 マイクロフレームあたり 3×1024 バイト) の等時転送。
-//! - USB 抜去後は完了しない転送があるため、終了処理の各待機には期限を設ける。
+//! - USB 抜去後は完了しない転送があるため、終了時の完了待ちは全転送で同じ期限を使う。
 //! - データの届かない時間と転送の失敗の連続に上限を設け、超えたら失敗として返す。
 
 use crate::regs::{write_setup, Op};
@@ -240,8 +240,8 @@ impl Default for CaptureLimits {
     }
 }
 
-// イベントがシグナルされた後も、結果で完了を確認できるまで記述子に触れない。
-fn isoch_result(dev: &Device, overlapped: &OVERLAPPED) -> Result<(), u32> {
+// イベントがシグナルされた後も、結果で完了を確認できるまでバッファーや記述子に触れない。
+fn transfer_result(dev: &Device, overlapped: &OVERLAPPED) -> Result<(), u32> {
     let mut transferred = 0;
     if unsafe { WinUsb_GetOverlappedResult(dev.wh, overlapped, &mut transferred, 0) } != 0 {
         Ok(())
@@ -250,8 +250,25 @@ fn isoch_result(dev: &Device, overlapped: &OVERLAPPED) -> Result<(), u32> {
     }
 }
 
-fn isoch_completion_unconfirmed(error: u32) -> bool {
+fn completion_unconfirmed(error: u32) -> bool {
     matches!(error, ERROR_IO_INCOMPLETE | ERROR_INVALID_HANDLE)
+}
+
+fn abort_pending_transfers(dev: &Device, pipe: u8, overlapped: &[OVERLAPPED], inflight: &[bool]) -> usize {
+    unsafe { WinUsb_AbortPipe(dev.wh, pipe) };
+    // 1 本の完了待ちに使っていた 1 秒を転送全体で共有し、DriverHost の 5 秒の停止期限内に
+    // 停止要求と ADC の休止へ進めるようにする。期限後も、待たずに残りの完了を確認する。
+    let deadline = Instant::now() + Duration::from_secs(1);
+    let mut pending = 0;
+    for (o, _) in overlapped.iter().zip(inflight).filter(|(_, &active)| active) {
+        let remaining_ms = deadline.saturating_duration_since(Instant::now()).as_millis() as u32;
+        if unsafe { WaitForSingleObject(o.hEvent, remaining_ms) } != WAIT_OBJECT_0
+            || transfer_result(dev, o).is_err_and(completion_unconfirmed)
+        {
+            pending += 1;
+        }
+    }
+    pending
 }
 
 /// 設定列を送り、等時転送で取り込む。on_block が false を返すと正常に終了する。
@@ -338,8 +355,8 @@ pub fn capture(
     'run: while result.is_ok() {
         // 完了待ちにも期限を設け、データ途絶を検出できるようにする
         let w = unsafe { WaitForSingleObject(ov[k].hEvent, 1000) };
-        let completion = (w == WAIT_OBJECT_0).then(|| isoch_result(dev, &ov[k]));
-        let completed = completion.is_some_and(|r| !r.is_err_and(isoch_completion_unconfirmed));
+        let completion = (w == WAIT_OBJECT_0).then(|| transfer_result(dev, &ov[k]));
+        let completed = completion.is_some_and(|r| !r.is_err_and(completion_unconfirmed));
         let ok = matches!(completion, Some(Ok(())));
         if completed {
             inflight[k] = false;
@@ -448,15 +465,7 @@ pub fn capture(
     // 後始末: Linux の msi2500 ドライバーと同じく、先に転送を止めてから停止要求を送り、
     // USB インターフェースと ADC を休止させる (adc_stop)。転送が流れている最中に停止要求を送ると、
     // 長めの取り込みの後で、次のストリーミング開始でデータが届かない状態に入ることがあった
-    unsafe { WinUsb_AbortPipe(dev.wh, pi.PipeId) };
-    let mut pending = 0usize;
-    for (o, _) in ov.iter().zip(inflight.iter()).filter(|(_, &f)| f) {
-        if unsafe { WaitForSingleObject(o.hEvent, 1000) } != WAIT_OBJECT_0
-            || isoch_result(dev, o).is_err_and(isoch_completion_unconfirmed)
-        {
-            pending += 1;
-        }
-    }
+    let pending = abort_pending_transfers(dev, pi.PipeId, &ov, &inflight);
     // 転送の停止から停止要求まで、Linux ドライバーと同じく 20 ms あける
     std::thread::sleep(Duration::from_millis(20));
     drop(power);
@@ -687,16 +696,7 @@ pub fn capture_bulk(
     }
 
     // 後始末は等時転送と同じ順序 (転送の中止、完了待ち、20 ms、停止要求、ADC の休止)
-    unsafe { WinUsb_AbortPipe(dev.wh, pipe) };
-    let mut pending = 0usize;
-    for (o, _) in ov.iter().zip(inflight.iter()).filter(|(_, &f)| f) {
-        if unsafe { WaitForSingleObject(o.hEvent, 1000) } == WAIT_OBJECT_0 {
-            let mut n = 0u32;
-            unsafe { WinUsb_GetOverlappedResult(dev.wh, o, &mut n, 0) };
-        } else {
-            pending += 1;
-        }
-    }
+    let pending = abort_pending_transfers(dev, pipe, &ov, &inflight);
     std::thread::sleep(Duration::from_millis(20));
     drop(power);
     if pending > 0 {

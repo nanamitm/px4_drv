@@ -166,7 +166,11 @@ int Msi2500Device::StartTune(bool j83b, std::uint32_t hz, std::uint32_t khz, boo
     int rc = streaming ? -EBUSY : 0;
     if (!rc) {
         tuned_ = false;
-        system_j83b_ = j83b;
+        if (system_j83b_ != j83b) {
+            // 旧周波数の自動復旧が Launch で方式を読むため、監視スレッドの終了後に切り替える。
+            session_.Stop();
+            system_j83b_ = j83b;
+        }
         rc = session_.Start(hz);
     }
     // 最初の TS を待つ。成功はカーネルと同じくロックを意味し、届かなければ EAGAIN で選び直しを求める
@@ -435,7 +439,10 @@ void Msi2500Device::WaitStopped(std::chrono::milliseconds limit)
 std::uint32_t Msi2500Device::Kill()
 {
     StopReceive();
-    return helper_.Kill();
+    const auto exit_code = helper_.Kill();
+    // 自動復旧では Release を経ずに Launch するため、再設定前に ADC と alternate を戻す。
+    PowerDown();
+    return exit_code;
 }
 
 void Msi2500Device::Release()
@@ -450,7 +457,7 @@ int Msi2500Device::StartReceive()
     try {
         for (int i = 0; i < TransferCount; ++i) {
             auto t = std::make_unique<Transfer>();
-            t->owner = this;
+            t->state = receive_;
             t->buffer.resize(length);
             t->blocks.reserve(length);
             t->transfer = libusb_alloc_transfer(Packets);
@@ -462,8 +469,6 @@ int Msi2500Device::StartReceive()
             transfers_.push_back(std::move(t));
         }
     } catch (...) {
-        for (auto &t : transfers_)
-            libusb_free_transfer(t->transfer);
         transfers_.clear();
         return -ENOMEM;
     }
@@ -471,34 +476,45 @@ int Msi2500Device::StartReceive()
         stat_errors_ = 0;
     consecutive_errors_ = 0;
     last_data_ms_ = rtlsdr::NowMs();
-    resubmit_ = true;
-    for (auto &t : transfers_) {
-        ++in_flight_;
-        if (const int rc = libusb_submit_transfer(t->transfer)) {
-            --in_flight_;
-            msg_err("%s: isochronous submit failed libusb=%s\n", label_.c_str(), libusb_error_name(rc));
-            StopReceive();
-            return rc == LIBUSB_ERROR_NO_DEVICE ? -ECANCELED : -EIO;
+    int rc = 0;
+    {
+        std::lock_guard<std::mutex> lock(receive_->mutex);
+        resubmit_ = true;
+        for (auto &t : transfers_) {
+            rc = libusb_submit_transfer(t->transfer);
+            if (rc)
+                break;
+            t->in_flight = true;
+            ++in_flight_;
         }
     }
-    return 0;
+    if (!rc)
+        return 0;
+    msg_err("%s: isochronous submit failed libusb=%s\n", label_.c_str(), libusb_error_name(rc));
+    StopReceive();
+    return rc == LIBUSB_ERROR_NO_DEVICE ? -ECANCELED : -EIO;
 }
 
 void Msi2500Device::StopReceive()
 {
     if (transfers_.empty())
         return;
-    resubmit_ = false;
-    for (auto &t : transfers_)
-        libusb_cancel_transfer(t->transfer);
     {
-        std::unique_lock<std::mutex> lock(receive_mutex_);
+        // 再投入の判定と投入を、停止の判定とキャンセルの間に挟ませない。
+        std::unique_lock<std::mutex> lock(receive_->mutex);
+        resubmit_ = false;
+        for (auto &t : transfers_)
+            if (t->in_flight)
+                libusb_cancel_transfer(t->transfer);
         if (!receive_changed_.wait_for(lock, std::chrono::seconds(5), [this] { return in_flight_ == 0; })) {
-            // libusb が使い続ける可能性があるため、転送とバッファーを解放せずに残す
-            msg_err("%s: %d isochronous transfers did not complete\n", label_.c_str(), in_flight_.load());
+            // libusb が使い続ける転送は、遅延した完了時にコールバックから解放する。
+            // デバイスが先に破棄されても、コールバックが使うのは転送と共有状態だけ。
+            msg_err("%s: %d isochronous transfers did not complete\n", label_.c_str(), in_flight_);
             leaked_ = true;
+            receive_->owner = nullptr;
             for (auto &t : transfers_)
-                t.release();
+                if (t->in_flight)
+                    t.release();
             transfers_.clear();
             return;
         }
@@ -511,17 +527,23 @@ void Msi2500Device::StopReceive()
              static_cast<unsigned long long>(stat_empty_packets_.load()),
              static_cast<unsigned long long>(stat_odd_packets_.load()), static_cast<unsigned long long>(stat_blocks_.load()),
              static_cast<unsigned long long>(stat_errors_.load()));
-    for (auto &t : transfers_)
-        libusb_free_transfer(t->transfer);
     transfers_.clear();
 }
 
 void LIBUSB_CALL Msi2500Device::IsoDone(libusb_transfer *transfer)
 {
     auto &t = *static_cast<Transfer *>(transfer->user_data);
-    auto &self = *t.owner;
+    const auto state = t.state;
+    std::lock_guard<std::mutex> lock(state->mutex);
+    if (!state->owner) {
+        delete &t;
+        return;
+    }
+    auto &self = *state->owner;
     bool resubmit = false;
-    switch (transfer->status) {
+    // 停止後の完了は、helper へ渡すデータの処理を省いて転送の回収だけを行う。
+    const auto status = self.resubmit_ ? transfer->status : LIBUSB_TRANSFER_CANCELLED;
+    switch (status) {
     case LIBUSB_TRANSFER_COMPLETED: {
         self.consecutive_errors_ = 0;
         ++self.stat_transfers_;
@@ -567,22 +589,20 @@ void LIBUSB_CALL Msi2500Device::IsoDone(libusb_transfer *transfer)
             if (self.consecutive_errors_ <= 3)
                 msg_warn("%s: isochronous transfer failed status=%d\n", self.label_.c_str(), transfer->status);
             resubmit = true;
-        } else if (self.resubmit_ && !self.usb_failed_.exchange(true))
+        } else if (!self.usb_failed_.exchange(true))
             msg_err("%s: %u consecutive isochronous transfer errors; restarting the helper\n", self.label_.c_str(),
                     self.consecutive_errors_.load());
         break;
     }
-    if (resubmit && self.resubmit_) {
+    if (resubmit) {
         const int rc = libusb_submit_transfer(transfer);
         if (!rc)
             return;
         msg_err("%s: isochronous resubmit failed libusb=%s\n", self.label_.c_str(), libusb_error_name(rc));
         self.usb_failed_ = true;
     }
-    {
-        std::lock_guard<std::mutex> lock(self.receive_mutex_);
-        --self.in_flight_;
-    }
+    t.in_flight = false;
+    --self.in_flight_;
     self.receive_changed_.notify_all();
 }
 }
