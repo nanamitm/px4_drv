@@ -18,6 +18,7 @@
 #include <memory>
 #include <mutex>
 #include <thread>
+#include <utility>
 
 namespace px4::xz3 {
 using Clock = std::chrono::steady_clock;
@@ -86,6 +87,33 @@ private:
     // ステージングに残っている直前の応答の写し。
     Packet staged_{};
     bool staged_valid_ = false;
+};
+
+/*
+ * カードUARTの16語だけを、Relayのboot0のメモリ要求で読み書きする。
+ * 共通版の導入中は、FIFOの読み書きを操作14で最大31バイトずつまとめて行う。
+ * 失敗後は、同じ操作内の後続の転送を止める。
+ * Pauseの間は制御ロックを手放すため、その間に受信を閉じた復元 (Restore) や最初の選局の導入 (Init) で
+ * 共通版の有無が変わる。一括転送を使うかは、作成時の値を持たず、制御ロックの下の各転送の直前に判断する。
+ */
+class RelayCardBus final : public px4::dt295::CardBus {
+public:
+    RelayCardBus(Relay& relay, std::function<int(unsigned)> yield)
+        : relay_(relay), yield_(std::move(yield)) {}
+
+    bool Bulk() const override { return relay_.RuntimeInstalled(); }
+    int Fifo(bool write, std::uint8_t* data, std::size_t& count) override;
+    int Read32(std::uint32_t address, std::uint32_t& value) override;
+    int Write32(std::uint32_t address, std::uint32_t value) override;
+    int Pause(unsigned milliseconds) override;
+    int Error() const { return error_; }
+
+private:
+    int Check(std::uint32_t address) const;
+
+    Relay& relay_;
+    std::function<int(unsigned)> yield_;
+    int error_ = 0;
 };
 
 // 操作12 の送出量と同じ大きさの Bulk IN (0x81) の読み出し 1 本。

@@ -78,86 +78,67 @@ std::uint64_t Fingerprint(const std::uint8_t* p, std::size_t size)
         value = (value ^ p[i]) * 1099511628211ull;
     return value;
 }
+}
 
-// カードUARTの16語だけを、Relayのboot0のメモリ要求で読み書きする。
-// 共通版の導入中は、FIFOの読み書きを操作14で最大31バイトずつまとめて行う。
-// 失敗後は、同じ操作内の後続の転送を止める。
-class RelayCardBus final : public px4::dt295::CardBus {
-public:
-    RelayCardBus(Relay& relay, std::function<int(unsigned)> yield)
-        : relay_(relay), yield_(std::move(yield)), bulk_(relay.RuntimeInstalled()) {}
-
-    bool Bulk() const override { return bulk_; }
-
-    int Fifo(bool write, std::uint8_t* data, std::size_t& count) override
-    {
-        const std::size_t requested = count;
-        count = 0;
-        if (error_)
-            return error_;
-        if (!bulk_)
-            return -EOPNOTSUPP;
-        Packet reply{};
-        if (write) {
-            for (std::size_t at = 0; at < requested; at += CardUart::FifoChunk) {
-                const auto size = (std::min)(CardUart::FifoChunk, requested - at);
-                if (relay_.Exchange(14, reply, data + at, size))
-                    return error_ = -EIO;
-            }
-            count = requested;
-            return 0;
+int RelayCardBus::Fifo(bool write, std::uint8_t* data, std::size_t& count)
+{
+    const std::size_t requested = count;
+    count = 0;
+    if (error_)
+        return error_;
+    if (!Bulk())
+        return -EOPNOTSUPP;
+    Packet reply{};
+    if (write) {
+        for (std::size_t at = 0; at < requested; at += CardUart::FifoChunk) {
+            const auto size = (std::min)(CardUart::FifoChunk, requested - at);
+            if (relay_.Exchange(14, reply, data + at, size))
+                return error_ = -EIO;
         }
-        // 操作14は最大31バイトを取り出す。それより小さい受け皿では取り出した分を失う。
-        if (requested < CardUart::FifoChunk)
-            return error_ = -EINVAL;
-        if (relay_.Exchange(14, reply))
-            return error_ = -EIO;
-        const auto received = Word(reply.data() + 20);
-        if (received > CardUart::FifoChunk)
-            return error_ = -EPROTO;
-        std::copy_n(reply.data() + 24, received, data);
-        count = received;
+        count = requested;
         return 0;
     }
+    // 操作14は最大31バイトを取り出す。それより小さい受け皿では取り出した分を失う。
+    if (requested < CardUart::FifoChunk)
+        return error_ = -EINVAL;
+    if (relay_.Exchange(14, reply))
+        return error_ = -EIO;
+    const auto received = Word(reply.data() + 20);
+    if (received > CardUart::FifoChunk)
+        return error_ = -EPROTO;
+    std::copy_n(reply.data() + 24, received, data);
+    count = received;
+    return 0;
+}
 
-    int Read32(std::uint32_t address, std::uint32_t& value) override
-    {
-        if (const int rc = Check(address))
-            return rc;
-        return relay_.ReadWord(address, value) ? 0 : error_ = -EIO;
-    }
+int RelayCardBus::Read32(std::uint32_t address, std::uint32_t& value)
+{
+    if (const int rc = Check(address))
+        return rc;
+    return relay_.ReadWord(address, value) ? 0 : error_ = -EIO;
+}
 
-    int Write32(std::uint32_t address, std::uint32_t value) override
-    {
-        if (const int rc = Check(address))
-            return rc;
-        return relay_.WriteWord(address, value) ? 0 : error_ = -EIO;
-    }
+int RelayCardBus::Write32(std::uint32_t address, std::uint32_t value)
+{
+    if (const int rc = Check(address))
+        return rc;
+    return relay_.WriteWord(address, value) ? 0 : error_ = -EIO;
+}
 
-    int Pause(unsigned milliseconds) override
-    {
-        if (error_)
-            return error_;
-        if (const int rc = yield_(milliseconds))
-            error_ = rc;
+int RelayCardBus::Pause(unsigned milliseconds)
+{
+    if (error_)
         return error_;
-    }
+    if (const int rc = yield_(milliseconds))
+        error_ = rc;
+    return error_;
+}
 
-    int Error() const { return error_; }
-
-private:
-    int Check(std::uint32_t address) const
-    {
-        if (error_)
-            return error_;
-        return address < 0xfea000 || address > 0xfea03c || (address & 3) ? -EINVAL : 0;
-    }
-
-    Relay& relay_;
-    std::function<int(unsigned)> yield_;
-    bool bulk_;
-    int error_ = 0;
-};
+int RelayCardBus::Check(std::uint32_t address) const
+{
+    if (error_)
+        return error_;
+    return address < 0xfea000 || address > 0xfea03c || (address & 3) ? -EINVAL : 0;
 }
 
 void PutWord(std::uint8_t* p, std::uint32_t value)

@@ -16,6 +16,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <deque>
+#include <map>
 #include <mutex>
 #include <thread>
 #include <vector>
@@ -39,7 +40,7 @@ extern "C" int msg_printf(const char* format, ...)
 using namespace px4::xz3;
 
 namespace {
-constexpr unsigned StageAddress = 0xc4600;
+constexpr unsigned StageAddress = 0xc4600, HookAddress = 0xe9a10;
 
 void Require(bool condition, const char* name)
 {
@@ -114,13 +115,21 @@ public:
             if (request.type == 0x40) {
                 if (in_stage)
                     std::copy_n(data, length, stage.begin() + (address - StageAddress));
-            } else {
-                if (address == StageAddress && length == stage.size())
-                    pumped = Process();
-                if (in_stage)
-                    std::copy_n(stage.begin() + (address - StageAddress), length, data);
                 else
-                    std::fill_n(data, length, std::uint8_t{0});
+                    for (std::size_t i = 0; i < length; ++i)
+                        memory[address + static_cast<unsigned>(i)] = data[i];
+            } else {
+                // フックが外れている間、boot0 はステージングの要求を中継プログラムへ渡さない。
+                if (address == StageAddress && length == stage.size() && Hooked())
+                    pumped = Process();
+                if (in_stage) {
+                    std::copy_n(stage.begin() + (address - StageAddress), length, data);
+                } else {
+                    for (std::size_t i = 0; i < length; ++i) {
+                        const auto found = memory.find(address + static_cast<unsigned>(i));
+                        data[i] = found == memory.end() ? 0 : found->second;
+                    }
+                }
             }
             transferred = length;
         }
@@ -154,8 +163,23 @@ public:
     std::size_t fifo_at_op11 = 0;
     bool endless = false;
     int read_error = 0;
+    // ステージング以外の boot0 の RAM とカード UART のレジスター。
+    std::map<unsigned, std::uint8_t> memory;
+    // 空でなければ、フックの番地にこの値があるときだけ操作を処理する。
+    std::vector<std::uint8_t> hook_image;
+    unsigned op14_count = 0;
 
 private:
+    bool Hooked() const
+    {
+        for (std::size_t i = 0; i < hook_image.size(); ++i) {
+            const auto found = memory.find(HookAddress + static_cast<unsigned>(i));
+            if (found == memory.end() || found->second != hook_image[i])
+                return false;
+        }
+        return true;
+    }
+
     // ステージングの要求を処理して応答を書く。操作12 なら true。
     bool Process()
     {
@@ -192,6 +216,11 @@ private:
         }
         case 13:
             PutWord(stage.data() + 36, 0);
+            return false;
+        case 14:
+            // 受信 FIFO は空として、取り出した数 0 を返す。
+            ++op14_count;
+            PutWord(stage.data() + 20, 0);
             return false;
         default:
             PutWord(stage.data() + 12, 1);
@@ -345,6 +374,36 @@ void TestResidueReadErrorFails()
     Require(session.StartStream(false, sink, stop_failed) == -ENODEV, "residue read error is returned");
     Require(!session.Running() && port.op11_count == 0, "operation 11 is not sent after a read error");
 }
+
+// カード操作の待機 (Pause) は制御ロックを手放すため、その間に受信を閉じた復元で共通版が外れることがある。
+// 待機の後のカード FIFO の読み出しは、外れた中継プログラムへ操作14 を送らず、直接の読み書きへ戻る。
+void TestCardBusFollowsRelayRestore()
+{
+    static const std::uint8_t runtime_body[4]{1, 2, 3, 4};
+    static const std::uint8_t hook[8]{0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88};
+    const Images relay_images{{runtime_body, 4}, {runtime_body, 4}, {hook, 8}};
+    MockPort port;
+    port.hook_image.assign(hook, hook + sizeof(hook));
+    Relay relay(port, relay_images);
+    Require(relay.Install(relay_images.runtime) == 0 && relay.RuntimeInstalled(), "runtime installs on the mock");
+
+    bool restored = false;
+    RelayCardBus bus(relay, [&](unsigned) {
+        restored = relay.Restore();
+        return 0;
+    });
+    CardUart uart(bus);
+    std::uint8_t data[CardUart::FifoChunk]{};
+    std::size_t count = 0;
+    Require(bus.Bulk() && uart.ReadBytes(data, sizeof(data), count) == 0 && port.op14_count == 1,
+            "card FIFO uses operation 14 while the runtime is installed");
+
+    Require(bus.Pause(1) == 0 && restored && !relay.RuntimeInstalled(), "restore runs during the card pause");
+    Require(!bus.Bulk(), "bulk transfer follows the restored relay");
+    Require(uart.ReadBytes(data, sizeof(data), count) == 0 && count == 0 && port.op14_count == 1,
+            "card FIFO falls back to direct access after the restore");
+    Require(!bus.Error(), "no transfer error after the restore");
+}
 }
 
 int main()
@@ -355,6 +414,7 @@ int main()
     TestResidueIsDiscarded(1536);
     TestEndlessResidueFails();
     TestResidueReadErrorFails();
+    TestCardBusFollowsRelayRestore();
     std::puts("xz3_session_test: passed");
     return 0;
 }
