@@ -111,6 +111,10 @@ public:
     virtual void Nap() noexcept = 0;
     // Bulk IN (0x81) に残ったデータを捨てる。0 か OS のエラーを返す。
     virtual int FlushStream() = 0;
+    // Bulk IN (0x81) を size バイトまで 1 回読む。timeout_ms の間に届かなければ取り消し、
+    // transferred を 0 にして 0 を返す。抜去で -ENODEV、そのほかの失敗で負の値を返す。
+    virtual int ReadStream(std::uint8_t* data, std::size_t size, unsigned timeout_ms,
+                           std::size_t& transferred) = 0;
     virtual std::unique_ptr<BulkReader> CreateReader() = 0;
 };
 
@@ -177,6 +181,7 @@ private:
             std::uint8_t* rx, std::size_t count) override;
     int Delay(unsigned milliseconds) override { return relay_.Delay(milliseconds); }
     int ReadLoop(bool satellite, StreamSink& sink);
+    int DiscardResidue();
     unsigned NextStage(Clock::duration elapsed, unsigned stage) const;
     void HoldForCard();
     void Deliver(const std::uint8_t* bytes, std::size_t length, StreamSink& sink);

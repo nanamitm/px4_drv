@@ -157,6 +157,20 @@ public:
     // 発行中の読み出しは BulkReader の破棄で取り消すため、捨てるものがない。
     // libusb_clear_halt は機器のエンドポイントの状態も変えるため、WinUSB 版にない操作として使わない。
     int FlushStream() override { return 0; }
+    // 発行中の読み出しがない間だけ呼ばれる (Session::StartStream の操作11 の前)。
+    int ReadStream(std::uint8_t *data, std::size_t size, unsigned timeout_ms, std::size_t &transferred) override
+    {
+        transferred = 0;
+        if (!Available())
+            return -ENODEV;
+        int actual = 0;
+        const int rc = libusb_bulk_transfer(handle_, BulkIn, data, static_cast<int>(size), &actual, timeout_ms);
+        if (rc == 0 || rc == LIBUSB_ERROR_TIMEOUT) {
+            transferred = static_cast<std::size_t>(actual);
+            return 0;
+        }
+        return rc == LIBUSB_ERROR_NO_DEVICE || !Available() ? -ENODEV : -EIO;
+    }
     std::unique_ptr<xz3::BulkReader> CreateReader() override
     {
         try {

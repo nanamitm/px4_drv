@@ -122,6 +122,36 @@ public:
         const auto error = GetLastError();
         return error ? static_cast<int>(error) : -EIO;
     }
+    int ReadStream(std::uint8_t* data, std::size_t size, unsigned timeout_ms, std::size_t& transferred) override
+    {
+        transferred = 0;
+        OVERLAPPED op{};
+        op.hEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+        if (!op.hEvent)
+            return -ENOMEM;
+        int result = 0;
+        if (!WinUsb_ReadPipe(usb_, BulkIn, data, static_cast<ULONG>(size), nullptr, &op) &&
+            GetLastError() != ERROR_IO_PENDING) {
+            result = -EIO;
+        } else {
+            HANDLE events[]{removed_, op.hEvent};
+            const auto wait = WaitForMultipleObjects(2, events, FALSE, timeout_ms);
+            if (wait != WAIT_OBJECT_0 + 1)
+                CancelIoEx(file_, &op);
+            // 取り消した場合も、完了を待ってから OVERLAPPED とバッファを手放す。
+            ULONG done = 0;
+            const bool ok = WinUsb_GetOverlappedResult(usb_, &op, &done, TRUE) != FALSE;
+            const auto error = ok ? ERROR_SUCCESS : GetLastError();
+            if (wait == WAIT_OBJECT_0)
+                result = -ENODEV;
+            else if (ok || error == ERROR_OPERATION_ABORTED)
+                transferred = done;
+            else
+                result = -EIO;
+        }
+        CloseHandle(op.hEvent);
+        return result;
+    }
     std::unique_ptr<BulkReader> CreateReader() override
     {
         return std::make_unique<BulkRead>(file_, usb_, removed_);
