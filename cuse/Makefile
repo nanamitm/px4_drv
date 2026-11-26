@@ -141,6 +141,9 @@ $(BUILD)/xz3_card_test: $(ROOT)/winusb/tests/xz3_card_test.cpp $(BUILD)/xz3/card
 $(BUILD)/xz3_stream_test: $(ROOT)/winusb/tests/xz3_stream_test.cpp | $(BUILD)
 	$(CXX) $(CPPFLAGS) $(CXXFLAGS) $< -o $@
 
+$(BUILD)/xz3_session_test: $(ROOT)/winusb/tests/xz3_session_test.cpp $(XZ3_OBJS) $(BUILD)/shared/card_uart.o
+	$(CXX) $(CPPFLAGS) $(CXXFLAGS) $^ -o $@
+
 # PX-BCUD の共有コード (WinUSB 版と同じ試験) と、isochronous のパケットから TS を組み立てる処理
 $(BUILD)/pxbcud_frontend_test: $(ROOT)/winusb/tests/pxbcud_frontend_test.cpp $(PXBCUD_OBJS)
 	$(CXX) $(CPPFLAGS) $(CXXFLAGS) $^ -o $@
@@ -205,7 +208,7 @@ install-rtlsdr: rtlsdr
 	install -D -m 0755 $(BUILD)/cargo/release/rtlsdr_frontend $(DESTDIR)$(LIBDIR)/rtlsdr_frontend
 
 check: $(BUILD)/control_channel_test $(BUILD)/channel_test $(BUILD)/platform_test $(BUILD)/torne_session_test \
-		$(BUILD)/torne_native_frontend_test $(BUILD)/xz3_card_test $(BUILD)/xz3_stream_test \
+		$(BUILD)/torne_native_frontend_test $(BUILD)/xz3_card_test $(BUILD)/xz3_stream_test $(BUILD)/xz3_session_test \
 		$(BUILD)/pxbcud_frontend_test $(BUILD)/pxbcud_stream_test $(BUILD)/siano_frontend_test $(BUILD)/siano_session_test \
 		$(BUILD)/iq_process_test $(BUILD)/rtlsdr_protocol_test $(BUILD)/rtlsdr_session_test $(BUILD)/rtlsdr_helper_test 		| $(BUILD)/torne-trace
 	$(BUILD)/control_channel_test
@@ -216,6 +219,7 @@ check: $(BUILD)/control_channel_test $(BUILD)/channel_test $(BUILD)/platform_tes
 	$(BUILD)/torne_native_frontend_test --golden $(ROOT)/winusb/tests/data/torne_native $(BUILD)/torne-trace
 	$(BUILD)/xz3_card_test
 	$(BUILD)/xz3_stream_test
+	$(BUILD)/xz3_session_test
 	$(BUILD)/pxbcud_frontend_test
 	$(BUILD)/pxbcud_stream_test
 	$(BUILD)/siano_frontend_test

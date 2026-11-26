@@ -162,6 +162,11 @@ foreach ($build_platform in $build_platforms) {
     if ($LASTEXITCODE -ne 0) { throw "GV-MVP/XZ3 stream test build failed. platform: $build_platform" }
     & "build/$build_platform/Release-static/xz3_stream_test.exe"
     if ($LASTEXITCODE -ne 0) { throw "GV-MVP/XZ3 stream test failed. platform: $build_platform" }
+    # Linux 版と共有する xz3/session.cpp の受信の開始と停止を、EP81 の FIFO を持つ模擬の機器で検証する。
+    msbuild tests/xz3_session_test.vcxproj /p:"Configuration=Release-static;Platform=$build_platform;PlatformToolset=v143"
+    if ($LASTEXITCODE -ne 0) { throw "GV-MVP/XZ3 session test build failed. platform: $build_platform" }
+    & "build/$build_platform/Release-static/xz3_session_test.exe"
+    if ($LASTEXITCODE -ne 0) { throw "GV-MVP/XZ3 session test failed. platform: $build_platform" }
 
     # 選局時の TS バッファ初期化が読み書きと競合しても止まらないことを毎回検証
     & "build/$build_platform/Release-static/ringbuffer_purge_test.exe"
