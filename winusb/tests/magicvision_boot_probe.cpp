@@ -16,13 +16,21 @@ int wmain(int argc,wchar_t **argv)
     if(file==INVALID_HANDLE_VALUE){printf("open error=%lu\n",GetLastError());return 3;}
     WINUSB_INTERFACE_HANDLE usb=nullptr;
     if(!WinUsb_Initialize(file,&usb)){CloseHandle(file);return 3;}
+    std::shared_ptr<px4::dt295::UsbHandles> handles;
+    try {
+        handles = std::make_shared<px4::dt295::UsbHandles>(file, usb);
+    } catch (const std::bad_alloc &) {
+        WinUsb_Free(usb);
+        CloseHandle(file);
+        return 3;
+    }
     USB_DEVICE_DESCRIPTOR descriptor{};ULONG actual=0;
     bool good=WinUsb_GetDescriptor(usb,USB_DEVICE_DESCRIPTOR_TYPE,0,0,reinterpret_cast<PUCHAR>(&descriptor),sizeof(descriptor),&actual) &&
         actual==sizeof(descriptor) && descriptor.idVendor==0x054c && descriptor.idProduct==0x04b2;
     HANDLE removed=CreateEventW(nullptr,TRUE,FALSE,nullptr);
     if(!removed)good=false;
     if(good){
-        px4::dt295::Transport transport(file,usb,removed);transport.Begin(15000);
+        px4::dt295::Transport transport(handles,removed);transport.Begin(15000);
         auto io=transport.Callbacks();std::array<uint8_t,0x1f20> boot{};
         auto read=[&](uint32_t address,void *data,uint16_t size){return io.control(io.opaque,0xc0,0xbc,
             static_cast<uint16_t>((address>>8)&0xff00),static_cast<uint16_t>(address),data,size,1000);};
@@ -53,5 +61,5 @@ int wmain(int argc,wchar_t **argv)
             puts(good?"PASS restored only the owned resident read-window bank to 00f00000":"FAIL guarded window restore");
         }else puts(good?"PASS read-only boot dump; no vendor OUT or reset":"FAIL read-only boot dump");
     }
-    if(removed)CloseHandle(removed);WinUsb_Free(usb);CloseHandle(file);return good?0:1;
+    if(removed)CloseHandle(removed);return good?0:1;
 }

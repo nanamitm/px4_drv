@@ -6,7 +6,7 @@ PIX-DT295 (`06b8:103b`) の1受信機を DriverHost_PX4 が所有し、既存の
 
 PIX-DT295の既定は `direct-fr` です。`FirmwareBackend=source-fr` では従来の192バイトTS転送を使います。両方式とも主CPUでI²Cを処理します。両方式のファームウェアをDriverHostに組み込んでいます。旧INIの `FirmwareBackend=magicvision` は行を削除するか `direct-fr` に変更します。旧配布INIに記載された各方式の既定のパスとSHA-256の組も、組み込み版に移行します。独自バンドルを指定していたINIでは、`SourceFirmwarePath` と `SourceFirmwareSha256` を削除すると、選択した方式の組み込み版で起動します。
 
-mAgicVISION の MIT 共有コードと上流の回帰試験を `dt295/upstream` に固定版で収録し、C11 のローダー・セッション・フレーマーを C アダプター経由で利用します。上流の回帰試験にはルートの LICENSE も保持しています。出典と各ファイルの SHA-256 は `ORIGIN.json` に記載されています。WinUSB は操作全体の期限と抜去イベントを持ち、キャンセル後も OVERLAPPED の完了を回収してからメモリーを解放する契約です。
+mAgicVISION の MIT 共有コードと上流の回帰試験を `dt295/upstream` に固定版で収録し、C11 のローダー・セッション・フレーマーを C アダプター経由で利用します。上流の回帰試験にはルートの LICENSE も保持しています。出典と各ファイルの SHA-256 は `ORIGIN.json` に記載されています。WinUSB は操作全体の期限と抜去イベントを持ち、キャンセル後の完了待ちは、制御転送1件または Bulk IN 一括につき1秒です。期限を過ぎた要求は、完了の通知までバッファーと USB ハンドルを保持します。未完了の要求が残る間は、その機器への転送を受け付けません。
 
 受信機を開く処理はローカル検証とバッファ確保だけで、長いUSB初期化は最初の選局へ遅延し、ReceiverManagerの一覧ロックを占有しない構成です。
 

@@ -40,23 +40,26 @@ struct Event {
     ~Event(){if(value)CloseHandle(value);}
     Event()=default;Event(const Event &)=delete;Event &operator=(const Event &)=delete;
 };
-// スレッド終了時にも未回収I/Oを残さず、DeviceBaseのUSB解放より先に回収する。
-struct Read {
-    HANDLE file;WINUSB_INTERFACE_HANDLE usb;
-    Event event;
-    OVERLAPPED operation{};
-    std::vector<uint8_t> bytes;
-    bool pending=false;
-    Read(HANDLE f,WINUSB_INTERFACE_HANDLE u,size_t size):file(f),usb(u),bytes(size){operation.hEvent=event.value;}
-    ~Read(){if(pending){CancelIoEx(file,&operation);ULONG n=0;WinUsb_GetOverlappedResult(usb,&operation,&n,TRUE);}}
-    DWORD Submit(){
-        if(!event.value)return ERROR_NOT_ENOUGH_MEMORY;
-        ResetEvent(event.value);ULONG n=0;
-        BOOL ok=WinUsb_ReadPipe(usb,0x81,bytes.data(),static_cast<ULONG>(bytes.size()),&n,&operation);
-        if(!ok && GetLastError()!=ERROR_IO_PENDING)return GetLastError();
-        pending=true;return 0;
-    }
+struct BulkReads {
+    explicit BulkReads(const std::shared_ptr<UsbHandles> &usb) : batch(std::make_unique<UsbRequests>(usb)) {}
+    ~BulkReads() { DrainUsbRequests(batch); }
+    std::unique_ptr<UsbRequests> batch;
 };
+
+DWORD SubmitRead(const UsbHandles &usb, UsbRequest &read)
+{
+    if (!usb.Ready())
+        return ERROR_IO_PENDING;
+    if (!read.Reset())
+        return ERROR_NOT_ENOUGH_MEMORY;
+    if (!WinUsb_ReadPipe(usb.usb, 0x81, read.buffer.data(), static_cast<ULONG>(read.buffer.size()), nullptr, &read.operation)) {
+        const DWORD error = GetLastError();
+        if (error != ERROR_IO_PENDING)
+            return error;
+    }
+    read.pending = true;
+    return ERROR_SUCCESS;
+}
 }
 
 class Device::Receiver final : public px4::ReceiverBase {
@@ -65,7 +68,7 @@ public:
     // 同系統の復調器を持つ機種と同じく、ロックから350msまでの待機後に選局を完了し、BonDriverのPurgeで破棄させる。
     Receiver(Device &device,std::unique_ptr<SourceFirmware> source):
         ReceiverBase(RECEIVER_SAT_SET_STREAM_ID_BEFORE_TUNE|RECEIVER_WAIT_AFTER_LOCK_TC_T),
-        parent_(device),source_(std::move(source)),transport_(device.usb_dev_.dev,device.usb_dev_.winusb,device.removed_),
+        parent_(device),source_(std::move(source)),transport_(device.usb_,device.removed_),
         channel_(*source_,transport_,device.available_,
             [&device](unsigned ms){return WaitForSingleObject(device.removed_,ms)==WAIT_TIMEOUT?0:-ENODEV;},
             [this](ControlChannel::Hold kind,Clock::time_point begin){
@@ -75,9 +78,9 @@ public:
     int Open() override {
         std::lock_guard<std::mutex> lock(mutex_);
         if(open_)return -EBUSY;
-        if(!parent_.available_ || !stop_.value || restore_failed_)return -ENODEV;
+        if(!parent_.available_ || !parent_.usb_->Ready() || !stop_.value || restore_failed_)return -ENODEV;
         UCHAR speed=0;ULONG speed_size=sizeof(speed);
-        if(WinUsb_QueryDeviceInformation(parent_.usb_dev_.winusb,DEVICE_SPEED,&speed_size,&speed))
+        if(WinUsb_QueryDeviceInformation(parent_.usb_->usb,DEVICE_SPEED,&speed_size,&speed))
             msg_info("PIX-DT295: USB speed code=%u (1=low 2=full 3=high)\n",speed);
         if(!stream_buf_->Alloc(188u*65536u))return -ENOMEM;
         stream_buf_->SetThresholdSize(188u*16u);stream_buf_->Start();
@@ -207,7 +210,7 @@ private:
         }
         ResetEvent(stop_.value);stream_buf_->Start();
         // STOP後のホスト側パイプ残留を捨て、新世代の読出しをTUNE前に投入する。
-        if(!WinUsb_FlushPipe(parent_.usb_dev_.winusb,0x81))return -EIO;
+        if(!parent_.usb_->Ready() || !WinUsb_FlushPipe(parent_.usb_->usb,0x81))return -EIO;
         try{worker_=std::thread([this]{ReadLoop();});}catch(...){return -ENOMEM;}
         {
             std::unique_lock<std::mutex> state(state_mutex_);
@@ -271,10 +274,16 @@ private:
         try {
             TsDelivery delivery;
             const bool direct=source_->Direct();
-            std::vector<std::unique_ptr<Read>> reads(direct?64:4);
-            for(auto &read:reads){
-                read=std::make_unique<Read>(parent_.usb_dev_.dev,parent_.usb_dev_.winusb,direct?8192:16384);
-                if(auto error=read->Submit()){worker_error_=-EIO;break;}
+            BulkReads pending(parent_.usb_);
+            auto &reads = pending.batch->requests;
+            const std::size_t count = direct ? 64 : 4;
+            reads.reserve(count);
+            for (std::size_t i = 0; i < count; ++i) {
+                reads.push_back(std::make_unique<UsbRequest>(direct ? 8192 : 16384));
+                if (SubmitRead(*parent_.usb_, *reads.back())) {
+                    worker_error_ = -EIO;
+                    break;
+                }
             }
             {std::lock_guard<std::mutex> state(state_mutex_);armed_=!worker_error_;}changed_.notify_all();
             size_t head=0;auto last=Clock::now();auto warning=last;auto previous_read=last;
@@ -288,7 +297,7 @@ private:
                 stream_buf_->NotifyWrite();last=Clock::now();
             };
             while(!worker_error_){
-                auto &read=*reads[head];HANDLE events[]{stop_.value,parent_.removed_,read.event.value};
+                auto &read=*reads[head];HANDLE events[]{stop_.value,parent_.removed_,read.operation.hEvent};
                 const DWORD wait=WaitForMultipleObjects(3,events,FALSE,1);
                 if(wait==WAIT_OBJECT_0 || wait==WAIT_OBJECT_0+1)break;
                 if(wait==WAIT_OBJECT_0+2){
@@ -297,21 +306,23 @@ private:
                     max_read_gap_us=(std::max)(max_read_gap_us,read_gap_us);
                     previous_read=observed;
                     ULONG bytes=0;
-                    BOOL ok=WinUsb_GetOverlappedResult(parent_.usb_dev_.winusb,&read.operation,&bytes,TRUE);read.pending=false;
-                    if(!ok || bytes>read.bytes.size()){worker_error_=-EIO;break;}
+                    const BOOL ok = WinUsb_GetOverlappedResult(parent_.usb_->usb, &read.operation, &bytes, FALSE);
+                    const DWORD error = ok ? ERROR_SUCCESS : GetLastError();
+                    read.pending = error == ERROR_IO_INCOMPLETE || error == ERROR_IO_PENDING;
+                    if(!ok || bytes>read.buffer.size()){worker_error_=-EIO;break;}
                     if(stall_active_)
                         stall_history_->Record({TraceTime(observed),static_cast<uint32_t>((std::min<uint64_t>)(read_gap_us,UINT32_MAX)),
                             static_cast<uint32_t>(bytes),0,StallHistory::Kind::Bulk});
                     input_bytes+=bytes;trace_bytes_=input_bytes;
                     if(deliver_){
-                        const int rc=delivery.Deliver(*source_,read.bytes.data(),bytes,deliver);
+                        const int rc=delivery.Deliver(*source_,read.buffer.data(),bytes,deliver);
                         if(rc){worker_error_=rc;break;}
                     }else last=Clock::now();
                     if(!trace_dir_.empty() && bulk_trace_.size()<100000){
                         const auto current=delivery.Counts();trace_cc_=current.cc_jump+current.repeat_changed;
                         bulk_trace_.push_back({TraceTime(observed),TraceTime(Clock::now()),bytes,trace_cc_.load()});
                     }
-                    if(read.Submit()){worker_error_=-EIO;break;}head=(head+1)%reads.size();
+                    if(SubmitRead(*parent_.usb_,read)){worker_error_=-EIO;break;}head=(head+1)%reads.size();
                 }else if(wait!=WAIT_TIMEOUT){worker_error_=-EIO;break;}
                 if(!deliver_)last=Clock::now();
                 // 実機の無入力時間は未測定のため、RF消失を任意の期限で受信停止へ変換しない。
@@ -493,6 +504,9 @@ int Device::Init(){
     auto source=std::make_unique<SourceFirmware>(direct);
     const auto rc=source->LoadEmbedded();
     if(rc)return rc;
+    usb_ = std::make_shared<UsbHandles>(usb_dev_.dev, usb_dev_.winusb);
+    usb_dev_.dev = INVALID_HANDLE_VALUE;
+    usb_dev_.winusb = nullptr;
     receiver_=std::make_unique<Receiver>(*this,std::move(source));
     // 空なら記録しない。TSリングの滞留の前後を、受信と別のスレッドでこのフォルダーへ書き出す。
     const auto stall_dir=device_def_.configs.Get(L"StallTraceDir",L"");

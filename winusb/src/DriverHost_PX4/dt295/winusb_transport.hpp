@@ -4,7 +4,10 @@
 #include "runtime.h"
 #include <windows.h>
 #include <winusb.h>
+#include <atomic>
 #include <chrono>
+#include <memory>
+#include <vector>
 
 namespace px4::dt295 {
 class ControlIo {
@@ -20,12 +23,48 @@ public:
     DWORD Collect(WINUSB_INTERFACE_HANDLE,OVERLAPPED &,ULONG &) override;
     void Cancel(HANDLE,OVERLAPPED &) noexcept override;
 };
+// 期限後も未完了の要求がバッファと USB ハンドルを所有する。
+struct UsbHandles {
+    UsbHandles(HANDLE file, WINUSB_INTERFACE_HANDLE usb) noexcept : file(file), usb(usb) {}
+    ~UsbHandles();
+    UsbHandles(const UsbHandles &) = delete;
+    UsbHandles &operator=(const UsbHandles &) = delete;
+    bool Ready() const noexcept { return deferred == 0; }
+
+    const HANDLE file;
+    const WINUSB_INTERFACE_HANDLE usb;
+    std::atomic<unsigned> deferred{0};
+};
+
+struct UsbRequest {
+    explicit UsbRequest(std::size_t size);
+    ~UsbRequest();
+    UsbRequest(const UsbRequest &) = delete;
+    UsbRequest &operator=(const UsbRequest &) = delete;
+    bool Reset() noexcept;
+    bool Wait(DWORD timeout) noexcept;
+
+    OVERLAPPED operation{};
+    ULONG submitted_bytes = 0;
+    std::vector<std::uint8_t> buffer;
+    bool pending = false;
+};
+
+struct UsbRequests {
+    explicit UsbRequests(const std::shared_ptr<UsbHandles> &usb) noexcept : usb(usb) {}
+    const std::shared_ptr<UsbHandles> usb;
+    std::vector<std::unique_ptr<UsbRequest>> requests;
+};
+
+// 一括でキャンセルし、全要求を共通の期限まで待つ。未完了分は完了待ちのスレッドへ渡す。
+void DrainUsbRequests(std::unique_ptr<UsbRequests> &batch, ControlIo *control = nullptr) noexcept;
+
 // 1個体の制御ロック下で使用。TSのOVERLAPPEDは別スレッドが所有する。
 class Transport final : public ControlTransport {
 public:
     using Clock=std::chrono::steady_clock;
-    Transport(HANDLE file,WINUSB_INTERFACE_HANDLE usb,HANDLE removed,ControlIo *io=nullptr)
-        :file_(file),removed_(removed),usb_(usb),io_(io?*io:native_) {}
+    Transport(const std::shared_ptr<UsbHandles> &usb, HANDLE removed, ControlIo *io = nullptr)
+        : usb_(usb), removed_(removed), io_(io ? *io : native_) {}
     void Begin(unsigned milliseconds) override { deadline_=Clock::now()+std::chrono::milliseconds(milliseconds); }
     // 失敗した要求を再送せず、保存済み前像を戻すときだけ通信を再開する。
     void BeginRestore(unsigned milliseconds) override { failed_=0; Begin(milliseconds); }
@@ -41,8 +80,9 @@ private:
     static uint32_t Now(void *);
     static void Delay(void *,unsigned);
     int Transfer(uint8_t,uint8_t,uint16_t,uint16_t,void *,uint16_t,unsigned);
-    HANDLE file_,removed_;
-    WINUSB_INTERFACE_HANDLE usb_;
+    const std::shared_ptr<UsbHandles> usb_;
+    HANDLE removed_;
+    std::unique_ptr<UsbRequests> control_;
     NativeControlIo native_;
     ControlIo &io_;
     Clock::time_point deadline_{};
