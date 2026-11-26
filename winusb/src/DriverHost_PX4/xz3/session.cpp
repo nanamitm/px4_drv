@@ -506,9 +506,6 @@ int Session::Tune(bool satellite, std::uint32_t frequency_khz, std::uint32_t tsi
          * 操作5の手順の間の待機では制御ロックを手放す。フックの2語の書き込みの間と、各操作の要求から
          * 応答の読み出しまでは譲らない。受信の状態のmutexを持つ所有者の下では、この間に制御ロックを
          * 取るのはカード操作だけで、TS workerは選局の前に止まっている。
-         * 導入の後の復調器の初期化は約1.3秒のI²Cの操作の連続で、続く選局 (約0.8秒) と合わせると
-         * ブロックの待機時間を超えるため、各I²Cの操作の前にも待っているカード操作へ譲る。
-         * I²Cの操作は1回ごとにSTARTからSTOPまでを中継プログラムが行い、カード操作 (操作14) はI²Cを使わない。
          */
         const auto wait = [this, &control](unsigned ms) {
             control.unlock();
@@ -516,20 +513,33 @@ int Session::Tune(bool satellite, std::uint32_t frequency_khz, std::uint32_t tsi
             control.lock();
             return rc;
         };
-        if (!(result = relay_.Init([this, &control] { YieldToCard(control); }, wait))) {
-            frontend_yield_ = &control;
-            result = frontend_.Initialize();
-            frontend_yield_ = nullptr;
-        }
-        if (result) {
+        if ((result = relay_.Init([this, &control] { YieldToCard(control); }, wait))) {
             init_failed = true;
             return result;
         }
-        initialized_ = true;
-        YieldToCard(control);
     }
-    result = satellite && relative ? frontend_.TuneRelative(frequency_khz, tsid)
-                                   : frontend_.Tune(satellite, frequency_khz, tsid);
+    /*
+     * 復調器の初期化は約1.3秒のI²Cの操作の連続で、選局はロックの判定を50 ms間隔で最大35回繰り返す
+     * (相対TS番号ではTMCCの読み直しも10 ms間隔で最大100回)。通常の選局でも約0.8秒、ロックしない衛星の
+     * 選局では約1.8秒を超え、ブロックの待機時間 (1.6秒) を超えることがある。このため、各I²Cの操作の前に
+     * 待っているカード操作へ譲り、選局の待機 (Delay) では制御ロックを手放す。I²Cの操作は1回ごとに
+     * STARTからSTOPまでを中継プログラムが行い、カード操作 (操作14) はI²Cを使わない。
+     * 譲るのはTuneを実行しているスレッドのI2cとDelayだけで、ほかのスレッドのReadCndatは対象外。
+     */
+    frontend_lock_ = &control;
+    frontend_thread_ = std::this_thread::get_id();
+    if (!initialized_) {
+        result = frontend_.Initialize();
+        initialized_ = !result;
+        init_failed = !!result;
+    }
+    if (!result)
+        result = satellite && relative ? frontend_.TuneRelative(frequency_khz, tsid)
+                                       : frontend_.Tune(satellite, frequency_khz, tsid);
+    frontend_lock_ = nullptr;
+    frontend_thread_ = {};
+    if (init_failed)
+        return result;
     control.unlock();
     // 地デジはロック直後に訂正前のTSを出すことがある。
     // ファームウェア交換による待ちがなくなったため、DMAを始める前に安定を待つ。
@@ -646,6 +656,23 @@ bool Session::Restore()
     return true;
 }
 
+std::unique_lock<std::mutex>* Session::FrontendLock() const
+{
+    return frontend_lock_ && frontend_thread_ == std::this_thread::get_id() ? frontend_lock_ : nullptr;
+}
+
+// 選局の待機は機器を操作しないため、Tuneの中では制御ロックを手放してカード操作を通す。
+int Session::Delay(unsigned milliseconds)
+{
+    const auto control = FrontendLock();
+    if (!control)
+        return relay_.Delay(milliseconds);
+    control->unlock();
+    const int rc = port_.WaitRemoved(milliseconds);
+    control->lock();
+    return rc;
+}
+
 // カード操作の受付 (Card) は制御ロックの取得後に card_waiters_ を減らすため、0になるまで待ってから取り直す。
 void Session::YieldToCard(std::unique_lock<std::mutex>& control)
 {
@@ -702,8 +729,8 @@ int Session::I2c(std::uint8_t address, const std::uint8_t* tx, std::size_t size,
 {
     if (size > 40 || count > 40 - size)
         return -EINVAL;
-    if (frontend_yield_)
-        YieldToCard(*frontend_yield_);
+    if (const auto control = FrontendLock())
+        YieldToCard(*control);
     Packet reply{};
     const int result = relay_.Exchange(7, reply, tx, size, address, count);
     if (result)

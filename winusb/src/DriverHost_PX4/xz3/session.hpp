@@ -184,9 +184,10 @@ public:
     Session& operator=(const Session&) = delete;
 
     bool Valid() const { return relay_.Valid(); }
-    // 最初の選局では、中継プログラムの導入と復調器の初期化を先に行う。導入は約5秒かかり、
-    // SmartCard の T=1 のブロックの待機時間を超えるため、本体の各語の後、操作5の手順の間の待機、
-    // 復調器の初期化の各I²Cの操作の前と、選局の前にカード操作へ制御ロックを譲る。
+    // 最初の選局では、中継プログラムの導入と復調器の初期化を先に行う。導入は約5秒、選局はロックの判定の
+    // 待機を含めて最長約1.8秒かかり、SmartCard の T=1 のブロックの待機時間 (1.6秒) を超えるため、
+    // 本体の各語の後、操作5の手順の間の待機、復調器の初期化と選局の各I²Cの操作の前、選局の待機で
+    // カード操作へ制御ロックを譲る。
     // その失敗は init_failed で返し、所有者は Restore まで受信を失敗の状態にする。
     // 地デジはロック直後の訂正前の TS を避けるため、制御ロックを手放して 350 ms 待つ。
     // relative が true なら、衛星の tsid を相対 TS 番号 (0〜7) として扱う (Linux 版の PTX の ioctl)。
@@ -222,7 +223,9 @@ private:
     class RingStats;
     int I2c(std::uint8_t address, const std::uint8_t* tx, std::size_t size,
             std::uint8_t* rx, std::size_t count) override;
-    int Delay(unsigned milliseconds) override { return relay_.Delay(milliseconds); }
+    int Delay(unsigned milliseconds) override;
+    // Tuneを実行しているスレッドから呼ばれたときだけ、Tuneが持つ制御ロックを返す。
+    std::unique_lock<std::mutex>* FrontendLock() const;
     int ReadLoop(bool satellite, StreamSink& sink);
     int DiscardResidue();
     unsigned NextStage(Clock::duration elapsed, unsigned stage) const;
@@ -245,8 +248,10 @@ private:
     std::atomic<std::int32_t> cnr_{0};
     std::atomic<std::uint32_t> cndat_{0};
     bool stream_started_ = false, initialized_ = false;
-    // 最初の選局の復調器の初期化の間だけ、Tune が持つ制御ロックを指す。I2c はその前にカード操作へ譲る。
-    std::unique_lock<std::mutex>* frontend_yield_ = nullptr;
+    // 復調器の初期化と選局の間だけ、Tune が持つ制御ロックとそのスレッドを指す。どちらも制御ロックの下で書く。
+    // I2c はその前にカード操作へ譲り、Delay は制御ロックを手放す。
+    std::unique_lock<std::mutex>* frontend_lock_ = nullptr;
+    std::thread::id frontend_thread_{};
 };
 
 /*
