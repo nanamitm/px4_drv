@@ -56,8 +56,15 @@ public:
         : port_(port), bootstrap_(images.bootstrap), runtime_(images.runtime), hook_(images.hook) {}
 
     bool Valid() const;
-    int Init();
-    int Install(const Image& image);
+    // boot RAMを照合してからBootを行う。
+    int Init(const std::function<void()>& yield = {}, const std::function<int(unsigned)>& wait = {});
+    // ブートストラップの導入、操作6、操作5の手順0〜5、操作3、共通版の導入。
+    // yieldは本体の各語の書き込みの後に呼ばれ、waitは操作5の手順の間の待機を行う。
+    // どちらも呼び出し側が制御ロックを手放してカード操作を通せる時点で、フックは外れているか
+    // 2語とも導入済みで、boot0はカードUARTの番地への要求を通常どおり処理する。
+    // waitを省くと、制御ロックを保持したままRelayの待機 (Delay) を使う。
+    int Boot(const std::function<void()>& yield = {}, const std::function<int(unsigned)>& wait = {});
+    int Install(const Image& image, const std::function<void()>& yield = {});
     // 共通版 (操作7、11〜14) が導入され、フックが有効な間だけtrue。
     bool RuntimeInstalled() const { return runtime_installed_; }
     // フックを外した後、本体を1語ずつ戻す。yieldは各語の後に呼ばれ、呼び出し側はその中で
@@ -177,7 +184,9 @@ public:
     Session& operator=(const Session&) = delete;
 
     bool Valid() const { return relay_.Valid(); }
-    // 最初の選局では、中継プログラムの導入と復調器の初期化を同じ制御ロックの下で先に行う。
+    // 最初の選局では、中継プログラムの導入と復調器の初期化を先に行う。導入は約5秒かかり、
+    // SmartCard の T=1 のブロックの待機時間を超えるため、本体の各語の後、操作5の手順の間の待機、
+    // 復調器の初期化の各I²Cの操作の前と、選局の前にカード操作へ制御ロックを譲る。
     // その失敗は init_failed で返し、所有者は Restore まで受信を失敗の状態にする。
     // 地デジはロック直後の訂正前の TS を避けるため、制御ロックを手放して 350 ms 待つ。
     // relative が true なら、衛星の tsid を相対 TS 番号 (0〜7) として扱う (Linux 版の PTX の ioctl)。
@@ -218,6 +227,8 @@ private:
     int DiscardResidue();
     unsigned NextStage(Clock::duration elapsed, unsigned stage) const;
     void HoldForCard();
+    // 待っているカード操作があれば、制御ロックを一時的に譲る。
+    void YieldToCard(std::unique_lock<std::mutex>& control);
     void Deliver(const std::uint8_t* bytes, std::size_t length, StreamSink& sink);
 
     SessionPort& port_;
@@ -234,6 +245,8 @@ private:
     std::atomic<std::int32_t> cnr_{0};
     std::atomic<std::uint32_t> cndat_{0};
     bool stream_started_ = false, initialized_ = false;
+    // 最初の選局の復調器の初期化の間だけ、Tune が持つ制御ロックを指す。I2c はその前にカード操作へ譲る。
+    std::unique_lock<std::mutex>* frontend_yield_ = nullptr;
 };
 
 /*
