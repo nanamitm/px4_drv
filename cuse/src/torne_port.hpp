@@ -9,6 +9,7 @@
 #include <cerrno>
 #include <chrono>
 #include <cstdint>
+#include <mutex>
 #include <string>
 
 namespace px4::cuse {
@@ -45,6 +46,9 @@ private:
     RemovalSignal &removal_;
     const std::string label_;
     Clock::time_point deadline_ = (Clock::time_point::min)();
-    std::uint64_t transfers_ = 0, control_us_ = 0, max_control_us_ = 0, pipes_ = 0;
+    struct Timing {
+        std::uint64_t transfers = 0, control_us = 0, max_control_us = 0, pipes = 0;
+    } timing_;
+    std::mutex timing_mutex_;
 };
 }

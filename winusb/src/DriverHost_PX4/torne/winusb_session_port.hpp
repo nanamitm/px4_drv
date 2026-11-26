@@ -9,8 +9,8 @@
 namespace px4::torne {
 class WinUsbSessionPort final : public SessionPort {
 public:
-    WinUsbSessionPort(HANDLE file, WINUSB_INTERFACE_HANDLE usb, HANDLE removed, HANDLE stop) noexcept
-        : stop_(stop), control_(file, usb, removed, io_), signal_(removed, stop) {}
+    WinUsbSessionPort(std::shared_ptr<WinUsbHandles> handles, HANDLE removed, HANDLE stop) noexcept
+        : stop_(stop), control_(std::move(handles), removed, io_), signal_(removed, stop) {}
     ControlTransport &Transport() noexcept override { return control_; }
     BootstrapWait &Wait() noexcept override { return control_; }
     FrontendSignal &Signal() noexcept override { return signal_; }

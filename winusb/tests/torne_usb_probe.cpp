@@ -81,13 +81,14 @@ static bool Inspect(const wchar_t *path, unsigned initialization_timeout, bool i
 		}
 	}
 	std::cout << (ok ? "DESCRIPTORS MATCH (tuning and TS untested)\n" : "DESCRIPTORS FAILED\n");
-	if (ok && initialization_timeout) {
+    const auto handles = std::make_shared<px4::torne::WinUsbHandles>(file, usb);
+    if (ok && initialization_timeout) {
 		HANDLE cancel = CreateEventW(nullptr, TRUE, FALSE, nullptr);
 		if (!cancel) {
 			ok = false;
 		} else {
 			px4::torne::NativeControlIo native;
-			px4::torne::WinUsbControl control(file, usb, cancel, native);
+			px4::torne::WinUsbControl control(handles, cancel, native);
 			const auto deadline = px4::torne::WinUsbControl::Clock::now() + std::chrono::milliseconds(initialization_timeout);
 			control.Begin(deadline);
 			px4::torne::MemoryAccess memory(control);
@@ -155,8 +156,6 @@ static bool Inspect(const wchar_t *path, unsigned initialization_timeout, bool i
 			CloseHandle(cancel);
 		}
 	}
-	WinUsb_Free(usb);
-	CloseHandle(file);
 	return ok;
 }
 

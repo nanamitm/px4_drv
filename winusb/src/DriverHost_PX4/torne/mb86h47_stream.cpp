@@ -40,11 +40,14 @@ void StreamEngine::LoadCore0()
 }
 StreamResult StreamEngine::Prepare()
 {
-	if(running_ || !bootstrap_.IsInitialized()) return StreamResult::invalid_state;
-	prepared_=false;
+	if (!bootstrap_.IsInitialized()) return StreamResult::invalid_state;
+	const auto generation = bootstrap_.Generation();
+	if (running_ && generation_ == generation) return StreamResult::invalid_state;
+	// ブリッジを作り直したあとは、旧世代の停止失敗で残った状態を使わない。
+	running_ = prepared_ = false;
 	result_=StreamResult::ok;
 	memory_result_=MemoryResult::ok;
-	generation_=bootstrap_.Generation();
+	generation_ = generation;
 	Write(0xd000c4,0);
 	Write(0xd00000,0xffffffff);
 	Write(0xd00004,0x001f33ff);

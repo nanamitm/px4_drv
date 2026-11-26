@@ -65,13 +65,27 @@ private:
     std::shared_ptr<Shared> card_owner_;   // CardNode のロックの下で使う
     torne::CardSession card_state_;
 
+    struct ReceiveState {
+        explicit ReceiveState(TorneDevice *device) : owner(device) {}
+        std::mutex mutex;
+        // 停止期限後は完了通知からデバイスへの参照を切る。
+        TorneDevice *owner;
+    };
+
+    struct Transfer {
+        ~Transfer() { libusb_free_transfer(usb); }
+        std::shared_ptr<ReceiveState> state;
+        std::vector<std::uint8_t> buffer;
+        libusb_transfer *usb = nullptr;
+        bool in_flight = false; // ReceiveState::mutex で保護する
+    };
+
     // Bulk IN (StartStream から StopStream まで)
     struct Stream {
-        std::vector<libusb_transfer *> transfers;
-        std::vector<std::vector<std::uint8_t>> buffers;
-        std::atomic_bool running{false};
+        std::vector<std::unique_ptr<Transfer>> transfers;
+        bool running = false; // ReceiveState::mutex で保護する
+        bool unconfirmed = false;
         std::atomic_int error{0};
-        std::mutex mutex;
         std::condition_variable changed;
         int in_flight = 0;
         bool first = false, stop = false;
@@ -80,5 +94,6 @@ private:
         Clock::time_point started{}, first_at{}, previous_read{};
         std::uint64_t max_read_gap_us = 0;
     } stream_;
+    std::shared_ptr<ReceiveState> receive_ = std::make_shared<ReceiveState>(this);
 };
 }

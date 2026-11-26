@@ -35,9 +35,12 @@ int TornePort::Transfer(const torne::MemoryRequest &request, std::uint8_t *data,
                                            static_cast<std::uint16_t>(length), TimeoutMs(left));
     const auto elapsed = static_cast<std::uint64_t>(
         std::chrono::duration_cast<std::chrono::microseconds>(Clock::now() - begin).count());
-    ++transfers_;
-    control_us_ += elapsed;
-    max_control_us_ = std::max(max_control_us_, elapsed);
+    {
+        std::lock_guard<std::mutex> lock(timing_mutex_);
+        ++timing_.transfers;
+        timing_.control_us += elapsed;
+        timing_.max_control_us = std::max(timing_.max_control_us, elapsed);
+    }
     if (rc < 0) {
         msg_err("%s: USB control type=%02x request=%02x value=%04x index=%04x bytes=%zu rc=%d\n", label_.c_str(),
                 request.type, request.request, request.value, request.index, length, rc);
@@ -64,7 +67,10 @@ int TornePort::TransferPipe(std::uint8_t endpoint, std::uint8_t *data, std::size
     const int rc = (endpoint & 0x80)
                        ? libusb_interrupt_transfer(handle_, endpoint, data, static_cast<int>(length), &actual, TimeoutMs(left))
                        : libusb_bulk_transfer(handle_, endpoint, data, static_cast<int>(length), &actual, TimeoutMs(left));
-    ++pipes_;
+    {
+        std::lock_guard<std::mutex> lock(timing_mutex_);
+        ++timing_.pipes;
+    }
     if (rc < 0) {
         // 期限切れは呼び出し側が I2C の timeout として扱う。部分的に届いたデータは使わない。
         if (rc != LIBUSB_ERROR_TIMEOUT)
@@ -114,10 +120,17 @@ int TornePort::Sleep(bool, Clock::time_point deadline, std::int64_t ns) noexcept
 
 void TornePort::ReportTiming(const char *stage)
 {
+    Timing snapshot;
+    {
+        // Session の制御ロックの外から報告するため、カード操作による更新と同期する。
+        std::lock_guard<std::mutex> lock(timing_mutex_);
+        snapshot = timing_;
+        timing_ = {};
+    }
     msg_info("%s: transport stage=%s transfers=%llu pipes=%llu mean_control_us=%llu max_control_us=%llu\n",
-             label_.c_str(), stage, static_cast<unsigned long long>(transfers_), static_cast<unsigned long long>(pipes_),
-             static_cast<unsigned long long>(transfers_ ? control_us_ / transfers_ : 0),
-             static_cast<unsigned long long>(max_control_us_));
-    transfers_ = control_us_ = max_control_us_ = pipes_ = 0;
+             label_.c_str(), stage, static_cast<unsigned long long>(snapshot.transfers),
+             static_cast<unsigned long long>(snapshot.pipes),
+             static_cast<unsigned long long>(snapshot.transfers ? snapshot.control_us / snapshot.transfers : 0),
+             static_cast<unsigned long long>(snapshot.max_control_us));
 }
 }

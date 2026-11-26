@@ -23,8 +23,10 @@ public:
 		USHORT length, OVERLAPPED &operation) noexcept override
 	{
 		++submits;
-		buffer = data;
-		actual = length;
+        buffer = data;
+        completion_event = operation.hEvent;
+        if (length) data[0] = 0x47;
+        actual = length;
 		if (expire)
 			owner->Begin(WinUsbControl::Clock::now() - std::chrono::seconds(1));
 		if (cancel_on_submit)
@@ -34,20 +36,21 @@ public:
 		return submit_result;
 	}
 	DWORD Collect(WINUSB_INTERFACE_HANDLE, OVERLAPPED &operation, ULONG &transferred, bool wait) noexcept override
-	{
-		++collects;
-		lifetime_ok = wait && buffer && GetHandleInformation(operation.hEvent, &event_flags);
+    {
+        collect_wait = wait;
+        ++collects;
+		lifetime_ok = buffer && GetHandleInformation(operation.hEvent, &event_flags);
 		transferred = actual;
 		return collect_result;
 	}
 	DWORD Cancel(HANDLE, OVERLAPPED &operation) noexcept override
 	{
-		++cancels;
-		SetEvent(operation.hEvent);
+        ++cancels;
+        if (signal_on_cancel) SetEvent(operation.hEvent);
 		return cancel_result;
 	}
 	WinUsbControl *owner = nullptr;
-	HANDLE cancel_event = nullptr;
+	HANDLE cancel_event = nullptr, completion_event = nullptr;
 	std::uint8_t *buffer = nullptr;
 	ULONG actual = 0;
 	DWORD event_flags = 0;
@@ -55,9 +58,10 @@ public:
 	DWORD collect_result = ERROR_SUCCESS;
 	DWORD cancel_result = ERROR_SUCCESS;
 	bool signal_completion = true;
+    bool signal_on_cancel = true;
 	bool expire = false;
 	bool cancel_on_submit = false;
-	bool lifetime_ok = false;
+	bool lifetime_ok = false, collect_wait = false;
 	int submits = 0, collects = 0, cancels = 0;
 };
 
@@ -123,10 +127,12 @@ static void ControlTests()
 {
 	HANDLE cancel = CreateEventW(nullptr, TRUE, FALSE, nullptr);
 	Require(cancel != nullptr, "create cancel event");
-	for (int scenario = 0; scenario < 8; ++scenario) {
+    const auto handles = std::make_shared<WinUsbHandles>(
+        reinterpret_cast<HANDLE>(2), reinterpret_cast<WINUSB_INTERFACE_HANDLE>(1), false);
+    for (int scenario = 0; scenario < 8; ++scenario) {
 		ResetEvent(cancel);
 		MockControlIo io;
-		WinUsbControl control(reinterpret_cast<HANDLE>(2), reinterpret_cast<WINUSB_INTERFACE_HANDLE>(1), cancel, io);
+		WinUsbControl control(handles, cancel, io);
 		io.owner = &control;
 		io.cancel_event = cancel;
 		control.Begin(WinUsbControl::Clock::now() + std::chrono::seconds(10));
@@ -141,7 +147,8 @@ static void ControlTests()
 		if (scenario == 7) { io.cancel_on_submit = true; io.cancel_result = ERROR_NOT_FOUND; }
 		const int result = control.Transfer(MakeMemoryRequest(0x82008, true), data.data(), data.size(), transferred);
 		if (scenario < 2)
-			Require(result == 0 && transferred == 4 && io.collects == 1 && io.cancels == 0 && io.lifetime_ok, "sync/pending completion collected");
+			Require(result == 0 && transferred == 4 && data[0] == 0x47 && io.collects == 1 && io.cancels == 0 && io.lifetime_ok && !io.collect_wait,
+                "sync/pending completion copied into caller buffer");
 		if (scenario == 2)
 			Require(result == ERROR_TIMEOUT && transferred == 0 && io.cancels == 1 && io.collects == 1 && io.lifetime_ok, "timeout cancels and drains exact operation");
 		if (scenario == 3 || scenario == 7)
@@ -155,7 +162,7 @@ static void ControlTests()
 	}
 	ResetEvent(cancel);
 	MockControlIo io;
-	WinUsbControl expired(reinterpret_cast<HANDLE>(2), reinterpret_cast<WINUSB_INTERFACE_HANDLE>(1), cancel, io);
+	WinUsbControl expired(handles, cancel, io);
 	std::array<std::uint8_t, 4> bytes{};
 	std::size_t size = 0;
 	Require(expired.Transfer(MakeMemoryRequest(0, true), bytes.data(), 4, size) == ERROR_TIMEOUT && io.submits == 0, "deadline required before first transfer");
@@ -164,7 +171,34 @@ static void ControlTests()
 	Require(expired.Pause(0) == ERROR_SUCCESS, "zero settling wait completes without device access");
 	SetEvent(cancel);
 	Require(expired.Pause(50) == ERROR_OPERATION_ABORTED, "stop interrupts settling wait");
-	CloseHandle(cancel);
+    ResetEvent(cancel);
+    MockControlIo late;
+    WinUsbControl bounded(handles, cancel, late);
+    late.cancel_event = cancel;
+    late.cancel_on_submit = true;
+    late.signal_completion = late.signal_on_cancel = false;
+    late.collect_result = ERROR_IO_INCOMPLETE;
+    bounded.Begin(WinUsbControl::Clock::now() + std::chrono::seconds(5));
+    const auto start = WinUsbControl::Clock::now();
+    Require(bounded.Transfer(MakeMemoryRequest(0, true), bytes.data(), bytes.size(), size) == ERROR_OPERATION_ABORTED,
+        "late cancellation returns an error");
+    Require(WinUsbControl::Clock::now() - start < std::chrono::seconds(4), "late cancellation has a finite deadline");
+    Require(!handles->Ready() && late.buffer != bytes.data() && late.lifetime_ok && bytes[0] == 0,
+        "late request keeps an owned buffer and event");
+    ResetEvent(cancel);
+    Require(bounded.Transfer(MakeMemoryRequest(0, true), bytes.data(), bytes.size(), size) == ERROR_BUSY && late.submits == 1,
+        "pending cancellation blocks new commands on the same device");
+    Require(SetEvent(late.completion_event) != FALSE, "signal delayed completion");
+    const auto deadline = WinUsbControl::Clock::now() + std::chrono::seconds(2);
+    while (!handles->Ready() && WinUsbControl::Clock::now() < deadline) Sleep(1);
+    Require(handles->Ready(), "late completion allows new requests");
+
+    MockControlIo borrowed;
+    WinUsbControl legacy(handles->File(), handles->Usb(), cancel, borrowed);
+    legacy.Begin(WinUsbControl::Clock::now() + std::chrono::seconds(1));
+    Require(legacy.Transfer(MakeMemoryRequest(0, true), bytes.data(), bytes.size(), size) == ERROR_SUCCESS &&
+        borrowed.buffer == bytes.data() && borrowed.collect_wait, "borrowed XZ3 and diagnostic handles retain synchronous collection");
+    CloseHandle(cancel);
 }
 
 static void ReceptionTests()
@@ -209,7 +243,9 @@ static void ReceptionTests()
 	HANDLE removed=CreateEventW(nullptr,TRUE,FALSE,nullptr),stop=CreateEventW(nullptr,TRUE,FALSE,nullptr);
 	Require(removed && stop,"recovery cancellation events");
 	MockControlIo io;io.cancel_event=stop;io.cancel_on_submit=true;
-	WinUsbControl control(reinterpret_cast<HANDLE>(2),reinterpret_cast<WINUSB_INTERFACE_HANDLE>(1),removed,io);
+    const auto handles = std::make_shared<WinUsbHandles>(
+        reinterpret_cast<HANDLE>(2), reinterpret_cast<WINUSB_INTERFACE_HANDLE>(1), false);
+    WinUsbControl control(handles, removed, io);
 	control.Begin(Clock::now()+seconds(1),stop);std::uint8_t bytes[4]{};std::size_t count=4;
 	Require(control.Transfer(MakeMemoryRequest(0x82008,true),bytes,4,count)==ERROR_OPERATION_ABORTED && io.cancels==1 && io.collects==1,"receiver stop cancels and drains in-flight control");
 	Require(WaitForSingleObject(removed,0)==WAIT_TIMEOUT,"receiver stop is independent of USB removal");
