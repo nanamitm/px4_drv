@@ -22,17 +22,18 @@ struct Mock final : Io {
     std::uint8_t pointer=0,tuner_pointer=0,status=0;
     bool tuner_read=false;
     unsigned calls=0,fail_at=0,short_at=0,waits=0;
-    bool cancelled=false;
+    bool cancelled=false, settle_stream=true;
+    int fail_error=-EIO, wait_error=0;
     Mock() {
         bridge[0x0a]=114; tuner[0]=0x68;tuner[0x0d]=0x40;
         demod[0xce]=0x40;demod[0xcf]=0x10;
     }
-    int Wait(unsigned ms) override { waits+=ms;return cancelled?-ECANCELED:0; }
+    int Wait(unsigned ms) override { waits+=ms;return cancelled?-ECANCELED:wait_error; }
     int Transfer(bool input,std::uint8_t request,std::uint16_t index,
                  std::uint8_t *data,std::size_t size) override {
         ++calls;
         if (cancelled) return -ECANCELED;
-        if (calls==fail_at) return -EIO;
+        if (calls==fail_at) return fail_error;
         if (calls==short_at) return static_cast<int>(size)-1;
         CHECK(size>0 && size<=64);
         if (!request) {
@@ -57,7 +58,7 @@ struct Mock final : Io {
                     }
                 } else {
                     for(std::size_t i=1;i<size;++i) demod[pointer+i-1]=data[i];
-                    if(pointer==0x90){demod[0xe6]=demod[0x8f];demod[0xe7]=demod[0x90];}
+                    if(settle_stream && pointer==0x90){demod[0xe6]=demod[0x8f];demod[0xe7]=demod[0x90];}
                 }
             }
         }
@@ -80,6 +81,19 @@ void TestFrontend()
     CHECK(frontend.SelectStream(0)==0);
     CHECK(io.demod[0x8f]==0x40 && io.demod[0x90]==0x10);
     CHECK(frontend.SelectStream(65536)==-EINVAL);
+    Mock unsettled;
+    unsettled.settle_stream = false;
+    Frontend pending(unsettled);
+    CHECK(pending.SelectStream(0x4010) == -EAGAIN && pending.SelectedStream() == 0);
+    unsettled.wait_error = -ETIMEDOUT;
+    CHECK(pending.SelectStream(0x4010) == -EAGAIN);
+
+    Mock io_timeout;
+    io_timeout.fail_at = 7;
+    io_timeout.fail_error = -ETIMEDOUT;
+    Frontend timed_out(io_timeout);
+    CHECK(timed_out.SelectStream(0x4010) == -ETIMEDOUT && timed_out.SelectedStream() == 0);
+    CHECK(io_timeout.demod[0x8f] == 0x40 && io_timeout.demod[0x90] == 0);
     CHECK(frontend.Capture(true)==0 && io.bridge[0x5f]==0x81);
     CHECK(frontend.Sleep()==0 && io.bridge[0x5f]==0x80);
     CHECK(frontend.Tune(1049480)==-EINVAL);

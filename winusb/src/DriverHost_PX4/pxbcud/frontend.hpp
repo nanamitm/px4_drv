@@ -21,6 +21,7 @@ public:
     int Sleep();
     int Tune(std::uint32_t frequency_khz);
     int Locked(bool &locked);
+    // TSID が未確定なら -EAGAIN。制御転送のエラーはそのまま返す。
     int SelectStream(std::uint32_t stream_id);
     int ReadCn(std::uint16_t &cn);
     int Capture(bool enabled);

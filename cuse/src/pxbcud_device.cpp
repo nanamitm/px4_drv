@@ -224,9 +224,9 @@ int PxBcudDevice::SetChannel(std::uint32_t system, const ptx_freq &freq, bool st
         if (!rc) {
             io_->Begin(2000);
             rc = frontend_->SelectStream(tune.tsid);
-            // TMCC にない相対 TS 番号 (-EINVAL) と、TSID が切り替わらない場合 (-ETIMEDOUT) は、
-            // 受信できない TS の指定として利用者が選び直せるようにする。
-            if (rc == -EINVAL || rc == -ETIMEDOUT)
+            // TMCC にない相対 TS 番号は、TSID 未確定と同様に選び直せる。
+            // 制御転送のタイムアウトは機器の異常としてそのまま返す。
+            if (rc == -EINVAL)
                 rc = -EAGAIN;
         }
         // 引数不正と未ロックは機器の状態を壊さないため、選び直せる失敗として扱う。

@@ -244,6 +244,7 @@ int Frontend::SelectStream(std::uint32_t stream_id)
         stream_id=(data[stream_id*2]<<8)|data[stream_id*2+1];
     }
     if (!stream_id || stream_id==0xffff) return -EINVAL;
+    selected_stream_ = 0;
     if ((ret=DemodWrite(0x8f,static_cast<std::uint8_t>(stream_id>>8)))) return ret;
     if ((ret=DemodWrite(0x90,static_cast<std::uint8_t>(stream_id)))) return ret;
     for (unsigned i=0;i<50;++i) {
@@ -252,9 +253,10 @@ int Frontend::SelectStream(std::uint32_t stream_id)
             selected_stream_=static_cast<std::uint16_t>(stream_id);
             return 0;
         }
-        if ((ret=io_.Wait(20))) return ret;
+        // 正常な読み出しで TSID が揃わない間の待機と、I2C 転送自体の失敗を区別する。
+        if ((ret=io_.Wait(20))) return ret == -ETIMEDOUT ? -EAGAIN : ret;
     }
-    return -ETIMEDOUT;
+    return -EAGAIN;
 }
 int Frontend::ReadCn(std::uint16_t &cn)
 {
