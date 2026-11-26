@@ -358,8 +358,8 @@ private:
             if (!error || stop_ || WaitForSingleObject(removed_,0)==WAIT_OBJECT_0) break;
             // 復旧が実って長く受信できていれば、それまでの連続失敗を忘れる。
             // 高負荷で時々失敗する状態と、復旧しても受信が続かない状態を分ける。
-            // 受信の開始から数えると、データのないまま no_data を待った5秒も受信できた時間になるため、
-            // 最初にデータが届いてから最後に届くまでの時間で判断する。
+            // 受信の開始から数えると、データのないまま no_data や no_ts を待った5秒も受信できた時間になるため、
+            // PAT 確認後の TS を最初に配信してから最後に配信するまでの時間で判断する。
             budget.NoteStream(received_span_);
             if (!have_outage || !recovering_) {outage=failure_time_;have_outage=true;}
             const bool retryable=error==ERROR_GEN_FAILURE || error==ERROR_INVALID_PARAMETER ||
@@ -668,6 +668,9 @@ private:
             if (stop_ || !submit(r)) break;
             next=(next+1)%request_count;
         }
+        // 待機の外で抜去を検出してループを抜けた場合も、待機中の検出と同じ終了理由を残す。
+        if (!stop_ && !worker_error_ && WaitForSingleObject(removed_,0)==WAIT_OBJECT_0)
+            fail("device_removed",next,ERROR_DEVICE_NOT_CONNECTED);
         // 例外時も同じデリーターが取消を先に送り、全要求に共通の期限で回収する。
         reads_storage.reset();
         msg_info("PX-BCUD: TS stopped packets=%llu tei=%llu discarded_bytes=%llu win32=%lu iso_errors=%llu empty_iso_packets=%llu startup_discarded_packets=%llu\n",
