@@ -7,6 +7,7 @@
 
 namespace px4::torne {
 struct ExperimentalSession;
+class WinUsbHandles;
 // CECHZD1J専用の機器実装。PX系の制御経路とは共有しない。
 class ExperimentalDevice final : public px4::DeviceBase {
 public:
@@ -27,6 +28,7 @@ public:
 	int ReadCardData(std::uint8_t *buf, std::uint8_t &len) override;
 	int WriteCardData(const std::uint8_t *buf, std::uint8_t len) override;
 private:
+	std::shared_ptr<WinUsbHandles> usb_;
 	struct CardState;
 	std::unique_ptr<CardState> card_;
 	std::mutex card_mutex_;

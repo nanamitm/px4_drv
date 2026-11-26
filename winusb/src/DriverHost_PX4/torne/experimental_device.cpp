@@ -17,29 +17,27 @@
 
 namespace px4::torne {
 namespace {
-struct Event {
-	HANDLE value = CreateEventW(nullptr, TRUE, FALSE, nullptr);
-	~Event() { if (value) CloseHandle(value); }
-	Event() = default;
-	Event(const Event &) = delete;
-	Event &operator=(const Event &) = delete;
-};
-
 struct PendingRead {
-	PendingRead(HANDLE file_handle, WINUSB_INTERFACE_HANDLE usb_handle, HANDLE event)
-		: file(file_handle), usb(usb_handle) { operation.hEvent = event; }
-	~PendingRead()
-	{
-		if (active) {
-			CancelIoEx(file, &operation);
-			ULONG ignored = 0;
-			WinUsb_GetOverlappedResult(usb, &operation, &ignored, TRUE);
-		}
-		}
-	HANDLE file;
-	WINUSB_INTERFACE_HANDLE usb;
-	OVERLAPPED operation{};
-	bool active = false;
+    PendingRead(std::unique_ptr<WinUsbRequest> &request, const std::shared_ptr<WinUsbHandles> &handles,
+        ControlIo &io, DWORD submitted) noexcept
+        : request(request), handles(handles), io(io), submitted(submitted) {}
+    ~PendingRead()
+    {
+        if (active) {
+            ULONG ignored = 0;
+            Finish(ERROR_OPERATION_ABORTED, ignored);
+        }
+    }
+    DWORD Finish(DWORD reason, ULONG &transferred) noexcept
+    {
+        active = false;
+        return WinUsbRequest::Finish(request, handles, io, submitted, reason, transferred);
+    }
+    std::unique_ptr<WinUsbRequest> &request;
+    const std::shared_ptr<WinUsbHandles> &handles;
+    ControlIo &io;
+    DWORD submitted;
+    bool active = true;
 };
 
 } // namespace
@@ -47,8 +45,8 @@ struct PendingRead {
 // 個体単位の共有セッション。制御の順序と期限は WinUSB 版と Linux 版で共有する Session が持ち、
 // ここでは WinUSB のハンドルとイベントを結び付けるだけにする。
 struct ExperimentalSession {
-	ExperimentalSession(HANDLE file, WINUSB_INTERFACE_HANDLE usb, HANDLE removed, HANDLE stop)
-		: port(file, usb, removed, stop), session(port) {}
+	ExperimentalSession(const std::shared_ptr<WinUsbHandles> &usb, HANDLE removed, HANDLE stop)
+        : port(usb, removed, stop), session(port) {}
 	WinUsbSessionPort port;
 	Session session;
 };
@@ -129,9 +127,9 @@ std::shared_ptr<ExperimentalSession> ExperimentalDevice::AcquireSession()
 	{
 	// 個体単位のbridgeを共有し、受信とカードがそれぞれbootstrapしない。
 	std::lock_guard<std::mutex> lock(session_mutex_);
-	if (!available_) return {};
-	if (auto current = shared_session_.lock()) return current;
-	auto created = std::make_shared<ExperimentalSession>(usb_dev_.dev, usb_dev_.winusb, cancel_, receive_stop_);
+    if (!available_ || !usb_ || !usb_->Ready()) return {};
+    if (auto current = shared_session_.lock()) return current;
+    auto created = std::make_shared<ExperimentalSession>(usb_, cancel_, receive_stop_);
 	if (!created->session.InitializeBridge(bulk_i2c_) || !available_) return {};
 	shared_session_ = created;
 	return created;
@@ -286,7 +284,8 @@ private:
 		}
     void ReadLoop(Clock::time_point start_deadline,std::uint32_t frequency) noexcept
 	{
-        Event complete;
+        NativeControlIo io;
+        const auto usb = parent_.usb_;
         bool seen_stream=false;
         std::uint64_t attempt=0;
         bool exceptional=false;
@@ -296,13 +295,15 @@ private:
                 px4::StreamOverflowLog overflow("torne");
                 ReceptionWatch watch(Clock::now());
                 auto next_status=Clock::now()+std::chrono::seconds(1);
-                std::array<std::uint8_t,6144> raw{};
+                auto request = std::make_unique<WinUsbRequest>(6144);
+                const HANDLE completion = request->operation.hEvent;
                 bool prepared=false,running=false;
                 worker_error_=0;worker_stop_ok_=false;
 		std::vector<std::uint8_t> response;
 				if (!Control().Command(0x12, {1}, response, start_deadline, true)) worker_error_ = ERROR_GEN_FAILURE;
 				prepared = !worker_error_ && Control().PrepareStream(start_deadline, true) == StreamResult::ok;
-                if(!prepared || !complete.value || !WinUsb_ResetPipe(parent_.usb_dev_.winusb,0x81))worker_error_=ERROR_GEN_FAILURE;
+                if (!prepared || !completion || !usb->Ready() || !WinUsb_ResetPipe(usb->Usb(), 0x81))
+                    worker_error_ = ERROR_GEN_FAILURE;
                 ReceptionFault fault=ReceptionFault::none;
                 auto monitor=[&] {
                     if(!parent_.auto_recovery_ || !seen_stream)return;
@@ -319,19 +320,20 @@ private:
                 while(!worker_error_) {
                     if(!WaitStop(0))break;
                     monitor();if(worker_error_)break;
-                    if(!ResetEvent(complete.value)){worker_error_=GetLastError();break;}
-                    PendingRead read(parent_.usb_dev_.dev,parent_.usb_dev_.winusb,complete.value);
-                    const BOOL submitted=WinUsb_ReadPipe(parent_.usb_dev_.winusb,0x81,raw.data(),static_cast<ULONG>(raw.size()),nullptr,&read.operation);
-                    const DWORD error=submitted?0:GetLastError();
-                    if(!submitted && error!=ERROR_IO_PENDING){worker_error_=error;break;}
-                    read.active=true;
+                    if (!usb->Ready()) { worker_error_ = ERROR_BUSY; break; }
+                    if (!request->Reset()) { worker_error_ = GetLastError(); break; }
+                    const BOOL submitted = WinUsb_ReadPipe(usb->Usb(), 0x81, request->buffer.data(),
+                        static_cast<ULONG>(request->buffer.size()), nullptr, &request->operation);
+                    const DWORD error = submitted ? ERROR_SUCCESS : GetLastError();
+                    if (error != ERROR_SUCCESS && error != ERROR_IO_PENDING) { worker_error_ = error; break; }
+                    PendingRead read(request, usb, io, error);
                     if(!running) {
 						running = Control().StartStream(start_deadline, true) == StreamResult::ok;
                         if(!running)worker_error_=ERROR_GEN_FAILURE;
 		}
                     const auto read_deadline=Clock::now()+std::chrono::seconds(2);
                     while(!submitted && !worker_error_) {
-						const HANDLE events[]{Stop(), parent_.cancel_, complete.value};
+						const HANDLE events[]{Stop(), parent_.cancel_, completion};
                         const auto waited=WaitForMultipleObjects(3,events,FALSE,parent_.auto_recovery_?200:2000);
                         if(waited==WAIT_OBJECT_0+2)break;
                         if(waited==WAIT_TIMEOUT) {
@@ -342,15 +344,13 @@ private:
 		}
                         worker_error_=waited==WAIT_FAILED?GetLastError():ERROR_OPERATION_ABORTED;
 		}
-                    if(worker_error_)CancelIoEx(parent_.usb_dev_.dev,&read.operation);
-                    ULONG transferred=0;
-                    const BOOL collected=WinUsb_GetOverlappedResult(parent_.usb_dev_.winusb,&read.operation,&transferred,TRUE);
-                    read.active=false;
-                    if(!collected && !worker_error_)worker_error_=GetLastError();
-                    if(worker_error_)break;
-                    if(transferred>raw.size()){worker_error_=ERROR_INVALID_DATA;break;}
-					const auto delivered = delivery.Deliver(raw.data(), transferred, [&](const std::uint8_t *packets, std::size_t size) {
-						for (std::size_t offset = 0; offset < size; offset += 188) {
+                    ULONG transferred = 0;
+                    worker_error_ = read.Finish(worker_error_, transferred);
+                    if (worker_error_) break;
+                    if (transferred > request->buffer.size()) { worker_error_ = ERROR_INVALID_DATA; break; }
+                    const auto delivered = delivery.Deliver(request->buffer.data(), transferred,
+                        [&](const std::uint8_t *packets, std::size_t size) {
+                            for (std::size_t offset = 0; offset < size; offset += 188) {
 							std::size_t count = 188;
                         // 引数の評価順は決まっていないため、Write が count を書き換えてから記録へ渡す。
 							const bool written = stream_buf_->Write(packets + offset, count);
@@ -482,8 +482,12 @@ int ExperimentalDevice::Init()
 		command |= pipe.PipeId == 0x02 && pipe.PipeType == UsbdPipeTypeBulk;
 		answer |= pipe.PipeId == 0x83 && pipe.PipeType == UsbdPipeTypeInterrupt;
 		}
-	if (!stream || !command || !answer) return -EINVAL;
-	receiver_ = std::make_unique<Receiver>(*this);
+    if (!stream || !command || !answer) return -EINVAL;
+    // USB の完了が遅れた場合、DeviceBase の破棄後も回収側でハンドルを保持する。
+    usb_ = std::make_shared<WinUsbHandles>(usb_dev_.dev, usb_dev_.winusb);
+    usb_dev_.dev = INVALID_HANDLE_VALUE;
+    usb_dev_.winusb = nullptr;
+    receiver_ = std::make_unique<Receiver>(*this);
 	px4::command::ReceiverInfo info{};
 	const auto &definition = device_def_.receivers.front();
 	wcscpy_s(info.device_name, device_def_.name.c_str());

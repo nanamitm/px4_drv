@@ -2,9 +2,15 @@
 #include "winusb_control.hpp"
 
 #include <algorithm>
-#include <limits>
+#include <cstring>
+#include <process.h>
 
 namespace px4::torne {
+
+namespace {
+// MSi2500 の停止処理と同じ回収期限。転送が完了しない場合は別に回収する。
+constexpr DWORD CancelCompletionTimeoutMs = 1000;
+}
 
 DWORD NativeControlIo::Submit(WINUSB_INTERFACE_HANDLE usb, const MemoryRequest &request,
 	std::uint8_t *data, USHORT length, OVERLAPPED &operation) noexcept
@@ -30,8 +36,80 @@ DWORD NativeControlIo::Cancel(HANDLE file, OVERLAPPED &operation) noexcept
 	return CancelIoEx(file, &operation) ? ERROR_SUCCESS : GetLastError();
 }
 
+WinUsbHandles::~WinUsbHandles()
+{
+    if (owned_) {
+        if (usb_) WinUsb_Free(usb_);
+        if (file_ && file_ != INVALID_HANDLE_VALUE) CloseHandle(file_);
+    }
+}
+
+WinUsbRequest::WinUsbRequest(std::size_t size) : buffer(size)
+{
+    operation.hEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+}
+
+WinUsbRequest::~WinUsbRequest()
+{
+    if (operation.hEvent) CloseHandle(operation.hEvent);
+}
+
+bool WinUsbRequest::Reset() noexcept
+{
+    const HANDLE event = operation.hEvent;
+    operation = {};
+    operation.hEvent = event;
+    return ResetEvent(event) != FALSE;
+}
+
+unsigned __stdcall WinUsbRequest::Reap(void *context) noexcept
+{
+    auto *request = static_cast<WinUsbRequest *>(context);
+    if (WaitForSingleObject(request->operation.hEvent, INFINITE) == WAIT_OBJECT_0) {
+        --request->retained_handles_->deferred_;
+        delete request;
+    }
+    return 0;
+}
+
+DWORD WinUsbRequest::Finish(std::unique_ptr<WinUsbRequest> &request,
+    const std::shared_ptr<WinUsbHandles> &handles, ControlIo &io, DWORD submitted, DWORD reason,
+    ULONG &transferred) noexcept
+{
+    auto &operation = request->operation;
+    if (reason) {
+        io.Cancel(handles->File(), operation);
+        // 通常の取り消しはここで回収する。応答がない場合も呼び出し側を待たせ続けない。
+        if (submitted == ERROR_IO_PENDING)
+            WaitForSingleObject(operation.hEvent, CancelCompletionTimeoutMs);
+    }
+
+    const DWORD result = io.Collect(handles->Usb(), operation, transferred, false);
+    if (submitted == ERROR_IO_PENDING && result != ERROR_SUCCESS &&
+        WaitForSingleObject(operation.hEvent, 0) != WAIT_OBJECT_0) {
+        if (!reason)
+            io.Cancel(handles->File(), operation);
+        // 完了が確認できるまで同じ個体への新規要求を止め、USB と要求の資源を保持する。
+        request->retained_handles_ = handles;
+        ++handles->deferred_;
+        auto *pending = request.release();
+        const auto thread = _beginthreadex(nullptr, 0, Reap, pending, 0, nullptr);
+        if (thread)
+            CloseHandle(reinterpret_cast<HANDLE>(thread));
+        else
+            OutputDebugStringW(L"torne: cannot start USB completion waiter; retaining pending request\n");
+    }
+    return reason ? reason : result;
+}
+
+WinUsbControl::WinUsbControl(std::shared_ptr<WinUsbHandles> handles, HANDLE cancel, ControlIo &io) noexcept
+    : WinUsbControl(handles->File(), handles->Usb(), cancel, io)
+{
+    handles_ = std::move(handles);
+}
+
 WinUsbControl::WinUsbControl(HANDLE file, WINUSB_INTERFACE_HANDLE usb, HANDLE cancel, ControlIo &io) noexcept
-	: file_(file), usb_(usb), cancel_(cancel), io_(io)
+    : file_(file), usb_(usb), cancel_(cancel), io_(io)
 {}
 
 int WinUsbControl::Pause(unsigned milliseconds)
@@ -60,8 +138,8 @@ int WinUsbControl::Transfer(const MemoryRequest &request, std::uint8_t *data,
 		transferred = 0;
 		return ERROR_INVALID_PARAMETER;
 	}
-	return Execute(length, transferred, deadline_, [&](OVERLAPPED &operation) {
-		return io_.Submit(usb_, request, data, static_cast<USHORT>(length), operation);
+	return Execute(data, length, (request.type & 0x80) != 0, transferred, deadline_, [&](std::uint8_t *buffer, OVERLAPPED &operation) {
+        return io_.Submit(usb_, request, buffer, static_cast<USHORT>(length), operation);
 	});
 }
 
@@ -72,15 +150,17 @@ int WinUsbControl::TransferPipe(UCHAR endpoint, std::uint8_t *data, std::size_t 
 		transferred = 0;
 		return ERROR_INVALID_PARAMETER;
 	}
-	return Execute(length, transferred, (std::min)(deadline, deadline_), [&](OVERLAPPED &operation) {
-		const auto submit = endpoint & 0x80 ? WinUsb_ReadPipe : WinUsb_WritePipe;
-		return submit(usb_, endpoint, data, static_cast<ULONG>(length), nullptr, &operation) ?
+	return Execute(data, length, (endpoint & 0x80) != 0, transferred, (std::min)(deadline, deadline_),
+        [&](std::uint8_t *buffer, OVERLAPPED &operation) {
+        const auto submit = endpoint & 0x80 ? WinUsb_ReadPipe : WinUsb_WritePipe;
+        return submit(usb_, endpoint, buffer, static_cast<ULONG>(length), nullptr, &operation) ?
 			ERROR_SUCCESS : GetLastError();
 	});
 }
 
 template<class Submit>
-int WinUsbControl::Execute(std::size_t length, std::size_t &transferred, Clock::time_point deadline, Submit submit)
+int WinUsbControl::Execute(std::uint8_t *data, std::size_t length, bool read, std::size_t &transferred,
+    Clock::time_point deadline, Submit submit)
 {
 	transferred = 0;
 	if (file_ == INVALID_HANDLE_VALUE || !file_ || !usb_ || !cancel_)
@@ -89,15 +169,35 @@ int WinUsbControl::Execute(std::size_t length, std::size_t &transferred, Clock::
 	if (Clock::now() >= deadline)
 		return ERROR_TIMEOUT;
 
-	OVERLAPPED operation{};
-	operation.hEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
-	if (!operation.hEvent)
-		return static_cast<int>(GetLastError());
-	const DWORD submitted = submit(operation);
-	if (submitted != ERROR_SUCCESS && submitted != ERROR_IO_PENDING) {
-		CloseHandle(operation.hEvent);
-		return static_cast<int>(submitted);
-	}
+    if (handles_ && !handles_->Ready())
+        return ERROR_BUSY;
+
+    // 共有所有権がある場合だけ、完了を待たずに呼び出し側へ返せるバッファを用意する。
+    std::unique_ptr<WinUsbRequest> pending;
+    std::unique_ptr<void, decltype(&CloseHandle)> local_event(nullptr, &CloseHandle);
+    OVERLAPPED local_operation{};
+    OVERLAPPED *operation = &local_operation;
+    auto *buffer = data;
+    if (handles_) {
+        try {
+            pending = std::make_unique<WinUsbRequest>(length);
+        } catch (const std::bad_alloc &) {
+            return ERROR_NOT_ENOUGH_MEMORY;
+        }
+        operation = &pending->operation;
+        buffer = pending->buffer.data();
+        if (!read)
+            std::memcpy(buffer, data, length);
+    } else {
+        local_event.reset(CreateEventW(nullptr, TRUE, FALSE, nullptr));
+        operation->hEvent = local_event.get();
+    }
+    const HANDLE completion = operation->hEvent;
+    if (!completion)
+        return static_cast<int>(GetLastError());
+    const DWORD submitted = submit(buffer, *operation);
+    if (submitted != ERROR_SUCCESS && submitted != ERROR_IO_PENDING)
+        return static_cast<int>(submitted);
 
 	DWORD reason = ERROR_SUCCESS;
 	if (Clock::now() >= deadline) {
@@ -107,7 +207,7 @@ int WinUsbControl::Execute(std::size_t length, std::size_t &transferred, Clock::
 		// 切り捨てで期限より早く切らないよう、残時間をミリ秒へ切り上げる。
 		const auto millis = std::chrono::ceil<std::chrono::milliseconds>(remaining).count();
 		const auto timeout = static_cast<DWORD>(std::clamp<decltype(millis)>(millis, 0, MAXDWORD - 1));
-		const HANDLE events[] = { cancel_, operation.hEvent, stop_ };
+		const HANDLE events[] = { cancel_, completion, stop_ };
 		const DWORD result = WaitForMultipleObjects(stop_?3:2, events, FALSE, timeout);
 		if (result == WAIT_OBJECT_0 || (stop_ && result==WAIT_OBJECT_0+2))
 			reason = ERROR_OPERATION_ABORTED;
@@ -121,20 +221,23 @@ int WinUsbControl::Execute(std::size_t length, std::size_t &transferred, Clock::
 		reason=Cancellation();
         if(!reason && Clock::now()>=deadline)reason=ERROR_TIMEOUT;
 	}
-	if (reason)
-		io_.Cancel(file_, operation);
-
-	ULONG actual = 0;
-	// CancelIoExの成功は回収完了ではない。ERROR_NOT_FOUND（完了との競合）でも
-	// Collectを終えるまでbuffer/OVERLAPPED/eventを解放できない。
-	const DWORD collected = io_.Collect(usb_, operation, actual, true);
-	CloseHandle(operation.hEvent);
-	if (reason)
-		return static_cast<int>(reason);
-	if (collected)
-		return static_cast<int>(collected);
-	if (actual > length)
-		return ERROR_INVALID_DATA;
+    ULONG actual = 0;
+    DWORD result = ERROR_SUCCESS;
+    if (pending) {
+        result = WinUsbRequest::Finish(pending, handles_, io_, submitted, reason, actual);
+    } else {
+        // 借りたバッファとイベントは、カーネルが使い終わるまで返却できない。
+        if (reason)
+            io_.Cancel(file_, *operation);
+        const DWORD collected = io_.Collect(usb_, *operation, actual, true);
+        result = reason ? reason : collected;
+    }
+    if (result)
+        return static_cast<int>(result);
+    if (actual > length)
+        return ERROR_INVALID_DATA;
+    if (read && pending)
+        std::memcpy(data, pending->buffer.data(), actual);
 	transferred = actual;
 	return ERROR_SUCCESS;
 }
