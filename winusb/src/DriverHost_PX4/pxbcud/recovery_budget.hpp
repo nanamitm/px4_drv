@@ -5,6 +5,50 @@
 #include <optional>
 
 namespace px4::pxbcud {
+// 正常な USB 完了でも、TS の同期が取れなければ配信は止まる。
+class ReceptionProgress {
+public:
+    using Clock = std::chrono::steady_clock;
+    enum class Timeout { None, NoInput, NoTs };
+
+    explicit ReceptionProgress(Clock::time_point start = {}) : last_input_(start), last_ts_(start) {}
+    void Input(Clock::time_point now) noexcept
+    {
+        if (!received_input_) {
+            first_input_ = now;
+            received_input_ = true;
+        }
+        last_input_ = now;
+    }
+    void Ts(Clock::time_point now) noexcept
+    {
+        if (!received_ts_) {
+            first_ts_ = now;
+            received_ts_ = true;
+        }
+        last_ts_ = now;
+    }
+    Timeout Check(Clock::time_point now, bool pat_ready) const noexcept
+    {
+        if (now - last_input_ >= std::chrono::seconds(5))
+            return Timeout::NoInput;
+        if (pat_ready && now - last_ts_ >= std::chrono::seconds(5))
+            return Timeout::NoTs;
+        return Timeout::None;
+    }
+    bool ReceivedInput() const noexcept { return received_input_; }
+    Clock::time_point FirstInput() const noexcept { return first_input_; }
+    Clock::duration TsSpan() const noexcept
+    {
+        return received_ts_ ? last_ts_ - first_ts_ : Clock::duration::zero();
+    }
+
+private:
+    Clock::time_point first_input_{}, last_input_;
+    Clock::time_point first_ts_{}, last_ts_;
+    bool received_input_ = false, received_ts_ = false;
+};
+
 // USB のタイミング調整値ではなく、復旧が実らない状態を終了させる運用上の上限。
 // 手動の再選局は新しい受信ワーカーとなり、この予算も最初からになる。
 //
