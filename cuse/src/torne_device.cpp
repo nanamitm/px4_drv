@@ -104,6 +104,8 @@ void TorneDevice::OnShutdown()
 
 int TorneDevice::VideoOpen()
 {
+    if (stream_.unconfirmed)
+        return -EIO;
     auto shared = AcquireSession();
     if (!shared)
         return -EIO;
@@ -192,128 +194,154 @@ int TorneDevice::ReadCn(std::uint32_t &raw)
     return 0;
 }
 
-void LIBUSB_CALL TorneDevice::BulkDone(libusb_transfer *transfer)
+void LIBUSB_CALL TorneDevice::BulkDone(libusb_transfer *usb)
 {
-    auto &self = *static_cast<TorneDevice *>(transfer->user_data);
+    auto &transfer = *static_cast<Transfer *>(usb->user_data);
+    const auto state = transfer.state;
+    std::lock_guard<std::mutex> lock(state->mutex);
+    if (!state->owner) {
+        delete &transfer;
+        return;
+    }
+
+    auto &self = *state->owner;
     auto &s = self.stream_;
-    if (transfer->status == LIBUSB_TRANSFER_COMPLETED) {
+    if (s.running && usb->status == LIBUSB_TRANSFER_COMPLETED) {
         const auto now = Clock::now();
         if (s.previous_read != Clock::time_point{})
             s.max_read_gap_us = std::max(s.max_read_gap_us, Micros(now - s.previous_read));
         s.previous_read = now;
-        if (transfer->actual_length && s.running) {
-            const auto delivered = s.delivery->Deliver(transfer->buffer, static_cast<std::size_t>(transfer->actual_length),
+        if (usb->actual_length && !s.error) {
+            const auto delivered = s.delivery->Deliver(usb->buffer, static_cast<std::size_t>(usb->actual_length),
                                                        [&self](const std::uint8_t *packets, std::size_t size) {
                                                            self.video_.Push(packets, size);
                                                        });
-            if (delivered) {
-                std::lock_guard<std::mutex> lock(s.mutex);
-                if (!s.first) {
-                    s.first = true;
-                    s.first_at = now;
-                    s.changed.notify_all();
-                }
+            if (delivered && !s.first) {
+                s.first = true;
+                s.first_at = now;
+                s.changed.notify_all();
             }
         }
-    } else if (transfer->status != LIBUSB_TRANSFER_CANCELLED) {
-        // 切断では投入済みの転送がまとめて失敗するため、最初の 1 本だけを記録する。
+    }
+
+    if (s.running && !s.error) {
+        int error = 0;
+        if (usb->status == LIBUSB_TRANSFER_COMPLETED) {
+            const int rc = libusb_submit_transfer(usb);
+            if (!rc)
+                return;
+            error = rc == LIBUSB_ERROR_NO_DEVICE ? -ENODEV : -EIO;
+            msg_err("%s: bulk resubmit failed (%s)\n", self.label_.c_str(), libusb_error_name(rc));
+        } else if (usb->status != LIBUSB_TRANSFER_CANCELLED) {
+            error = usb->status == LIBUSB_TRANSFER_NO_DEVICE ? -ENODEV : -EIO;
+            msg_err("%s: bulk status=%d\n", self.label_.c_str(), usb->status);
+        }
+
+        // 再投入できなかったときも、利用者の read を待たせ続けない。
         int expected = 0;
-        const int error = transfer->status == LIBUSB_TRANSFER_NO_DEVICE ? -ENODEV : -EIO;
-        if (s.error.compare_exchange_strong(expected, error))
-            msg_err("%s: bulk status=%d\n", self.label_.c_str(), transfer->status);
+        if (error && s.error.compare_exchange_strong(expected, error))
+            self.video_.Fail(error);
     }
-    if (s.running && !s.error && transfer->status == LIBUSB_TRANSFER_COMPLETED && !libusb_submit_transfer(transfer))
-        return;
-    {
-        std::lock_guard<std::mutex> lock(s.mutex);
-        --s.in_flight;
-    }
+    transfer.in_flight = false;
+    --s.in_flight;
     s.changed.notify_all();
-    // Bulk IN の異常は受信の停止を待たずに利用者の read へ伝える。
-    if (s.error)
-        self.video_.Fail(s.error);
 }
 
 int TorneDevice::StartStream(bool &fatal)
 {
     auto &s = stream_;
-    if (!video_owner_)
+    if (!video_owner_ || s.unconfirmed) {
+        fatal = true;
         return -EIO;
+    }
     auto &session = video_owner_->session;
     try {
         s.delivery = std::make_unique<torne::TsDelivery>(false);
-        s.buffers.assign(BulkCount, std::vector<std::uint8_t>(BulkSize));
+        s.transfers.reserve(BulkCount);
+        for (std::size_t i = 0; i < BulkCount; ++i) {
+            auto transfer = std::make_unique<Transfer>();
+            transfer->state = receive_;
+            transfer->buffer.resize(BulkSize);
+            transfer->usb = libusb_alloc_transfer(0);
+            if (!transfer->usb)
+                throw std::bad_alloc();
+            libusb_fill_bulk_transfer(transfer->usb, handle_, 0x81, transfer->buffer.data(),
+                                      static_cast<int>(transfer->buffer.size()), BulkDone, transfer.get(), 0);
+            s.transfers.push_back(std::move(transfer));
+        }
     } catch (...) {
+        s.transfers.clear();
+        s.delivery.reset();
         return -ENOMEM;
     }
+
     s.error = 0;
     s.first = s.stop = false;
     s.previous_read = s.first_at = Clock::time_point{};
     s.max_read_gap_us = 0;
+
+    const auto fail = [&](int error) {
+        const int collected = StopTransfers();
+        // START が失敗すると VideoNode は STOP を呼ばないため、ここで出力とエンジンを戻す。
+        if (available_) {
+            std::vector<std::uint8_t> response;
+            if (collected || session.StopStream(Clock::now() + std::chrono::seconds(2)) != torne::StreamResult::ok ||
+                !session.Command(0x12, {0}, response, Clock::now() + std::chrono::seconds(1)))
+                session.Invalidate();
+        }
+        s.delivery.reset();
+        fatal = true;
+        return error;
+    };
+
     // WinUSB 版の ReadLoop と同じ順序: 出力の切り替え、TS エンジンの準備、EP 0x81 のリセットと読み出しの投入、開始。
     const auto deadline = Clock::now() + std::chrono::seconds(2);
     std::vector<std::uint8_t> response;
     if (!session.Command(0x12, {1}, response, deadline) || session.PrepareStream(deadline, false) != torne::StreamResult::ok) {
         msg_err("%s: stream prepare failed\n", label_.c_str());
-        fatal = true;
-        return -EIO;
+        return fail(-EIO);
     }
     if (const int rc = libusb_clear_halt(handle_, 0x81)) {
         msg_err("%s: clear halt failed rc=%d\n", label_.c_str(), rc);
-        fatal = true;
-        return -EIO;
+        return fail(-EIO);
     }
-    s.running = true;
-    for (auto &buffer : s.buffers) {
-        auto *transfer = libusb_alloc_transfer(0);
-        if (!transfer) {
-            StopTransfers();
-            fatal = true;
-            return -ENOMEM;
-        }
-        libusb_fill_bulk_transfer(transfer, handle_, 0x81, buffer.data(), static_cast<int>(buffer.size()), BulkDone,
-                                  this, 0);
-        s.transfers.push_back(transfer);
-        {
-            std::lock_guard<std::mutex> lock(s.mutex);
+    int submit_error = 0;
+    {
+        std::lock_guard<std::mutex> lock(receive_->mutex);
+        s.running = true;
+        for (auto &transfer : s.transfers) {
+            submit_error = libusb_submit_transfer(transfer->usb);
+            if (submit_error)
+                break;
+            transfer->in_flight = true;
             ++s.in_flight;
         }
-        if (libusb_submit_transfer(transfer)) {
-            {
-                std::lock_guard<std::mutex> lock(s.mutex);
-                --s.in_flight;
-            }
-            StopTransfers();
-            fatal = true;
-            return -EIO;
-        }
+    }
+    if (submit_error) {
+        msg_err("%s: bulk submit failed (%s)\n", label_.c_str(), libusb_error_name(submit_error));
+        return fail(submit_error == LIBUSB_ERROR_NO_DEVICE ? -ENODEV : -EIO);
     }
     s.started = Clock::now();
     if (session.StartStream(deadline, false) != torne::StreamResult::ok) {
         msg_err("%s: stream start failed\n", label_.c_str());
-        StopTransfers();
-        fatal = true;
-        return -EIO;
+        return fail(-EIO);
     }
     // PTX_START_STREAMING はカーネルモジュールと同じく最初の TS を待たずに返す。
     // 2 秒以内に TS が届かなければ、WinUSB 版の StartReader と同じく失敗として利用者の read を終える。
     try {
         s.watchdog = std::thread([this] {
             auto &s = stream_;
-            std::unique_lock<std::mutex> lock(s.mutex);
-            if (s.changed.wait_until(lock, s.started + FirstTsTimeout, [&s] { return s.first || s.stop; }))
+            std::unique_lock<std::mutex> lock(receive_->mutex);
+            if (s.changed.wait_until(lock, s.started + FirstTsTimeout, [&s] { return s.first || s.stop || s.error; }))
                 return;
+            s.error = -EIO;
             lock.unlock();
             msg_err("%s: no TS within %lld ms after the stream started\n", label_.c_str(),
                     static_cast<long long>(std::chrono::duration_cast<std::chrono::milliseconds>(FirstTsTimeout).count()));
-            int expected = 0;
-            s.error.compare_exchange_strong(expected, -EIO);
             video_.Fail(-EIO);
         });
     } catch (...) {
-        StopTransfers();
-        fatal = true;
-        return -ENOMEM;
+        return fail(-ENOMEM);
     }
     return 0;
 }
@@ -322,28 +350,29 @@ int TorneDevice::StopTransfers()
 {
     auto &s = stream_;
     {
-        std::lock_guard<std::mutex> lock(s.mutex);
+        // 再投入の判定と投入を、停止の判定とキャンセルの間に挟ませない。
+        std::lock_guard<std::mutex> lock(receive_->mutex);
         s.stop = true;
+        s.running = false;
+        for (auto &transfer : s.transfers)
+            if (transfer->in_flight)
+                libusb_cancel_transfer(transfer->usb);
+        s.changed.notify_all();
     }
-    s.changed.notify_all();
     if (s.watchdog.joinable())
         s.watchdog.join();
-    s.running = false;
-    for (auto *transfer : s.transfers)
-        libusb_cancel_transfer(transfer);
-    bool all_done = false;
-    {
-        std::unique_lock<std::mutex> lock(s.mutex);
-        all_done = s.changed.wait_for(lock, std::chrono::seconds(5), [&s] { return s.in_flight == 0; });
-        if (!all_done)
-            msg_err("%s: %d bulk transfers did not complete\n", label_.c_str(), s.in_flight);
+    std::unique_lock<std::mutex> lock(receive_->mutex);
+    if (!s.changed.wait_for(lock, std::chrono::seconds(5), [&s] { return s.in_flight == 0; })) {
+        msg_err("%s: %d bulk transfers did not complete\n", label_.c_str(), s.in_flight);
+        s.unconfirmed = true;
+        receive_->owner = nullptr;
+        // libusb が転送とバッファを使用中なので、遅れて届いた完了通知で解放する。
+        for (auto &transfer : s.transfers)
+            if (transfer->in_flight)
+                transfer.release();
     }
-    // 完了しなかった転送は libusb が使い続ける可能性があるため、解放せずに残す。
-    if (all_done)
-        for (auto *transfer : s.transfers)
-            libusb_free_transfer(transfer);
     s.transfers.clear();
-    return all_done ? 0 : -EIO;
+    return s.unconfirmed ? -EIO : 0;
 }
 
 int TorneDevice::StopStream(bool &fatal)
@@ -379,10 +408,10 @@ int TorneDevice::StopStream(bool &fatal)
                  static_cast<unsigned long long>(video_.Overflow()), static_cast<unsigned long long>(s.max_read_gap_us),
                  first_ms, stop_ok, s.error.load());
     }
-    // 回収できなかった転送の完了処理が使う可能性があるため、その場合は解放しない (受信は fatal で止まる)。
-    if (!collected)
-        s.delivery.reset();
-    return s.error;
+    s.delivery.reset();
+    if (const int error = s.error)
+        return error;
+    return !available_ || !stop_ok || collected ? -EIO : 0;
 }
 
 int TorneDevice::CardOpen()
