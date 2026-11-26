@@ -22,7 +22,12 @@
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
-#ifndef _WIN32
+#ifdef _WIN32
+#include <winsock2.h>
+#include <windows.h>
+#include <cfgmgr32.h>
+#include <setupapi.h>
+#else
 #include <unistd.h>
 #define min(a, b) (((a) < (b)) ? (a) : (b))
 #endif
@@ -361,8 +366,8 @@ static rtlsdr_dongle_t known_devices[] = {
 #define MIN_RTL_XTAL_FREQ	(DEF_RTL_XTAL_FREQ - 1000)
 #define MAX_RTL_XTAL_FREQ	(DEF_RTL_XTAL_FREQ + 1000)
 
-#define CTRL_IN		(LIBUSB_REQUEST_TYPE_VENDOR | LIBUSB_ENDPOINT_IN)
-#define CTRL_OUT	(LIBUSB_REQUEST_TYPE_VENDOR | LIBUSB_ENDPOINT_OUT)
+#define CTRL_IN		((uint8_t)LIBUSB_REQUEST_TYPE_VENDOR | (uint8_t)LIBUSB_ENDPOINT_IN)
+#define CTRL_OUT	((uint8_t)LIBUSB_REQUEST_TYPE_VENDOR | (uint8_t)LIBUSB_ENDPOINT_OUT)
 #define CTRL_TIMEOUT	300
 #define BULK_TIMEOUT	0
 
@@ -1493,7 +1498,11 @@ int rtlsdr_check_dongle_model(void *dev, char *manufact_check, char *product_che
 
 
 /* px4-cused: external is a handle the caller opened, detached and claimed (interface 0) */
-static int rtlsdr_open_impl(rtlsdr_dev_t **out_dev, uint32_t index, libusb_device_handle *external)
+typedef int (*rtlsdr_device_match)(libusb_device *device, const struct libusb_device_descriptor *desc,
+                                  const void *data);
+
+static int rtlsdr_open_impl(rtlsdr_dev_t **out_dev, uint32_t index, libusb_device_handle *external,
+                            rtlsdr_device_match match, const void *match_data)
 {
 	int r;
 	int i;
@@ -1528,24 +1537,23 @@ static int rtlsdr_open_impl(rtlsdr_dev_t **out_dev, uint32_t index, libusb_devic
 	dev->dev_lost = 1;
 
 	cnt = libusb_get_device_list(dev->ctx, &list);
+	if (cnt < 0) {
+		r = (int)cnt;
+		goto err;
+	}
 
 	for (i = 0; i < cnt; i++) {
-		device = list[i];
-
-		libusb_get_device_descriptor(list[i], &dd);
-
-		if (find_known_device(dd.idVendor, dd.idProduct)) {
-			device_count++;
-		}
-
-		if (index == device_count - 1)
+		if (libusb_get_device_descriptor(list[i], &dd) || !find_known_device(dd.idVendor, dd.idProduct))
+			continue;
+		if (match ? match(list[i], &dd, match_data) : index == device_count++) {
+			device = list[i];
 			break;
-
-		device = NULL;
+		}
 	}
 
 	if (!device) {
-		r = -1;
+		libusb_free_device_list(list, 1);
+		r = match ? LIBUSB_ERROR_NO_DEVICE : -1;
 		goto err;
 	}
 
@@ -1730,15 +1738,63 @@ err:
 
 int rtlsdr_open(rtlsdr_dev_t **out_dev, uint32_t index)
 {
-	return rtlsdr_open_impl(out_dev, index, NULL);
+	return rtlsdr_open_impl(out_dev, index, NULL, NULL, NULL);
 }
 
 int rtlsdr_open_handle(rtlsdr_dev_t **out_dev, libusb_device_handle *devh)
 {
 	if (!devh)
 		return -EINVAL;
-	return rtlsdr_open_impl(out_dev, 0, devh);
+	return rtlsdr_open_impl(out_dev, 0, devh, NULL, NULL);
 }
+
+#ifdef _WIN32
+struct rtlsdr_winusb_device {
+	DEVINST interface_node;
+	DEVINST parent_node;
+};
+
+static int match_winusb_device(libusb_device *device, const struct libusb_device_descriptor *desc,
+                               const void *data)
+{
+	const struct rtlsdr_winusb_device *target = data;
+	unsigned long node = libusb_get_session_data(device);
+	return desc->idVendor == 0x0bda && desc->idProduct == 0x2838 &&
+		node && (node == target->interface_node || node == target->parent_node);
+}
+
+RTLSDR_API int rtlsdr_open_winusb_path(rtlsdr_dev_t **out_dev, const wchar_t *path)
+{
+	SP_DEVICE_INTERFACE_DATA intf = {sizeof(intf)};
+	SP_DEVINFO_DATA info = {sizeof(info)};
+	struct rtlsdr_winusb_device target = {0};
+	HDEVINFO devices;
+	DWORD needed = 0;
+	int found;
+
+	if (!path || !*path)
+		return LIBUSB_ERROR_INVALID_PARAM;
+	devices = SetupDiCreateDeviceInfoList(NULL, NULL);
+	if (devices == INVALID_HANDLE_VALUE)
+		return LIBUSB_ERROR_OTHER;
+
+	// SetupAPI はパスを分解せずに interface の devnode を特定できる。
+	// libusb の WinUSB backend は複合機器を USB 親の DEVINST で列挙する。
+	found = SetupDiOpenDeviceInterfaceW(devices, path, 0, &intf) &&
+		(intf.Flags & SPINT_ACTIVE) &&
+		!SetupDiGetDeviceInterfaceDetailW(devices, &intf, NULL, 0, &needed, &info) &&
+		GetLastError() == ERROR_INSUFFICIENT_BUFFER && info.DevInst != 0;
+	if (found) {
+		target.interface_node = info.DevInst;
+		if (CM_Get_Parent(&target.parent_node, info.DevInst, 0) != CR_SUCCESS)
+			target.parent_node = 0;
+	}
+	SetupDiDestroyDeviceInfoList(devices);
+	if (!found)
+		return LIBUSB_ERROR_NO_DEVICE;
+	return rtlsdr_open_impl(out_dev, 0, NULL, match_winusb_device, &target);
+}
+#endif
 
 int rtlsdr_close(rtlsdr_dev_t *dev)
 {

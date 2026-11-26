@@ -40,12 +40,12 @@ function Get-Px4ApplicationFiles([string]$Directory) {
     if (Test-Path -LiteralPath (Join-Path $Directory 'BonDriver_RTLSDR.dll')) {
         $helper='rtlsdr\rtlsdr_frontend.exe'
         if (-not (Test-Path -LiteralPath (Join-Path $Directory $helper) -PathType Leaf)) { throw "Missing required binary: $helper" }
-        # 外部 DLL は固定ランタイムのハッシュ検査で確認し、自前の helper はアプリ署名でも検証する。
+        # 自前の helper と接続先を開く DLL は、アプリ署名とマニフェストで検証する。
         $runtime=Join-Path $Directory 'rtlsdr'
-        $expected=@('rtlsdr_frontend.exe','rtlsdr.dll','pthreadVC2.dll','msvcr100.dll','vcruntime140.dll')
+        $expected=@('rtlsdr_frontend.exe','rtlsdr_path.dll','rtlsdr.dll','pthreadVC2.dll','msvcr100.dll','vcruntime140.dll')
         $actual=@(Get-ChildItem -LiteralPath $runtime -File | Where-Object {$_.Extension -in '.exe','.dll'} | ForEach-Object {$_.Name})
         if (@(Compare-Object $expected $actual).Count) { throw 'Unexpected or missing RTL-SDR runtime binary.' }
-        $required += $helper
+        $required += @($helper,'rtlsdr\rtlsdr_path.dll')
     }
     if ((Test-Path -LiteralPath (Join-Path $Directory 'BonDriver_MSI2500.dll')) -or (Test-Path -LiteralPath (Join-Path $Directory 'BonDriver_PX-S1UD.dll'))) {
         # MSi2500 の helper は外部 DLL を同梱しない単一の実行ファイルで、アプリ署名で検証する。

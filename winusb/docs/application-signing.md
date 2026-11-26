@@ -63,4 +63,4 @@ Git のアーカイブではチェックアウト時の改行変換が行われ�
 
 PIX-DT295 配布では、配布フォルダーから実行する検査ツール `channel_switch_stress.exe` もアプリ署名とマニフェストの対象です。
 
-RTL-SDR 配布では `rtlsdr/rtlsdr_frontend.exe` もアプリ署名とマニフェストの対象です。外部ランタイム DLL は配布元のファイルを維持し、通常ビルドと ZIP 作成前・展開後の配布検査で `runtime-lock.json` の固定ハッシュと照合します。追加する `vcruntime140.dll` は Visual Studio の再頒布用ディレクトリから取得し、Microsoft の署名を検証してハッシュを記録します。配布検査ではこのハッシュと、helper・依存 DLL のインポート先がOS標準DLLまたは同梱DLLであることも確認します。
+RTL-SDR 配布では `rtlsdr/rtlsdr_frontend.exe` と `rtlsdr/rtlsdr_path.dll` もアプリ署名とマニフェストの対象です。外部ランタイム DLL は配布元のファイルを維持し、通常ビルドと ZIP 作成前・展開後の配布検査で `runtime-lock.json` の固定ハッシュと照合します。追加する `vcruntime140.dll` は Visual Studio の再頒布用ディレクトリから取得し、Microsoft の署名を検証してハッシュを記録します。配布検査ではこのハッシュと、helper・依存 DLL のインポート先がOS標準DLLまたは同梱DLLであることも確認します。

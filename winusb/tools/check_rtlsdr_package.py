@@ -72,7 +72,8 @@ def check_package(folder, bits):
     require(redist["name"] == "vcruntime140.dll" and re.fullmatch(r"14\.\d+\.\d+", redist["version"]), "Incorrect Microsoft runtime metadata")
     require(re.fullmatch(r"[0-9A-F]{64}", redist["sha256"]), "Invalid Microsoft runtime hash")
     libraries["vcruntime140.dll"] = redist["sha256"]
-    expected = {"rtlsdr_frontend.exe", *libraries}
+    check_pe(runtime / "rtlsdr_path.dll", machine)
+    expected = {"rtlsdr_frontend.exe", "rtlsdr_path.dll", *libraries}
     actual = {p.name for p in runtime.iterdir() if p.suffix.lower() in (".exe", ".dll")}
     require(actual == expected, f"Unexpected or missing runtime binaries: {folder}: {actual ^ expected}")
     for name, expected_hash in libraries.items():
@@ -80,7 +81,8 @@ def check_package(folder, bits):
         check_pe(file, machine)
         require(digest(file) == expected_hash, f"RTL-SDR dependency hash mismatch: {file}")
     system_dlls = {"kernel32.dll", "kernelbase.dll", "ntdll.dll", "advapi32.dll", "bcrypt.dll",
-                   "bcryptprimitives.dll", "userenv.dll", "ws2_32.dll", "synchronization.dll"}
+                   "bcryptprimitives.dll", "userenv.dll", "ws2_32.dll", "synchronization.dll",
+                   "setupapi.dll", "cfgmgr32.dll"}
     for name in expected:
         for dll in imported_dlls(runtime / name):
             system = dll in system_dlls or dll.startswith(("api-ms-win-", "ext-ms-win-"))
@@ -109,6 +111,18 @@ def check_package(folder, bits):
     require(host[device + ".Config"]["helperpath"].strip('"') == r"rtlsdr\rtlsdr_frontend.exe", "Incorrect helper path")
     sources = folder / "Sources"
     require(digest(sources / "rtl-sdr-blog-V1.4.0.zip") == LOCK["source_sha256"], "Incorrect runtime source archive")
+    require(digest(sources / "libusb-1.0.30.zip") == LOCK["path_runtime"]["libusb_source_sha256"],
+            "Incorrect libusb source archive")
+    require((runtime / "COPYING.libusb").stat().st_size > 1000, "Missing libusb license")
+    for name in ("build-path-runtime.ps1", "rtlsdr_path.vcxproj", "rtlsdr_path.rc"):
+        require((sources / "winusb/tools/rtlsdr" / name).read_bytes() == (WINUSB / "tools/rtlsdr" / name).read_bytes(),
+                f"Path runtime build source mismatch: {name}")
+    original = WINUSB.parent / "cuse/third_party/rtl-sdr-blog"
+    for file in original.rglob("*"):
+        if file.is_file():
+            name = file.relative_to(original)
+            require((sources / "rtl-sdr-blog" / name).read_bytes() == file.read_bytes(),
+                    f"Path runtime source mismatch: {name}")
     frontend = sources / "winusb/tools/rtlsdr_frontend"
     for name in ("Cargo.toml", "Cargo.lock", "cargo-config.toml", "build.rs", "frontend.rc", "LICENSE", "src/main.rs", "src/pat.rs",
                  "vendor/README.md", "vendor/isdbt-dsp/Cargo.toml", "vendor/isdbt-dsp/src/lib.rs"):

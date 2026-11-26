@@ -19,10 +19,11 @@ enum Input {
     Error(String),
 }
 #[derive(Default)]
-// serial と gain は librtlsdr で USB を開く Windows 版だけが使う
+// serial、device_path と gain は librtlsdr で USB を開く Windows 版だけが使う
 #[cfg_attr(not(windows), allow(dead_code))]
 struct Options {
     serial: String,
+    device_path: Option<std::ffi::OsString>,
     frequency: u32,
     gain: i32,
     replay: Option<PathBuf>,
@@ -43,6 +44,7 @@ fn options() -> Result<Options, String> {
         }
         let value = args.next().ok_or("Missing argument value")?;
         match key.to_str() {
+            Some("--device-path") => out.device_path = Some(value),
             Some("--serial") => out.serial = value.into_string().map_err(|_| "Invalid serial")?,
             Some("--frequency") => {
                 out.frequency = value
@@ -71,6 +73,13 @@ fn options() -> Result<Options, String> {
     {
         return Err("Specify --serial and a UHF channel centre with --frequency".into());
     }
+    if out
+        .device_path
+        .as_ref()
+        .is_some_and(|path| path.is_empty() || out.stdin || out.replay.is_some())
+    {
+        return Err("Specify a nonempty --device-path for live USB capture only".into());
+    }
     if !(-600..=600).contains(&out.gain) {
         return Err("Gain must be in tenths of a dB, -600..600".into());
     }
@@ -92,6 +101,8 @@ type Count = unsafe extern "C" fn() -> u32;
 type Strings = unsafe extern "C" fn(u32, *mut c_char, *mut c_char, *mut c_char) -> i32;
 #[cfg(windows)]
 type Open = unsafe extern "C" fn(*mut Dev, u32) -> i32;
+#[cfg(windows)]
+type OpenPath = unsafe extern "C" fn(*mut Dev, *const u16) -> i32;
 #[cfg(windows)]
 type Close = unsafe extern "C" fn(Dev) -> i32;
 #[cfg(windows)]
@@ -160,11 +171,15 @@ impl Drop for Library {
 }
 #[cfg(windows)]
 impl Library {
-    fn new() -> Result<Self, String> {
+    fn new(by_path: bool) -> Result<Self, String> {
         use std::os::windows::ffi::OsStrExt;
         let path = std::env::current_exe()
             .map_err(|e| e.to_string())?
-            .with_file_name("rtlsdr.dll");
+            .with_file_name(if by_path {
+                "rtlsdr_path.dll"
+            } else {
+                "rtlsdr.dll"
+            });
         let name: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
         let module = unsafe { LoadLibraryExW(name.as_ptr(), std::ptr::null_mut(), 0x100 | 0x800) };
         if module.is_null() {
@@ -217,10 +232,7 @@ fn usb_string(value: &[c_char; 256]) -> String {
 }
 #[cfg(windows)]
 fn capture(opts: Options, tx: &mpsc::SyncSender<Input>, stop: &AtomicBool) -> Result<(), String> {
-    let mut api = Library::new()?;
-    let count = symbol!(api, "rtlsdr_get_device_count", Count);
-    let strings = symbol!(api, "rtlsdr_get_device_usb_strings", Strings);
-    let open = symbol!(api, "rtlsdr_open", Open);
+    let mut api = Library::new(opts.device_path.is_some())?;
     api.close = Some(symbol!(api, "rtlsdr_close", Close));
     let device_strings = symbol!(api, "rtlsdr_get_usb_strings", DeviceStrings);
     let frequency = symbol!(api, "rtlsdr_set_center_freq", SetU32);
@@ -231,26 +243,40 @@ fn capture(opts: Options, tx: &mpsc::SyncSender<Input>, stop: &AtomicBool) -> Re
     let reset = symbol!(api, "rtlsdr_reset_buffer", GetInt);
     let read = symbol!(api, "rtlsdr_read_async", ReadAsync);
     let cancel = symbol!(api, "rtlsdr_cancel_async", Cancel);
-    let mut selected = None;
-    for index in 0..unsafe { count() } {
-        let mut s = [0; 256];
-        if unsafe {
-            strings(
-                index,
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-                s.as_mut_ptr(),
-            )
-        } == 0
-            && usb_string(&s) == opts.serial
-        {
-            if selected.replace(index).is_some() {
-                return Err("Duplicate USB serial; disconnect the other RTL-SDR".into());
+    if let Some(path) = opts.device_path {
+        use std::os::windows::ffi::OsStrExt;
+        let open_path = symbol!(api, "rtlsdr_open_winusb_path", OpenPath);
+        let path: Vec<u16> = path.encode_wide().chain(Some(0)).collect();
+        checked(
+            unsafe { open_path(&mut api.dev, path.as_ptr()) },
+            "Open selected USB interface",
+        )?;
+    } else {
+        // 単体起動の --serial は従来どおり。DriverHost からの要求は必ず接続先を指定する。
+        let count = symbol!(api, "rtlsdr_get_device_count", Count);
+        let strings = symbol!(api, "rtlsdr_get_device_usb_strings", Strings);
+        let open = symbol!(api, "rtlsdr_open", Open);
+        let mut selected = None;
+        for index in 0..unsafe { count() } {
+            let mut s = [0; 256];
+            if unsafe {
+                strings(
+                    index,
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    s.as_mut_ptr(),
+                )
+            } == 0
+                && usb_string(&s) == opts.serial
+            {
+                if selected.replace(index).is_some() {
+                    return Err("Duplicate USB serial; disconnect the other RTL-SDR".into());
+                }
             }
         }
+        let index = selected.ok_or("USB serial not found, unavailable, or in use")?;
+        checked(unsafe { open(&mut api.dev, index) }, "Open")?;
     }
-    let index = selected.ok_or("USB serial not found, unavailable, or in use")?;
-    checked(unsafe { open(&mut api.dev, index) }, "Open")?;
     if api.dev.is_null() {
         return Err("Open returned no device".into());
     }

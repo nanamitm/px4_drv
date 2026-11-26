@@ -180,6 +180,7 @@ private:
         if(!SetHandleInformation(output_.Get(),HANDLE_FLAG_INHERIT,0))return fail(-EIO);
         std::wstring suffix=serial_;
         for(auto &c:suffix)if(!((c>=L'0'&&c<=L'9')||(c>=L'A'&&c<=L'Z')||(c>=L'a'&&c<=L'z')))c=L'_';
+        suffix += L"-" + DeviceIdentity{device_path_, serial_}.PathId();
         // 起動し直した helper も同じ名前へ書くため、前の helper の終了理由を残すよう追記で開く
         const auto log=px4::util::path::GetDir()+L"\\rtlsdr_frontend-"+suffix+L".log";
         child_error.Set(CreateFileW(log.c_str(),FILE_APPEND_DATA,FILE_SHARE_READ|FILE_SHARE_WRITE,&sa,
@@ -199,7 +200,7 @@ private:
         if(!InitializeProcThreadAttributeList(startup.lpAttributeList,1,0,&attribute_size))return fail(-EIO);
         HANDLE inherited[]={child_input.Get(),child_output.Get(),child_error.Get()};
         const bool attr_ok=UpdateProcThreadAttribute(startup.lpAttributeList,0,PROC_THREAD_ATTRIBUTE_HANDLE_LIST,inherited,sizeof(inherited),nullptr,nullptr)!=FALSE;
-        std::wstring command=Quote(helper_)+L" --serial "+Quote(serial_)+L" --frequency "+std::to_wstring(hz)+L" --gain "+std::to_wstring(gain_);
+        std::wstring command=Quote(helper_)+L" --device-path "+Quote(device_path_)+L" --serial "+Quote(serial_)+L" --frequency "+std::to_wstring(hz)+L" --gain "+std::to_wstring(gain_);
         PROCESS_INFORMATION process{};
         const BOOL created=attr_ok && CreateProcessW(helper_.c_str(),command.data(),nullptr,nullptr,TRUE,
             CREATE_NO_WINDOW|CREATE_SUSPENDED|EXTENDED_STARTUPINFO_PRESENT,nullptr,nullptr,&startup.StartupInfo,&process);

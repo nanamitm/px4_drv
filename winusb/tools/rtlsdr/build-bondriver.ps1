@@ -25,10 +25,27 @@ if(-not $visualStudio){throw 'Visual Studio C++ tools and Windows SDK are requir
 $msbuild=Join-Path $visualStudio 'MSBuild\Current\Bin\MSBuild.exe'
 $devCmd=Join-Path $visualStudio 'Common7\Tools\VsDevCmd.bat'
 & (Join-Path $PSScriptRoot 'build.ps1') -Architecture $Architecture -PlatformToolset $PlatformToolset
+# Windows の接続先を libusb の DEVINST に結び付けるため、固定版のソースからビルドする。
+$cache = Join-Path $winusbRoot 'build\rtlsdr-runtime'
+$lock = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'runtime-lock.json') -Raw | ConvertFrom-Json
+$libusbArchive = Join-Path $cache 'libusb-1.0.30.zip'
+if (-not (Test-Path -LiteralPath $libusbArchive)) {
+    Invoke-WebRequest -Uri $lock.path_runtime.libusb_source -OutFile $libusbArchive -TimeoutSec 120
+}
+if ((Get-FileHash -LiteralPath $libusbArchive).Hash -cne $lock.path_runtime.libusb_source_sha256) {
+    throw "libusb source archive hash mismatch: $libusbArchive"
+}
+Expand-Archive -LiteralPath $libusbArchive -DestinationPath $cache -Force
+$libusbSource = Join-Path $cache 'libusb-1.0.30'
+$rtlSource = Join-Path $winusbRoot '..\cuse\third_party\rtl-sdr-blog'
 foreach($arch in $Architecture){
     $platform=if($arch -eq 'x86'){'Win32'}else{'x64'}
     $target=if($arch -eq 'x86'){'i686-pc-windows-msvc'}else{'x86_64-pc-windows-msvc'}
     $native=Join-Path $winusbRoot "build\$arch\Release-static"
+    $pathBuild = Join-Path $cache "path-$arch"
+    & (Join-Path $PSScriptRoot 'build-path-runtime.ps1') -LibusbSource $libusbSource -RtlSdrSource $rtlSource -OutputDirectory $pathBuild -Platform $platform -PlatformToolset $PlatformToolset
+    $pathDll = Join-Path $pathBuild 'rtlsdr_path.dll'
+    Copy-Item -LiteralPath $pathDll -Destination (Join-Path $native 'rtlsdr') -Force
     if(-not $SkipNativeBuild){
         foreach($project in @('DriverHost_PX4','BonDriver_PX4','WinSCard_PX4')){
             & $msbuild (Join-Path $winusbRoot "src\$project\$project.vcxproj") /nologo /v:minimal "/p:Configuration=Release-static;Platform=$platform;PlatformToolset=$PlatformToolset;SolutionDir=$winusbRoot\"
@@ -43,12 +60,28 @@ foreach($arch in $Architecture){
     [IO.File]::WriteAllText($environmentScript,"@echo off`r`nset `"PATH=%ProgramFiles(x86)%\Microsoft Visual Studio\Installer;%PATH%`"`r`ncall `"$devCmd`" -no_logo -arch=$arch -host_arch=x64`r`nif errorlevel 1 exit /b %errorlevel%`r`nset`r`n",[Text.Encoding]::ASCII)
     $developerEnvironment=& cmd.exe /d /c $environmentScript
     if($LASTEXITCODE -ne 0){throw 'Visual Studio environment initialization failed.'}
-    foreach($line in $developerEnvironment){
-        $separator=$line.IndexOf('=')
-        if($separator -gt 0){[Environment]::SetEnvironmentVariable($line.Substring(0,$separator),$line.Substring($separator+1),'Process')}
+    # アーキテクチャごとに元の環境へ戻し、次の VsDevCmd に前回の PATH や LIB を重ねない。
+    $previousEnvironment = @{}
+    try {
+        foreach ($line in $developerEnvironment) {
+            $separator = $line.IndexOf('=')
+            if ($separator -gt 0) {
+                $name = $line.Substring(0, $separator)
+                $value = $line.Substring($separator + 1)
+                $previous = [Environment]::GetEnvironmentVariable($name, 'Process')
+                if ($value -cne $previous) {
+                    $previousEnvironment[$name] = $previous
+                    [Environment]::SetEnvironmentVariable($name, $value, 'Process')
+                }
+            }
+        }
+        Invoke-Cargo -CargoArguments @('test','--locked','--target',$target,'--manifest-path',(Join-Path $frontend 'Cargo.toml'),'-p','rtlsdr_frontend','-p','isdbt-dsp')
+        Invoke-Cargo -CargoArguments @('build','--locked','--release','--target',$target,'--manifest-path',(Join-Path $frontend 'Cargo.toml'))
+    } finally {
+        foreach ($name in $previousEnvironment.Keys) {
+            [Environment]::SetEnvironmentVariable($name, $previousEnvironment[$name], 'Process')
+        }
     }
-    Invoke-Cargo -CargoArguments @('test','--locked','--target',$target,'--manifest-path',(Join-Path $frontend 'Cargo.toml'),'-p','rtlsdr_frontend','-p','isdbt-dsp')
-    Invoke-Cargo -CargoArguments @('build','--locked','--release','--target',$target,'--manifest-path',(Join-Path $frontend 'Cargo.toml'))
     Copy-Item -LiteralPath (Join-Path $frontend "target\$target\release\rtlsdr_frontend.exe") -Destination (Join-Path $native 'rtlsdr') -Force
     if(-not $SkipPackage){
         $bits=if($arch -eq 'x86'){'32bit'}else{'64bit'}
@@ -66,10 +99,11 @@ foreach($arch in $Architecture){
         }
         $runtime=Join-Path $destination 'rtlsdr'
         New-Item -ItemType Directory -Force -Path $runtime | Out-Null
-        foreach($file in @('rtlsdr_frontend.exe','rtlsdr.dll','pthreadVC2.dll','msvcr100.dll','vcruntime140.dll','runtime.json','COPYING.librtlsdr')){
+        foreach($file in @('rtlsdr_frontend.exe','rtlsdr_path.dll','rtlsdr.dll','pthreadVC2.dll','msvcr100.dll','vcruntime140.dll','runtime.json','COPYING.librtlsdr')){
             Copy-Item -LiteralPath (Join-Path $native "rtlsdr\$file") -Destination $runtime -Force
         }
         Copy-Item -LiteralPath (Join-Path $frontend 'LICENSE') -Destination (Join-Path $runtime 'COPYING.frontend') -Force
+        Copy-Item -LiteralPath (Join-Path $libusbSource 'COPYING') -Destination (Join-Path $runtime 'COPYING.libusb') -Force
         $guide=Get-Content -LiteralPath (Join-Path $winusbRoot '..\docs\rtlsdr-install.md') -Raw -Encoding UTF8
         $technical=Get-Content -LiteralPath (Join-Path $winusbRoot 'docs\rtlsdr-bondriver.md') -Raw -Encoding UTF8
         [IO.File]::WriteAllText((Join-Path $destination 'README.md'),$guide.Replace('(../winusb/docs/rtlsdr-bondriver.md)','(TECHNICAL.md)'),[Text.UTF8Encoding]::new($false))
@@ -88,6 +122,13 @@ foreach($arch in $Architecture){
         $sources=Join-Path $destination 'Sources'
         New-Item -ItemType Directory -Force -Path $sources | Out-Null
         Copy-Item -LiteralPath (Join-Path $winusbRoot 'build\rtlsdr-runtime\rtl-sdr-blog-V1.4.0-source.zip') -Destination (Join-Path $sources 'rtl-sdr-blog-V1.4.0.zip') -Force
+        Copy-Item -LiteralPath $libusbArchive -Destination $sources -Force
+        Copy-Item -LiteralPath $rtlSource -Destination $sources -Recurse -Force
+        $pathSources = Join-Path $sources 'winusb\tools\rtlsdr'
+        New-Item -ItemType Directory -Force -Path $pathSources | Out-Null
+        foreach ($file in @('build-path-runtime.ps1','rtlsdr_path.vcxproj','rtlsdr_path.rc')) {
+            Copy-Item -LiteralPath (Join-Path $PSScriptRoot $file) -Destination $pathSources -Force
+        }
         $sourceFrontend=Join-Path $sources 'winusb\tools\rtlsdr_frontend'
         New-Item -ItemType Directory -Force -Path $sourceFrontend,(Join-Path $sources 'winusb\src\common'),(Join-Path $sources '.cargo') | Out-Null
         foreach($file in @('Cargo.toml','Cargo.lock','cargo-config.toml','build.rs','frontend.rc','LICENSE','src','vendor')){
