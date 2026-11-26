@@ -42,6 +42,8 @@ struct cxd2858er_tuner {
 	u8 i2c_addr;
 	struct cxd2858er_config config;
 	enum cxd2858er_system system;
+	/* 地上波側で選局した周波数 (kHz)。入力レベルの換算に使う最大 RF 利得が周波数で変わるため保持する */
+	u32 freq;
 };
 
 #ifdef __cplusplus
@@ -59,6 +61,9 @@ int cxd2858er_set_params_s(struct cxd2858er_tuner *tuner,
 			   enum cxd2858er_system system,
 			   u32 freq, u32 symbol_rate);
 int cxd2858er_stop(struct cxd2858er_tuner *tuner);
+int cxd2858er_calc_rf_level(enum cxd2858er_system system, u32 freq,
+			    u8 if_agc, u8 rf_agc, u8 if_bpf_gc, s32 *level);
+int cxd2858er_read_rf_level(struct cxd2858er_tuner *tuner, s32 *level);
 #ifdef __cplusplus
 }
 #endif

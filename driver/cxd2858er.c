@@ -411,6 +411,7 @@ int cxd2858er_set_params_t(struct cxd2858er_tuner *tuner,
 		goto exit;
 
 	tuner->system = system;
+	tuner->freq = freq;
 
 exit:
 	i2c_comm_master_gate_ctrl(tuner->i2c, false);
@@ -518,6 +519,7 @@ int cxd2858er_set_params_c(struct cxd2858er_tuner *tuner,
 		goto exit;
 
 	tuner->system = CXD2858ER_ISDB_C_SYSTEM;
+	tuner->freq = freq;
 
 exit:
 	i2c_comm_master_gate_ctrl(tuner->i2c, false);
@@ -765,4 +767,163 @@ int cxd2858er_stop(struct cxd2858er_tuner *tuner)
 
 	i2c_comm_master_gate_ctrl(tuner->i2c, false);
 	return 0;
+}
+
+/* Sony の sony_helene.c の sony_helene_ReadRssi() と sony_tuner_helene.c の sony_tuner_helene_terr_ReadRFLevel() に従い、
+ * 地上波側の AGC の読み取り値から入力レベル (dBm × 1000) を求める
+ * AGC の電圧は読み取り値 × 1.4 / 255 V で、式は Sony のコードと同じく 140 倍した整数で比べ、同じ位置で丸める
+ * 衛星側は Sony のコードでも復調器の AGC から求める dB の値で、dBm として扱えるか確認できないため対象外にする */
+int cxd2858er_calc_rf_level(enum cxd2858er_system system, u32 freq,
+			    u8 if_agc, u8 rf_agc, u8 if_bpf_gc, s32 *level)
+{
+	/* IF の帯域通過フィルターの利得 (dB)。0x69 の下位4ビットで選ばれる */
+	static const s32 if_bpf_gc_table[16] = {
+		0, 0, 0, 0, 2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 20, 20
+	};
+	s32 if_agc_x140 = if_agc * 140;
+	s32 max_agc_x140 = ((if_agc > rf_agc) ? if_agc : rf_agc) * 140;
+	s32 if_gain, rf_gain, rf_gain_max, correction;
+
+	switch (system) {
+	case CXD2858ER_ISDB_T_SYSTEM:
+		/* Sony の SONY_DTV_SYSTEM_ISDBT の IFOUT の補正 (-4.5 dB) */
+		correction = -4500;
+		break;
+
+	case CXD2858ER_ISDB_C_SYSTEM:
+		/* J.83B も同じ ISDB-C の状態で受信する。Sony のコードは ISDB-C と J.83B に同じ補正 (-1.5 dB) を使う */
+		correction = -1500;
+		break;
+
+	default:
+		return -EINVAL;
+	}
+
+	if_gain = 870 + if_bpf_gc_table[if_bpf_gc & 0x0f] * 100;
+	if (if_agc_x140 <= 9945)
+		if_gain += (769 * (9945 - if_agc_x140) + 1275) / 2550;
+
+	/* RF 利得の最大値 (dB × 100) は周波数帯ごとの Sony の表の値 */
+	if (freq > 700000)
+		rf_gain_max = 4150;
+	else if (freq > 600000)
+		rf_gain_max = 4130;
+	else if (freq > 532000)
+		rf_gain_max = 4170;
+	else if (freq > 464000)
+		rf_gain_max = 4050;
+	else if (freq > 400000)
+		rf_gain_max = 4280;
+	else if (freq > 350000)
+		rf_gain_max = 4260;
+	else if (freq > 320000)
+		rf_gain_max = 4110;
+	else if (freq > 285000)
+		rf_gain_max = 4310;
+	else if (freq > 215000)
+		rf_gain_max = 4250;
+	else if (freq > 184000)
+		rf_gain_max = 4020;
+	else if (freq > 172000)
+		rf_gain_max = 3920;
+	else if (freq > 150000)
+		rf_gain_max = 4080;
+	else if (freq > 86000)
+		rf_gain_max = 4180;
+	else if (freq > 65000)
+		rf_gain_max = 4200;
+	else
+		rf_gain_max = 4020;
+
+	/* 154 = 70 × 2.2、4536 = 70 × 64.8、1186 = 57 × 20.8 (Sony のコードの丸め値) */
+	if (max_agc_x140 < 4896)
+		rf_gain = rf_gain_max;
+	else if (max_agc_x140 < 5457)
+		rf_gain = rf_gain_max - (70 * (max_agc_x140 - 4896) + 127) / 255;
+	else if (max_agc_x140 < 8823)
+		rf_gain = rf_gain_max - 154;
+	else if (max_agc_x140 < 24786)
+		rf_gain = rf_gain_max - 154 - (70 * (max_agc_x140 - 8823) + 127) / 255;
+	else if (max_agc_x140 < 30090)
+		rf_gain = rf_gain_max - 4536 - (57 * (max_agc_x140 - 24786) + 127) / 255;
+	else
+		rf_gain = rf_gain_max - 4536 - 1186 - (160 * (max_agc_x140 - 30090) + 127) / 255;
+
+	*level = (-if_gain - rf_gain) * 10 + correction;
+	return 0;
+}
+
+/* Sony の sony_helene.c の X_read_agc() と同じ手順で、内部の論理回路と CPU を起こしてから
+ * IF と RF の AGC を ADC で読み、読み終えたら選局後と同じ待機の設定へ戻す
+ * 同じ I2C バスのチューナーは同じアドレスを使うため、呼び出し側は選局と同じチューナーのロックを持つ */
+int cxd2858er_read_rf_level(struct cxd2858er_tuner *tuner, s32 *level)
+{
+	int ret = 0, ret2;
+	u8 data[2], if_agc = 0, rf_agc = 0, if_bpf_gc = 0;
+
+	/* Sony のコードは地上波の動作中だけ読み取りを受け付ける。ISDB-C と J.83B も地上波側の経路を使う */
+	if (tuner->system != CXD2858ER_ISDB_T_SYSTEM &&
+	    tuner->system != CXD2858ER_ISDB_C_SYSTEM)
+		return -EINVAL;
+
+	ret = i2c_comm_master_gate_ctrl(tuner->i2c, true);
+	if (ret)
+		return ret;
+
+	data[0] = 0xc4;
+	data[1] = 0x41;
+
+	ret = cxd2858er_write_regs(tuner, 0x87, data, 2);
+	if (ret)
+		goto restore;
+
+	/* IF の AGC を ADC へつなぎ、変換を始める */
+	data[0] = 0x05;
+	data[1] = 0x01;
+
+	ret = cxd2858er_write_regs(tuner, 0x59, data, 2);
+	if (ret)
+		goto restore;
+
+	ret = cxd2858er_read_reg(tuner, 0x5b, &if_agc);
+	if (ret)
+		goto restore;
+
+	/* RF の AGC を ADC へつなぎ、変換を始める */
+	data[0] = 0x03;
+	data[1] = 0x01;
+
+	ret = cxd2858er_write_regs(tuner, 0x59, data, 2);
+	if (ret)
+		goto restore;
+
+	ret = cxd2858er_read_reg(tuner, 0x5b, &rf_agc);
+
+restore:
+	/* 途中で失敗しても、ADC と CPU を起こしたまま受信を続けないよう、選局後と同じ待機の設定へ戻す */
+	ret2 = cxd2858er_write_reg(tuner, 0x59, 0x04);
+	if (!ret)
+		ret = ret2;
+
+	ret2 = cxd2858er_write_reg(tuner, 0x88, 0x00);
+	if (!ret)
+		ret = ret2;
+
+	ret2 = cxd2858er_write_reg(tuner, 0x87, 0xc0);
+	if (!ret)
+		ret = ret2;
+
+	if (ret)
+		goto exit;
+
+	ret = cxd2858er_read_reg(tuner, 0x69, &if_bpf_gc);
+	if (ret)
+		goto exit;
+
+	ret = cxd2858er_calc_rf_level(tuner->system, tuner->freq,
+				      if_agc, rf_agc, if_bpf_gc, level);
+
+exit:
+	i2c_comm_master_gate_ctrl(tuner->i2c, false);
+	return ret;
 }
