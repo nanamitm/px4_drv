@@ -4,7 +4,7 @@
 #include "plain_framer.hpp"
 #include "pat_gate.hpp"
 #include "recovery_budget.hpp"
-#include "winusb_io.hpp"
+#include "../winusb_io.hpp"
 #include "../stream_overflow.hpp"
 #include "msg.h"
 #include <chrono>
@@ -16,6 +16,9 @@
 
 namespace px4::pxbcud {
 namespace {
+using winusb::CancelUsbRequests;
+using winusb::PendingIo;
+using winusb::WinUsbHandles;
 using Clock=std::chrono::steady_clock;
 // isoch 要求数の既定と範囲。1要求は 64マイクロフレーム = 8ms のため、
 // 要求数がそのまま受信スレッドの遅れを吸収できる時間になる。

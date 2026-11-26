@@ -43,7 +43,7 @@ struct FakePort final : SessionPort {
     std::vector<std::uint16_t> sent; std::size_t sent_count=0;
     std::uint8_t mode=ModeIsdbt; std::size_t downloaded=0;
     std::vector<std::uint8_t> isdbt=Firmware(64),j83b=Firmware(96);
-    int send_error=0,failed=0; bool stale=false,recovery_during_reload=false;
+    int receive_error=0,send_error=0,failed=0; bool stale=false,recovery_during_reload=false;
     std::vector<std::uint8_t> ts;
     unsigned started=0,stopped=0;
 
@@ -112,6 +112,7 @@ struct FakePort final : SessionPort {
     int StartReceive() override
     {
         ++started;
+        if (receive_error) return receive_error;
         // 前のホストが残した、メッセージの途中から始まる転送 (ヘッダーとして長さが不正)
         if (stale) {std::vector<std::uint8_t> b(64,0x47);b[4]=b[5]=0;Deliver(b);}
         return 0;
@@ -189,6 +190,10 @@ void Failures()
 {
     FakePort port;FakeHelper helper;
     Session session(port,&helper,32);port.session=&session;
+    port.receive_error=-EIO;
+    Require(session.Open()==-EIO && port.sent.empty() && !session.IsOpen(),
+        "receive start failure skips firmware requests");
+    port.receive_error=0;
     Require(session.Open()==0,"open");
     helper.start_error=-ENOENT;
     Require(session.Tune(Session::System::J83b,138750)==-ENOENT && session.Error()==0 && port.mode==ModeIsdbt,

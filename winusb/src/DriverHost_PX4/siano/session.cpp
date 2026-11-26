@@ -29,7 +29,8 @@ int Session::Open()
     if (read) msg_warn("PX-S1UD: firmware not found; only an already initialized device can open\n");
     error_=0; ResetReceive();
     int ret=port_.StartReceive();
-    if (!ret) ret=frontend_.Initialize(firmware);
+    if (ret) return ret;
+    ret=frontend_.Initialize(firmware);
     if (ret==-EIO && !firmware.empty()) {
         // J.83B 用の firmware が稼働したままの機器 (このホストや BonDriver_S1UD.dll が読み込んだもの) は、
         // ISDB-T の INIT_DEVICE を受けても ISDB-T のモードへ移らない。通常の firmware を読み込み直す

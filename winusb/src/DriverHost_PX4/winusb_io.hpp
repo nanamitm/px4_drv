@@ -9,7 +9,7 @@
 #include <windows.h>
 #include <winusb.h>
 
-namespace px4::pxbcud {
+namespace px4::winusb {
 using IoClock = std::chrono::steady_clock;
 
 struct WinUsbHandles {
@@ -86,6 +86,6 @@ void CancelUsbRequests(std::unique_ptr<Batch> batch) noexcept
     if (thread)
         CloseHandle(reinterpret_cast<HANDLE>(thread));
     else
-        OutputDebugStringW(L"PX-BCUD: cannot start USB completion waiter; retaining pending requests\n");
+        OutputDebugStringW(L"Cannot start WinUSB completion waiter; retaining pending requests\n");
 }
-} // namespace px4::pxbcud
+} // namespace px4::winusb

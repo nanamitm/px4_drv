@@ -10,11 +10,17 @@
 #include <array>
 #include <vector>
 #ifdef _WIN32
-#include "../src/DriverHost_PX4/pxbcud/winusb_io.hpp"
+#include "../src/DriverHost_PX4/winusb_io.hpp"
 #pragma comment(lib, "winusb.lib")
 #endif
 
 using namespace px4::pxbcud;
+#ifdef _WIN32
+using px4::winusb::CancelUsbRequests;
+using px4::winusb::IoClock;
+using px4::winusb::PendingIo;
+using px4::winusb::WinUsbHandles;
+#endif
 #define CHECK(x) do { if (!(x)) { std::fprintf(stderr,"FAIL line %d: %s\n",__LINE__,#x);std::exit(1); } } while(0)
 
 struct Mock final : Io {
