@@ -185,7 +185,9 @@ void FirmwarePaths()
     const auto build=(original/L"build").lexically_normal();fs::create_directories(build);
     const auto root=build/(L"siano-firmware-path-test-"+std::to_wstring(std::chrono::steady_clock::now().time_since_epoch().count()));
     Require(fs::create_directory(root),"new firmware test directory");
-    const auto host=root/L"host 日本語";fs::create_directories(host/L"firmware");
+    // 非 ASCII の名前は UTF-8 から作る。libstdc++ 11 は wchar_t の名前を C++ の大域ロケール ("C") で
+    // 変換して例外を送出するが、u8path は Windows でも同じワイド文字列のパスになる。
+    const auto host=root/fs::u8path(u8"host 日本語");fs::create_directories(host/L"firmware");
     const auto flat=host/L"isdbt_rio.inp",sub=host/L"firmware"/L"isdbt_rio.inp";
     const auto custom=root/L"custom.inp";
     auto touch=[](const fs::path& p) {std::ofstream f(p,std::ios::binary);f<<"test";Require(static_cast<bool>(f),"create firmware fixture");};
