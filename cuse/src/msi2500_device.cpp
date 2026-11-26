@@ -166,7 +166,11 @@ int Msi2500Device::StartTune(bool j83b, std::uint32_t hz, std::uint32_t khz, boo
     int rc = streaming ? -EBUSY : 0;
     if (!rc) {
         tuned_ = false;
-        system_j83b_ = j83b;
+        if (system_j83b_ != j83b) {
+            // 旧周波数の自動復旧が Launch で方式を読むため、監視スレッドの終了後に切り替える。
+            session_.Stop();
+            system_j83b_ = j83b;
+        }
         rc = session_.Start(hz);
     }
     // 最初の TS を待つ。成功はカーネルと同じくロックを意味し、届かなければ EAGAIN で選び直しを求める
@@ -435,7 +439,10 @@ void Msi2500Device::WaitStopped(std::chrono::milliseconds limit)
 std::uint32_t Msi2500Device::Kill()
 {
     StopReceive();
-    return helper_.Kill();
+    const auto exit_code = helper_.Kill();
+    // 自動復旧では Release を経ずに Launch するため、再設定前に ADC と alternate を戻す。
+    PowerDown();
+    return exit_code;
 }
 
 void Msi2500Device::Release()
