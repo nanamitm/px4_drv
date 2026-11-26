@@ -6,6 +6,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
+#include <cerrno>
 #include <mutex>
 
 namespace px4::cuse {
@@ -48,7 +49,8 @@ public:
         failed_ = 0;
         Begin(milliseconds);
     }
-    int Failed() const override { return failed_; }
+    void Block() { blocked_ = true; }
+    int Failed() const override { return blocked_ ? -EIO : failed_; }
     void ClearFailure() override { failed_ = 0; }
     dt295_io Callbacks() override { return {Control, Now, Delay, nullptr, this, nullptr, nullptr}; }
     void ReportTiming(const char *stage) override;
@@ -66,6 +68,7 @@ private:
     RemovalSignal &removal_;
     Clock::time_point deadline_{};
     int failed_ = 0;
+    std::atomic_bool blocked_{false};
     unsigned long last_error_ = 0;
     std::uint64_t transfers_ = 0, control_us_ = 0, max_control_us_ = 0;
 };

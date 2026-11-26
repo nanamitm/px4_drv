@@ -52,8 +52,8 @@ int UsbTransport::Transfer(std::uint8_t type, std::uint8_t request, std::uint16_
                            void *data, std::uint16_t size, unsigned timeout)
 {
     // 応答不明の要求を再送すると二重実行になるため、通信失敗後は同じセッションを再利用しない。
-    if (failed_)
-        return failed_;
+    if (const int error = Failed())
+        return error;
     if (removal_.Removed()) {
         last_error_ = static_cast<unsigned long>(-LIBUSB_ERROR_NO_DEVICE);
         return failed_ = -ENODEV;

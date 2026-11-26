@@ -18,6 +18,7 @@ public:
     static constexpr std::uint16_t Vendor = 0x06b8, Product = 0x103b;
     Dt295Device(libusb_device_handle *handle, std::uint8_t bus, std::uint8_t address, std::function<void()> changed);
     ~Dt295Device() override;
+    bool UsbTransfersPending() const override;
 
 protected:
     int InitModel() override;
@@ -57,14 +58,28 @@ private:
     // 内蔵カードリーダーの応答の状態 (CardNode のロックの下で使う)
     dt295::CardSession card_session_;
 
-    // Bulk IN と SERVICE (StartStream から StopStream まで)
-    struct Stream {
-        std::vector<libusb_transfer *> transfers;
-        std::vector<std::vector<std::uint8_t>> buffers;
-        std::atomic_bool running{false}, deliver{false}, stop{false};
-        std::atomic_int error{0};
+    struct ReceiveState {
+        explicit ReceiveState(Dt295Device *device) : owner(device) {}
         std::mutex mutex;
         std::condition_variable idle;
+        Dt295Device *owner;
+        unsigned deferred = 0;
+    };
+    struct Transfer {
+        ~Transfer() { if (usb) libusb_free_transfer(usb); }
+        std::shared_ptr<ReceiveState> state;
+        std::vector<std::uint8_t> buffer;
+        libusb_transfer *usb = nullptr;
+        bool pending = false;
+    };
+    const std::shared_ptr<ReceiveState> receive_ = std::make_shared<ReceiveState>(this);
+
+    // Bulk IN と SERVICE (StartStream から StopStream まで)
+    struct Stream {
+        std::vector<std::unique_ptr<Transfer>> transfers;
+        bool running = false, deliver = false;
+        std::atomic_bool stop{false};
+        std::atomic_int error{0};
         int in_flight = 0;
         std::thread service;
         std::unique_ptr<dt295::TsDelivery> delivery;
