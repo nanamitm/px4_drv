@@ -81,8 +81,7 @@ void Dt295Device::OnRemove()
 
 void Dt295Device::OnShutdown()
 {
-    if (initialized_ && available_ && !restore_failed_)
-        RestoreLocked();
+    VideoClose();
 }
 
 int Dt295Device::VideoOpen()
@@ -94,8 +93,10 @@ int Dt295Device::VideoOpen()
 void Dt295Device::VideoClose()
 {
     // WinUSB 版の受信機の Close と同じく、閉じるたびに機器を起動前の状態へ戻す。
-    if (initialized_ && available_ && !restore_failed_)
+    if (initialized_ && available_ && !restore_failed_) {
+        auto command = channel_.Lock();
         RestoreLocked();
+    }
     initialized_ = false;
 }
 
@@ -115,6 +116,9 @@ int Dt295Device::EnsureInitialized()
     transport_.ReportTiming("initialize");
     if (rc) {
         msg_err("%s: initialize failed result=%d libusb=%lu\n", label_.c_str(), rc, transport_.LastError());
+        // Start が途中まで書き込んだ場合も、カード処理を再開する前に前像を戻す。
+        if (available_)
+            RestoreLocked();
         return rc;
     }
     initialized_ = true;
@@ -123,14 +127,14 @@ int Dt295Device::EnsureInitialized()
 
 void Dt295Device::RestoreLocked()
 {
-    // カードの操作と転送が混ざらないよう、復元も制御ロックの下で行う。
-    auto command = channel_.Lock();
     transport_.BeginRestore(120000);
     const int rc = source_.Close();
     transport_.ReportTiming("source-close");
     restore_failed_ = rc != 0;
-    if (rc)
+    if (rc) {
+        transport_.Block();
         msg_err("%s: restore failed result=%d\n", label_.c_str(), rc);
+    }
     initialized_ = false;
 }
 

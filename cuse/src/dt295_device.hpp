@@ -45,7 +45,7 @@ protected:
 
 private:
     int EnsureInitialized();
-    void RestoreLocked();
+    void RestoreLocked(); // channel_ の制御ロックの下で呼ぶ
     // Bulk IN と SERVICE を止める。戻り値は受信中の異常、fatal は受信の停止の制御転送が失敗したとき true。
     int StopTransfers(bool &fatal);
     static void LIBUSB_CALL BulkDone(libusb_transfer *transfer);
