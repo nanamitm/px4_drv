@@ -9,6 +9,10 @@
 #include <cstring>
 #include <array>
 #include <vector>
+#ifdef _WIN32
+#include "../src/DriverHost_PX4/pxbcud/winusb_io.hpp"
+#pragma comment(lib, "winusb.lib")
+#endif
 
 using namespace px4::pxbcud;
 #define CHECK(x) do { if (!(x)) { std::fprintf(stderr,"FAIL line %d: %s\n",__LINE__,#x);std::exit(1); } } while(0)
@@ -229,4 +233,74 @@ void TestRecoveryBudget()
 
     std::puts("Recovery budget: consecutive limit, backoff growth and healthy-run reset passed");
 }
-int main() {TestFrontend();TestFramer();TestPatGate();TestRecoveryBudget();return 0;}
+void TestReceptionProgress()
+{
+    using namespace std::chrono_literals;
+    using Timeout = ReceptionProgress::Timeout;
+    const auto start = ReceptionProgress::Clock::now();
+    ReceptionProgress progress(start);
+    CHECK(progress.Check(start + 5s, false) == Timeout::NoInput && !progress.ReceivedInput());
+
+    progress.Input(start + 1s);
+    progress.Ts(start + 1s);
+    progress.Input(start + 5s);
+    CHECK(progress.Check(start + 6s, true) == Timeout::NoTs);
+    CHECK(progress.Check(start + 6s, false) == Timeout::None);
+    CHECK(progress.TsSpan() == 0s);
+    RecoveryBudget budget;
+    CHECK(budget.RestartDelay(false) == 0ms && budget.Consecutive() == 1);
+
+    progress.Ts(start + 6s);
+    CHECK(progress.Check(start + 6s, true) == Timeout::None);
+    CHECK(progress.TsSpan() == 5s);
+    std::puts("reception: missing input, unframed data and restored TS passed");
+}
+
+#ifdef _WIN32
+void TestDeferredUsbRequests()
+{
+    struct MockBatch {
+        void CancelAll() noexcept { cancelled = static_cast<unsigned>(requests.size()); }
+        bool WaitUntil(IoClock::time_point deadline) noexcept
+        {
+            return std::all_of(requests.begin(), requests.end(),
+                [&](auto &request) { return request.WaitUntil(deadline); });
+        }
+        std::shared_ptr<WinUsbHandles> handles = std::make_shared<WinUsbHandles>(nullptr, nullptr);
+        std::array<PendingIo, 2> requests;
+        unsigned cancelled = 0;
+    };
+    auto batch = std::make_unique<MockBatch>();
+    auto *pending = batch.get();
+    const auto handles = batch->handles;
+    for (auto &request : batch->requests) {
+        request.operation.hEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+        CHECK(request.operation.hEvent);
+        request.pending = true;
+    }
+    const auto first = batch->requests[0].operation.hEvent, last = batch->requests[1].operation.hEvent;
+    const auto started = IoClock::now();
+    CancelUsbRequests(std::move(batch));
+    CHECK(!handles->Ready() && pending->cancelled == 2);
+    CHECK(IoClock::now() - started < std::chrono::seconds(4));
+    CHECK(SetEvent(first) && !handles->Ready());
+    CHECK(SetEvent(last));
+    const auto deadline = IoClock::now() + std::chrono::seconds(2);
+    while (!handles->Ready() && IoClock::now() < deadline) Sleep(1);
+    CHECK(handles->Ready());
+    std::puts("WinUSB: batch deadline and delayed completion passed");
+}
+#endif
+
+int main()
+{
+    TestFrontend();
+    TestFramer();
+    TestPatGate();
+    TestRecoveryBudget();
+    TestReceptionProgress();
+#ifdef _WIN32
+    TestDeferredUsbRequests();
+#endif
+    return 0;
+}

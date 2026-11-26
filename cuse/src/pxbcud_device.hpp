@@ -49,7 +49,7 @@ protected:
 private:
     class UsbIo;
     // 受信が失敗した段階。WinUSB 版の fail() の stage と同じ名前でログへ残す。
-    enum class Failure { None, Complete, Submit, PacketDescriptor, NoData, PatTimeout };
+    enum class Failure { None, Complete, Submit, PacketDescriptor, NoData, PatTimeout, NoTs };
 
     int CheckEndpoint();
     // capture の停止と alternate setting 0。どちらかが失敗しても両方を試みる。control_ を保持して呼ぶ。
@@ -100,11 +100,11 @@ private:
         int in_flight = 0;
         bool stop = false;
         bool resubmit = false;
-        std::atomic_bool pat_ready{false}, received_any{false}, recovering{false};
+        bool pat_ready = false, recovering = false;
         int error = 0;
         Failure failure = Failure::None;
-        // steady_clock の時刻 (ナノ秒)。完了の通知が書き、worker が読む。
-        std::atomic<std::int64_t> started_ns{0}, first_data_ns{0}, last_data_ns{0};
+        Clock::time_point started{};
+        pxbcud::ReceptionProgress progress;
         // 完了の通知だけが使う。
         std::int64_t previous_completion_ns = 0;
         std::uint64_t max_gap_us = 0;

@@ -14,21 +14,20 @@ namespace {
 // WinUSB 版では Linux em28xx と同じ 5 本 (40 ms) で完了待ちの最大が 33〜42 ms に並び isoch が枯れたため 10 本にした。
 // libusb は完了の通知の中で出し直すため必要な本数が変わる可能性があり、Linux の実測で見直す。
 constexpr int TransferCount = 10, PacketsPerTransfer = 64;
-// TS が届かない時間と、選んだ TSID の PAT を待つ時間 (WinUSB 版と同じ)。
-constexpr auto NoDataTimeout = std::chrono::seconds(5);
+// 選んだ TSID の PAT を待つ時間 (WinUSB 版と同じ)。
 constexpr auto PatTimeout = std::chrono::seconds(5);
 // 選局のロックを待つ時間。カーネルの ptx_chrdev_tune() の check_lock (10 ms × 300 回) と同じ。
 constexpr auto LockTimeout = std::chrono::milliseconds(3000);
 
-std::int64_t NowNs()
+std::int64_t NowNs(Device::Clock::time_point now = Device::Clock::now())
 {
-    return std::chrono::duration_cast<std::chrono::nanoseconds>(Device::Clock::now().time_since_epoch()).count();
+    return std::chrono::duration_cast<std::chrono::nanoseconds>(now.time_since_epoch()).count();
 }
 
 const char *FailureName(int failure)
 {
-    static const char *const names[] = {"none", "complete", "submit", "packet_descriptor", "no_data", "pat_timeout"};
-    return failure >= 0 && failure < 6 ? names[failure] : "unknown";
+    static const char *const names[] = {"none", "complete", "submit", "packet_descriptor", "no_data", "pat_timeout", "no_ts"};
+    return failure >= 0 && failure < static_cast<int>(sizeof(names) / sizeof(names[0])) ? names[failure] : "unknown";
 }
 }
 
@@ -68,7 +67,7 @@ struct PxBcudDevice::Fault {
         if (kind != Kind::Error || !remaining)
             return false;
         if (!injected ? now - base_ns < after_ns
-                      : !s.received_any || now - s.first_data_ns < 300000000)
+                      : !s.progress.ReceivedInput() || now - NowNs(s.progress.FirstInput()) < 300000000)
             return false;
         --remaining;
         ++injected;
@@ -384,13 +383,10 @@ int PxBcudDevice::Submit(bool restart)
         s.error = 0;
         s.failure = Failure::None;
         s.pat_ready = s.ts->Ready();
-        s.received_any = false;
         s.previous_completion_ns = 0;
         s.max_gap_us = 0;
-        const auto now = NowNs();
-        s.started_ns = now;
-        s.first_data_ns = 0;
-        s.last_data_ns = now;
+        s.started = Clock::now();
+        s.progress = pxbcud::ReceptionProgress(s.started);
         s.resubmit = true;
         for (auto &transfer : s.transfers) {
             rc = libusb_submit_transfer(transfer->usb);
@@ -476,10 +472,11 @@ void LIBUSB_CALL PxBcudDevice::IsoDone(libusb_transfer *transfer)
     if (injected) {
         self.SetFailureLocked(-EIO, Failure::Complete);
     } else if (status == LIBUSB_TRANSFER_COMPLETED) {
-        const auto now = NowNs();
+        const auto now = Clock::now();
+        const auto now_ns = NowNs(now);
         if (s.previous_completion_ns)
-            s.max_gap_us = std::max<std::uint64_t>(s.max_gap_us, (now - s.previous_completion_ns) / 1000);
-        s.previous_completion_ns = now;
+            s.max_gap_us = std::max<std::uint64_t>(s.max_gap_us, (now_ns - s.previous_completion_ns) / 1000);
+        s.previous_completion_ns = now_ns;
         bool data = false, valid = true;
         for (int i = 0; i < transfer->num_iso_packets && valid; ++i) {
             const auto &packet = transfer->iso_packet_desc[i];
@@ -491,20 +488,20 @@ void LIBUSB_CALL PxBcudDevice::IsoDone(libusb_transfer *transfer)
                 msg_err("%s: invalid isoch descriptor packet=%d status=%d length=%u\n", self.label_.c_str(), i,
                         packet.status, packet.actual_length);
         }
-        if (data) {
-            s.last_data_ns = now;
-            if (!s.received_any.exchange(true))
-                s.first_data_ns = now;
-        }
+        if (data)
+            s.progress.Input(now);
         if (!valid) {
             self.SetFailureLocked(-EIO, Failure::PacketDescriptor);
         } else if (s.ts->Flush([&self](const std::uint8_t *packets, std::size_t size) {
                        self.video_.Push(packets, size);
                    })) {
-            if (!s.pat_ready.exchange(true) || s.recovering.exchange(false))
+            s.progress.Ts(now);
+            if (!s.pat_ready || s.recovering)
                 msg_info("%s: TS delivery started startup_discarded_packets=%llu recovery_count=%llu\n",
                          self.label_.c_str(), static_cast<unsigned long long>(s.ts->startup_discarded),
                          static_cast<unsigned long long>(s.recovery_count));
+            s.pat_ready = true;
+            s.recovering = false;
         }
     } else if (status != LIBUSB_TRANSFER_CANCELLED) {
         // 抜去では発行済みの転送がまとめて失敗するため、最初の 1 本だけを記録する。
@@ -547,13 +544,14 @@ void PxBcudDevice::Run()
         {
             std::unique_lock<std::mutex> lock(receive_->mutex);
             while (!s.stop && !s.error) {
-                const auto now = NowNs();
-                // 受信が 5 秒途切れた場合と、選んだ TSID の PAT が 5 秒届かない場合は WinUSB 版と同じく失敗にする。
-                if (std::chrono::nanoseconds(now - s.last_data_ns) > NoDataTimeout) {
-                    SetFailureLocked(-ETIMEDOUT, Failure::NoData);
+                const auto now = Clock::now();
+                const auto timeout = s.progress.Check(now, s.pat_ready);
+                if (timeout != pxbcud::ReceptionProgress::Timeout::None) {
+                    SetFailureLocked(-ETIMEDOUT, timeout == pxbcud::ReceptionProgress::Timeout::NoInput ?
+                        Failure::NoData : Failure::NoTs);
                     break;
                 }
-                if (!s.pat_ready && std::chrono::nanoseconds(now - s.started_ns) > PatTimeout) {
+                if (!s.pat_ready && now - s.started >= PatTimeout) {
                     msg_err("%s: selected TSID PAT was not received tsid=0x%04x\n", label_.c_str(),
                             frontend_->SelectedStream());
                     SetFailureLocked(-EIO, Failure::PatTimeout);
@@ -580,16 +578,16 @@ void PxBcudDevice::Run()
         }
         // 自動復旧の対象は、WinUSB 版のエラー 31・87・タイムアウトに当たる転送の失敗と無受信に限る。
         // PAT が届かない場合と記述子の異常は、再開しても同じ状態が続くため受信を終える。
-        const bool retryable = failure == Failure::Complete || failure == Failure::Submit || failure == Failure::NoData;
+        const bool retryable = failure == Failure::Complete || failure == Failure::Submit ||
+            failure == Failure::NoData || failure == Failure::NoTs;
         if (!retryable) {
             s.terminal_error = error;
             video_.Fail(error);
             return;
         }
-        // 受信できていた区間は、最初にデータが届いてから最後に届くまでで数える (WinUSB 版と同じ)。
-        budget.NoteStream(s.received_any ? std::chrono::nanoseconds(s.last_data_ns - s.first_data_ns)
-                                         : Clock::duration::zero());
-        const bool no_data = failure == Failure::NoData && !s.received_any;
+        // 復旧予算は、確認済み TS の配信が続いた時間で数え直す。
+        budget.NoteStream(s.progress.TsSpan());
+        const bool no_data = failure == Failure::NoData && !s.progress.ReceivedInput();
         if (!Recover(error, failure, no_data, budget, failed_at)) {
             std::lock_guard<std::mutex> lock(receive_->mutex);
             if (s.stop)

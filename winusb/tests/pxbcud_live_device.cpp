@@ -31,6 +31,24 @@ BOOL TestRegisterIsochBuffer(WINUSB_INTERFACE_HANDLE usb, UCHAR pipe, PUCHAR dat
     return result;
 }
 
+BOOL TestUnregisterIsochBuffer(WINUSB_ISOCH_BUFFER_HANDLE handle)
+{
+    const BOOL result = WinUsb_UnregisterIsochBuffer(handle);
+    const DWORD error = result ? ERROR_SUCCESS : GetLastError();
+    isoch_buffers.erase(handle);
+    for (auto entry = isoch_submitted.begin(); entry != isoch_submitted.end();) {
+        if (entry->second.buffer != handle) {
+            ++entry;
+            continue;
+        }
+        const auto slot = std::find(isoch_operations.begin(), isoch_operations.end(), entry->first);
+        if (slot != isoch_operations.end()) *slot = nullptr;
+        entry = isoch_submitted.erase(entry);
+    }
+    if (!result) SetLastError(error);
+    return result;
+}
+
 // 復旧直後に信号が悪く PAT の CRC が通らない状態を、PID 0 の TEI で模擬する。
 // PlainFramer と同じく、正常な isoch パケットの中身を連結した列でヘッダーを探す。
 void DamagePat(const Submitted &submitted)
@@ -125,6 +143,7 @@ void BlankPxBcudData(unsigned milliseconds)
 // この翻訳単位は実機試験ツールだけが使用し、配布用ホストは元の
 // device.cpp を直接ビルドする。通常モードでは API の結果をそのまま返す。
 #define WinUsb_RegisterIsochBuffer TestRegisterIsochBuffer
+#define WinUsb_UnregisterIsochBuffer TestUnregisterIsochBuffer
 #define WinUsb_ReadIsochPipeAsap TestReadIsochPipeAsap
 #define WinUsb_GetOverlappedResult TestGetOverlappedResult
 #include "../src/DriverHost_PX4/pxbcud/device.cpp"

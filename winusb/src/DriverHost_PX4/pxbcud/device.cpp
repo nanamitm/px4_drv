@@ -4,6 +4,7 @@
 #include "plain_framer.hpp"
 #include "pat_gate.hpp"
 #include "recovery_budget.hpp"
+#include "winusb_io.hpp"
 #include "../stream_overflow.hpp"
 #include "msg.h"
 #include <chrono>
@@ -26,10 +27,49 @@ using Clock=std::chrono::steady_clock;
 constexpr unsigned PXBCUD_DEFAULT_REQUESTS=10;
 constexpr unsigned PXBCUD_MIN_REQUESTS=2;
 constexpr unsigned PXBCUD_MAX_REQUESTS=32;
+struct ControlRequest {
+    ControlRequest(const std::shared_ptr<WinUsbHandles> &handles, std::size_t size)
+        : handles(handles), data(size) {}
+    void CancelAll() noexcept { io.Cancel(handles->file); }
+    bool WaitUntil(Clock::time_point deadline) noexcept { return io.WaitUntil(deadline); }
+    std::shared_ptr<WinUsbHandles> handles;
+    PendingIo io;
+    std::vector<std::uint8_t> data;
+};
+
+struct IsoRead {
+    ~IsoRead() { if (buffer) WinUsb_UnregisterIsochBuffer(buffer); }
+    PendingIo io;
+    std::vector<std::uint8_t> data = std::vector<std::uint8_t>(940 * 64);
+    std::array<USBD_ISO_PACKET_DESCRIPTOR, 64> packets{};
+    WINUSB_ISOCH_BUFFER_HANDLE buffer = nullptr;
+    std::size_t trace_slot = 0;
+};
+
+struct IsoReads {
+    IsoReads(const std::shared_ptr<WinUsbHandles> &handles, std::size_t count)
+        : handles(handles), reads(count) {}
+    void CancelAll() noexcept
+    {
+        for (auto &read : reads)
+            read.io.Cancel(handles->file);
+    }
+    bool WaitUntil(Clock::time_point deadline) noexcept
+    {
+        return std::all_of(reads.begin(), reads.end(), [&](auto &read) { return read.io.WaitUntil(deadline); });
+    }
+    std::shared_ptr<WinUsbHandles> handles;
+    std::vector<IsoRead> reads;
+};
+
+struct IsoReadsDeleter {
+    void operator()(IsoReads *batch) const noexcept { CancelUsbRequests(std::unique_ptr<IsoReads>(batch)); }
+};
+
 class UsbIo final : public Io {
 public:
-    UsbIo(HANDLE file, WINUSB_INTERFACE_HANDLE usb, HANDLE removed)
-        : file_(file),usb_(usb),removed_(removed) {}
+    UsbIo(const std::shared_ptr<WinUsbHandles> &handles, HANDLE removed)
+        : handles_(handles), removed_(removed) {}
     void Begin(unsigned milliseconds) { deadline_=Clock::now()+std::chrono::milliseconds(milliseconds); }
     int Wait(unsigned milliseconds) override
     {
@@ -46,52 +86,67 @@ public:
         if (WaitForSingleObject(removed_,0)==WAIT_OBJECT_0) return -ECANCELED;
         const auto remaining=std::chrono::duration_cast<std::chrono::milliseconds>(deadline_-Clock::now()).count();
         if (remaining<=0) return -ETIMEDOUT;
+        if (!handles_->Ready()) return -EIO;
+        std::unique_ptr<ControlRequest> transfer;
+        try {
+            transfer = std::make_unique<ControlRequest>(handles_, size);
+        } catch (const std::bad_alloc &) {
+            return -ENOMEM;
+        }
+        auto &operation = transfer->io.operation;
+        operation.hEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+        if (!operation.hEvent) return -ENOMEM;
+        if (!input)
+            std::copy_n(data, size, transfer->data.begin());
         WINUSB_SETUP_PACKET setup{};
         setup.RequestType=input?0xc0:0x40; setup.Request=request;
         setup.Index=index; setup.Length=static_cast<USHORT>(size);
-        OVERLAPPED operation{};
-        operation.hEvent=CreateEventW(nullptr,TRUE,FALSE,nullptr);
-        if (!operation.hEvent) return -ENOMEM;
         ULONG received=0;
-        BOOL ok=WinUsb_ControlTransfer(usb_,setup,data,static_cast<ULONG>(size),nullptr,&operation);
+        BOOL ok=WinUsb_ControlTransfer(handles_->usb,setup,transfer->data.data(),static_cast<ULONG>(size),
+                                       nullptr,&operation);
         DWORD error=ok?ERROR_SUCCESS:GetLastError();
-        if (ok || error==ERROR_IO_PENDING) {
+        transfer->io.pending = !ok && error == ERROR_IO_PENDING;
+        if (ok || transfer->io.pending) {
             HANDLE events[]={removed_,operation.hEvent};
-            DWORD result=ok?WAIT_OBJECT_0+1:WaitForMultipleObjects(2,events,FALSE,
+            const DWORD result=ok?WAIT_OBJECT_0+1:WaitForMultipleObjects(2,events,FALSE,
                 static_cast<DWORD>((std::min)(remaining,1000LL)));
             if (result!=WAIT_OBJECT_0+1) {
-                // 取消後も OVERLAPPED と呼び出し側バッファの寿命を完了まで保つ。
-                CancelIoEx(file_,&operation);
-                WinUsb_GetOverlappedResult(usb_,&operation,&received,TRUE);
                 error=result==WAIT_OBJECT_0?ERROR_OPERATION_ABORTED:
                     result==WAIT_TIMEOUT?ERROR_TIMEOUT:ERROR_GEN_FAILURE;
                 ok=FALSE;
             } else {
-                ok=WinUsb_GetOverlappedResult(usb_,&operation,&received,FALSE);
+                ok=WinUsb_GetOverlappedResult(handles_->usb,&operation,&received,FALSE);
                 error=ok?ERROR_SUCCESS:GetLastError();
+                if (ok) transfer->io.pending = false;
+                else transfer->io.WaitUntil(Clock::now());
             }
         }
-        CloseHandle(operation.hEvent);
         if (!ok) {
+            if (transfer->io.pending)
+                CancelUsbRequests(std::move(transfer));
             msg_err("PX-BCUD: USB control failed input=%d request=0x%02x index=0x%04x length=%zu win32=%lu\n",
                     input,request,index,size,error);
             if (error==ERROR_OPERATION_ABORTED || error==ERROR_DEVICE_NOT_CONNECTED) return -ECANCELED;
             if (error==ERROR_TIMEOUT || error==ERROR_SEM_TIMEOUT) return -ETIMEDOUT;
             return -EIO;
         }
+        if (received > size) return -EIO;
+        if (input)
+            std::copy_n(transfer->data.begin(), received, data);
         return static_cast<int>(received);
     }
 private:
-    HANDLE file_; WINUSB_INTERFACE_HANDLE usb_; HANDLE removed_;
+    std::shared_ptr<WinUsbHandles> handles_;
+    HANDLE removed_;
     Clock::time_point deadline_{};
 };
 }
 
 class Receiver final : public ReceiverBase {
 public:
-    Receiver(HANDLE file,WINUSB_INTERFACE_HANDLE usb,HANDLE removed,bool auto_recovery,std::size_t requests)
+    Receiver(std::shared_ptr<WinUsbHandles> handles, HANDLE removed, bool auto_recovery, std::size_t requests)
         : ReceiverBase(RECEIVER_SAT_SET_STREAM_ID_AFTER_TUNE),
-          file_(file),usb_(usb),removed_(removed),io_(file,usb,removed),frontend_(io_),
+          handles_(std::move(handles)), usb_(handles_->usb), removed_(removed), io_(handles_,removed), frontend_(io_),
           auto_recovery_(auto_recovery),requests_(requests) {}
     ~Receiver() override
     {
@@ -107,6 +162,7 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         if (open_) return -EBUSY;
         if (WaitForSingleObject(removed_,0)==WAIT_OBJECT_0) return -ECANCELED;
+        if (!handles_->Ready()) return -EIO;
         io_.Begin(8000);
         const int ret=frontend_.Initialize();
         if (ret) {
@@ -213,6 +269,7 @@ private:
         // BonDriver は Open で capture を要求し、その後に初回選局する。
         // 配信接続は準備するが、未選局中の USB 受信とタイムアウトは開始しない。
         if (!frontend_.SelectedStream()) return 0;
+        if (!handles_->Ready()) return -EIO;
         // 実測 PX-BCUD rev0205 は alt1 / EP84 / 940byte / interval1 の isoch。
         // 記述子を照合してから帯域を予約し、停止後は alt0 に戻す。
         USB_INTERFACE_DESCRIPTOR descriptor{};
@@ -237,7 +294,7 @@ private:
         if (ret) {
             if (initialize_buffer) stream_buf_->Stop();
             io_.Begin(1000); frontend_.Capture(false);
-            WinUsb_SetCurrentAlternateSetting(usb_,0);
+            if (handles_->Ready()) WinUsb_SetCurrentAlternateSetting(usb_,0);
             return ret;
         }
         try { worker_=std::thread([this]{Run();}); }
@@ -245,7 +302,7 @@ private:
             stop_=true;
             if (initialize_buffer) stream_buf_->Stop();
             io_.Begin(1000); frontend_.Capture(false);
-            WinUsb_SetCurrentAlternateSetting(usb_,0);
+            if (handles_->Ready()) WinUsb_SetCurrentAlternateSetting(usb_,0);
             return -ENOMEM;
         }
         return 0;
@@ -253,18 +310,18 @@ private:
     int Stop(bool stop_buffer=true)
     {
         stop_=true;
-        if (worker_.joinable()) {
-            // 未完了 read の投入との競合も worker の短い待機周期で回収する。
-            WinUsb_AbortPipe(usb_,0x84);
+        // worker が短い待機周期で停止を確認し、全要求を回収する。
+        if (worker_.joinable())
             worker_.join();
-        }
         // 選局中の停止は USB に限定する。Stop() で配信側を起こすと読取接続が
         // 終了し、再開後は誰も消費しないリングが満杯になる。
         if (stop_buffer) {stream_buf_->Stop();capture_requested_=false;}
+        if (!handles_->Ready()) return -EIO;
         io_.Begin(1000);
         if (open_) Snapshot();
         const int ret=frontend_.Capture(false);
         if (ret) msg_err("PX-BCUD: capture stop failed ret=%d\n",ret);
+        if (!handles_->Ready()) return ret ? ret : -EIO;
         if (!WinUsb_SetCurrentAlternateSetting(usb_,0)) {
             const DWORD error=GetLastError();
             msg_err("PX-BCUD: stop alternate setting failed win32=%lu capture_ret=%d\n",error,ret);
@@ -292,6 +349,11 @@ private:
             gate.Restart();
             try { RunStream(gate,have_outage?&outage:nullptr); }
             catch (...) { failure_time_=Clock::now();worker_error_=ERROR_NOT_ENOUGH_MEMORY; }
+            if (!handles_->Ready()) {
+                worker_error_ = ERROR_TIMEOUT;
+                msg_err("PX-BCUD: isoch cancellation did not complete before the deadline\n");
+                break;
+            }
             const DWORD error=worker_error_.load();
             if (!error || stop_ || WaitForSingleObject(removed_,0)==WAIT_OBJECT_0) break;
             // 復旧が実って長く受信できていれば、それまでの連続失敗を忘れる。
@@ -331,9 +393,10 @@ private:
 
     int StopIsochronousCapture()
     {
+        if (!handles_->Ready()) return -EIO;
         io_.Begin(1000);
         const int capture=frontend_.Capture(false);
-        const bool idle=WinUsb_SetCurrentAlternateSetting(usb_,0)!=FALSE;
+        const bool idle=handles_->Ready() && WinUsb_SetCurrentAlternateSetting(usb_,0)!=FALSE;
         return capture?capture:idle?0:-EIO;
     }
 
@@ -398,34 +461,13 @@ private:
     {
         // Linux em28xx と同じ 5 URB x 64 microframe。WinUSB はフレーム境界の
         // 倍数を要求するため、interval1 の 8 microframe ごとに区切る。
-        struct Read {
-            HANDLE file=nullptr;
-            WINUSB_INTERFACE_HANDLE usb=nullptr;
-            OVERLAPPED operation{};
-            std::vector<std::uint8_t> data=std::vector<std::uint8_t>(940*64);
-            std::array<USBD_ISO_PACKET_DESCRIPTOR,64> packets{};
-            WINUSB_ISOCH_BUFFER_HANDLE buffer=nullptr;
-            bool pending=false;
-            std::size_t trace_slot=0;
-            ~Read() {
-                // Feed のメモリー確保が例外になっても未完了 USB I/O を回収する。
-                if (pending) {
-                    CancelIoEx(file,&operation);
-                    ULONG ignored=0;
-                    WinUsb_GetOverlappedResult(usb,&operation,&ignored,TRUE);
-                }
-                if (buffer) WinUsb_UnregisterIsochBuffer(buffer);
-                if (operation.hEvent) CloseHandle(operation.hEvent);
-            }
-        };
         // 要求数は実測で決める。5要求 (40ms) では、優先度引き上げと書込みまとめの後も
         // 完了待ちの最大が40msへ張り付いて isoch が枯れたため、設定で増やせるようにする。
         // Run が復旧の回数を数えるときに使う、この受信でデータが届いていた区間。
         received_any_=false;input_timeout_=false;received_span_=Clock::duration::zero();
-        Clock::time_point first_data{};
         const std::size_t request_count=requests_;
-        const auto reads_storage=std::make_unique<Read[]>(request_count);
-        Read *const reads=reads_storage.get();
+        std::unique_ptr<IsoReads, IsoReadsDeleter> reads_storage(new IsoReads(handles_, request_count));
+        IsoRead *const reads = reads_storage->reads.data();
         PlainFramer framer;
         std::uint64_t startup_discarded=0;
         std::uint64_t iso_errors=0, empty_packets=0;
@@ -434,6 +476,7 @@ private:
         bool reported_recovery=false;
         px4::StreamOverflowLog overflow("PX-BCUD");
         const auto started=Clock::now();
+        ReceptionProgress progress(started);
         msg_info("PX-BCUD: timing start pid=%lu tid=%lu priority=%d requests=%u microframes_per_request=64 nominal_queue_us=%u\n",
             GetCurrentProcessId(),GetCurrentThreadId(),GetThreadPriority(GetCurrentThread()),
             static_cast<unsigned>(request_count),static_cast<unsigned>(request_count*64*125));
@@ -457,7 +500,7 @@ private:
             failure_time_=Clock::now();
             worker_error_=error;
             unsigned pending=0;
-            for (std::size_t i=0;i<request_count;++i) if (reads[i].pending) ++pending;
+            for (std::size_t i=0;i<request_count;++i) if (reads[i].io.pending) ++pending;
             msg_err("PX-BCUD: USB stream failure stage=%s read=%u win32=%lu elapsed_ms=%llu submitted=%llu completed=%llu pending=%u continue_stream=%u\n",
                 stage,static_cast<unsigned>(index),error,
                 static_cast<unsigned long long>(std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now()-started).count()),
@@ -465,10 +508,10 @@ private:
             for (std::size_t i=0;i<request_count;++i) {
                 const auto &read=reads[i];
                 msg_err("PX-BCUD: USB request read=%u pending=%u internal=0x%llx internal_high=%llu offset=%lu offset_high=%lu event_set=%u\n",
-                    static_cast<unsigned>(i),read.pending?1u:0u,
-                    static_cast<unsigned long long>(read.operation.Internal),static_cast<unsigned long long>(read.operation.InternalHigh),
-                    read.operation.Offset,read.operation.OffsetHigh,
-                    read.operation.hEvent && WaitForSingleObject(read.operation.hEvent,0)==WAIT_OBJECT_0?1u:0u);
+                    static_cast<unsigned>(i),read.io.pending?1u:0u,
+                    static_cast<unsigned long long>(read.io.operation.Internal),static_cast<unsigned long long>(read.io.operation.InternalHigh),
+                    read.io.operation.Offset,read.io.operation.OffsetHigh,
+                    read.io.operation.hEvent && WaitForSingleObject(read.io.operation.hEvent,0)==WAIT_OBJECT_0?1u:0u);
             }
             const auto count=(std::min)(submitted,static_cast<std::uint64_t>(trace.size()));
             for (std::uint64_t sequence=submitted-count;sequence<submitted;++sequence) {
@@ -483,7 +526,7 @@ private:
             }
             // 未完了要求のパケット配列はUSB側が更新中のため参照しない。
             const auto &failed=reads[index];
-            if (failed.operation.hEvent && HasOverlappedIoCompleted(&failed.operation)) {
+            if (failed.io.operation.hEvent && HasOverlappedIoCompleted(&failed.io.operation)) {
                 unsigned errors=0,nonempty=0;
                 for (std::size_t i=0;i<failed.packets.size();++i) {
                     const auto &packet=failed.packets[i];
@@ -497,14 +540,17 @@ private:
                 msg_err("PX-BCUD: failed transfer descriptor_errors=%u nonempty_packets=%u\n",errors,nonempty);
             }
         };
-        auto submit=[&](Read &r) {
+        auto submit=[&](IsoRead &r) {
             const auto submit_begin=elapsed_us();
             const auto previous_write=trace[r.trace_slot].write_end_us;
-            const auto requeue_gap=previous_write && !r.pending?submit_begin-previous_write:0;
-            ResetEvent(r.operation.hEvent);
+            const auto requeue_gap=previous_write && !r.io.pending?submit_begin-previous_write:0;
+            const auto event = r.io.operation.hEvent;
+            if (!ResetEvent(event)) {fail("reset_event",&r-reads,GetLastError());return false;}
+            r.io.operation = {};
+            r.io.operation.hEvent = event;
             r.packets={};
             BOOL ok=WinUsb_ReadIsochPipeAsap(r.buffer,0,static_cast<ULONG>(r.data.size()),
-                first?FALSE:TRUE,static_cast<ULONG>(r.packets.size()),r.packets.data(),&r.operation);
+                first?FALSE:TRUE,static_cast<ULONG>(r.packets.size()),r.packets.data(),&r.io.operation);
             const DWORD error=ok?ERROR_SUCCESS:GetLastError();
             const auto submitted_at=elapsed_us();
             max_submit_us=(std::max)(max_submit_us,submitted_at-submit_begin);
@@ -516,59 +562,57 @@ private:
             entry.sequence=submitted+1;entry.index=static_cast<unsigned>(&r-reads);
             entry.submitted_us=submitted_at;entry.submit_begin_us=submit_begin;entry.requeue_gap_us=requeue_gap;
             ++submitted;
-            first=false;r.pending=true; return true;
+            first=false;r.io.pending=!ok; return true;
         };
         for (std::size_t i=0;i<request_count;++i) {
             auto &r=reads[i];
-            r.file=file_; r.usb=usb_;
-            r.operation.hEvent=CreateEventW(nullptr,TRUE,FALSE,nullptr);
-            if (!r.operation.hEvent) {fail("create_event",&r-reads,GetLastError());break;}
+            r.io.operation.hEvent=CreateEventW(nullptr,TRUE,FALSE,nullptr);
+            if (!r.io.operation.hEvent) {fail("create_event",&r-reads,GetLastError());break;}
             if (!WinUsb_RegisterIsochBuffer(usb_,0x84,r.data.data(),static_cast<ULONG>(r.data.size()),&r.buffer)) {
                 fail("register_buffer",&r-reads,GetLastError());break;
             }
             if (stop_ || !submit(r)) break;
         }
         std::size_t next=0;
-        auto last_data=Clock::now();
-        const auto fail_input_timeout=[&] {
-            input_timeout_=true;
-            fail("no_data",next,ERROR_TIMEOUT);
-        };
-        while (!stop_ && !worker_error_) {
-            if (Clock::now()-last_data>std::chrono::seconds(5)) {fail_input_timeout();break;}
+        while (!Stopping() && !worker_error_) {
+            const auto timeout = progress.Check(Clock::now(), gate.Ready());
+            if (timeout != ReceptionProgress::Timeout::None) {
+                input_timeout_ = timeout == ReceptionProgress::Timeout::NoInput;
+                fail(input_timeout_ ? "no_data" : "no_ts", next, ERROR_TIMEOUT);
+                break;
+            }
             if (!gate.Ready() && Clock::now()-started>std::chrono::seconds(5)) {
                 fail("pat_timeout",next,ERROR_INVALID_DATA);
                 msg_err("PX-BCUD: selected TSID PAT was not received tsid=0x%04x\n",frontend_.SelectedStream());
                 break;
             }
-            Read &r=reads[next];
+            IsoRead &r=reads[next];
             auto &entry=trace[r.trace_slot];
-            HANDLE events[]={removed_,r.operation.hEvent};
+            HANDLE events[]={removed_,r.io.operation.hEvent};
             if (!entry.wait_begin_us) entry.wait_begin_us=elapsed_us();
-            const DWORD wait=WaitForMultipleObjects(2,events,FALSE,50);
+            const DWORD wait=r.io.pending?WaitForMultipleObjects(2,events,FALSE,50):WAIT_OBJECT_0+1;
             const DWORD wait_error=wait==WAIT_FAILED?GetLastError():ERROR_GEN_FAILURE;
             entry.wake_us=elapsed_us();
             max_wait_us=(std::max)(max_wait_us,entry.wake_us-entry.wait_begin_us);
             if (wait==WAIT_OBJECT_0) {fail("device_removed",next,ERROR_DEVICE_NOT_CONNECTED);break;}
-            if (wait==WAIT_TIMEOUT) {
-                if (Clock::now()-last_data>std::chrono::seconds(5)) fail_input_timeout();
-                continue;
-            }
+            if (wait==WAIT_TIMEOUT) continue;
             if (wait!=WAIT_OBJECT_0+1) {fail("wait",next,wait_error);break;}
             ULONG size=0;
-            if (!WinUsb_GetOverlappedResult(usb_,&r.operation,&size,FALSE)) {
+            if (!WinUsb_GetOverlappedResult(usb_,&r.io.operation,&size,FALSE)) {
                 const DWORD error=GetLastError();
                 trace[r.trace_slot].completed_us=elapsed_us();
                 trace[r.trace_slot].error=error;
+                r.io.WaitUntil(Clock::now());
                 if (!stop_) fail("complete",next,error);
                 break;
             }
-            r.pending=false;
+            r.io.pending=false;
             trace[r.trace_slot].completed_us=elapsed_us();
             ++completed;
             ULONG64 frame_begin_cycles=0,frame_end_cycles=0,write_end_cycles=0;
             QueryThreadCycleTime(GetCurrentThread(),&frame_begin_cycles);
             output.clear();
+            bool input = false;
             for (const auto &packet:r.packets) {
                 if (packet.Status) {++iso_errors;framer.Gap();continue;}
                 if (!packet.Length) {++empty_packets;continue;}
@@ -577,10 +621,12 @@ private:
                         static_cast<unsigned>(&packet-r.packets.data()),packet.Status,packet.Offset,packet.Length,static_cast<unsigned>(r.data.size()));
                     fail("packet_descriptor",next,ERROR_INVALID_DATA);break;
                 }
-                last_data=Clock::now();
-                if (!received_any_) {received_any_=true;first_data=last_data;}
-                received_span_=last_data-first_data;
+                input = true;
                 framer.Feed(r.data.data()+packet.Offset,packet.Length,output);
+            }
+            if (input) {
+                progress.Input(Clock::now());
+                received_any_ = true;
             }
             entry.framing_end_us=elapsed_us();
             QueryThreadCycleTime(GetCurrentThread(),&frame_end_cycles);
@@ -599,6 +645,8 @@ private:
                     ++startup_discarded;begin+=188;
                 }
                 if (begin<output.size()) {
+                    progress.Ts(Clock::now());
+                    received_span_ = progress.TsSpan();
                     const std::size_t requested=output.size()-begin;
                     std::size_t written=requested;
                     // 満杯で書けなかった分は捨てて受信を続ける。書けた分は配信済みとして残る。
@@ -620,15 +668,8 @@ private:
             if (stop_ || !submit(r)) break;
             next=(next+1)%request_count;
         }
-        for (std::size_t i=0;i<request_count;++i) {
-            auto &r=reads[i];
-            if (r.pending) {
-                CancelIoEx(file_,&r.operation);
-                ULONG ignored=0;
-                WinUsb_GetOverlappedResult(usb_,&r.operation,&ignored,TRUE);
-                r.pending=false;
-            }
-        }
+        // 例外時も同じデリーターが取消を先に送り、全要求に共通の期限で回収する。
+        reads_storage.reset();
         msg_info("PX-BCUD: TS stopped packets=%llu tei=%llu discarded_bytes=%llu win32=%lu iso_errors=%llu empty_iso_packets=%llu startup_discarded_packets=%llu\n",
             static_cast<unsigned long long>(framer.packets),static_cast<unsigned long long>(framer.tei),
             static_cast<unsigned long long>(framer.discarded),worker_error_.load(),
@@ -639,7 +680,8 @@ private:
             static_cast<unsigned long long>(max_write_us),static_cast<unsigned long long>(max_submit_us),
             static_cast<unsigned long long>(max_requeue_gap_us));
     }
-    HANDLE file_; WINUSB_INTERFACE_HANDLE usb_; HANDLE removed_;
+    std::shared_ptr<WinUsbHandles> handles_;
+    WINUSB_INTERFACE_HANDLE usb_; HANDLE removed_;
     UsbIo io_; Frontend frontend_;
     const bool auto_recovery_;
     const std::size_t requests_;
@@ -683,7 +725,10 @@ int Device::Init()
         else
             requests=value;
     }
-    receiver_=std::make_unique<Receiver>(usb_dev_.dev,usb_dev_.winusb,removed_,auto_recovery_,requests);
+    auto handles = std::make_shared<WinUsbHandles>(usb_dev_.dev, usb_dev_.winusb);
+    usb_dev_.dev = INVALID_HANDLE_VALUE;
+    usb_dev_.winusb = nullptr;
+    receiver_ = std::make_unique<Receiver>(std::move(handles), removed_, auto_recovery_, requests);
     const auto &definition=device_def_.receivers[0];
     command::ReceiverInfo info{};
     wcscpy_s(info.device_name,device_def_.name.c_str()); info.device_guid=device_def_.guid;
