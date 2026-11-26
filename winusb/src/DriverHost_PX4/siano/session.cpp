@@ -127,6 +127,7 @@ int Session::Tune(System system,std::uint32_t frequency_khz)
     if (j83b && (!helper_ || frequency_khz<90000 || frequency_khz>775000)) return -EINVAL;
     if (port_.Removed()) return -ECANCELED;
     if (error_) return error_;
+    if (!j83b && !Frontend::IsdbtFrequencySupported(frequency_khz)) return -EINVAL;
     DisableOutput(); tuned_=false; locked_=false; cnr_=0;
     // 前のチャンネルの IQ の送出と helper を止めてから世代を切り替え、前の TS と復調状態を次へ持ち込まない
     int ret=StopIq();

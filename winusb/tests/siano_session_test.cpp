@@ -194,6 +194,11 @@ void Failures()
     Require(session.Tune(Session::System::J83b,138750)==-ENOENT && session.Error()==0 && port.mode==ModeIsdbt,
         "helper start failure keeps the open usable and the firmware unchanged");
     Require(session.Tune(Session::System::J83b,80000)==-EINVAL,"J.83B frequency range");
+    Require(session.Tune(Session::System::Isdbt,473143)==0,"initial ISDB-T tune");
+    const auto sent=port.sent_count;
+    Require(session.Tune(Session::System::Isdbt,467143)==-EINVAL && session.Error()==0 &&
+        session.Tuned() && port.sent_count==sent,"invalid ISDB-T frequency keeps the current tune");
+    Require(session.Tune(Session::System::Isdbt,479143)==0,"valid ISDB-T tune after invalid frequency");
     helper.start_error=0;
     port.send_error=-EIO;
     Require(session.Tune(Session::System::Isdbt,473143)==-EIO && session.Error()==-EIO && port.failed==-EIO,

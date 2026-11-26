@@ -38,6 +38,7 @@ public:
     // force は、ISDB-T で稼働中の機器にも firmware を読み込み直す (J.83B 用と通常の firmware の切り替え)。
     // isdbt が false (J.83B 用の firmware) のときは、起動後のモードが ISDB-T でなくても成功とする
     int Initialize(const std::vector<std::uint8_t>& firmware, bool force=false, bool isdbt=true);
+    static bool IsdbtFrequencySupported(std::uint32_t frequency_khz);
     int Tune(std::uint32_t frequency_khz);
     // J.83B 用の firmware で、中心周波数 (Hz) に選局して IQ の送出を始める。0 で送出を止める
     // stats を渡すと応答の内容を返す。停止の応答は、送出中のチップのバッファーの統計を含む (IqStats)
