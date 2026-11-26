@@ -863,6 +863,7 @@ int PxMltDevice::PxMltReceiver::SetFrequency()
 	std::unique_lock<std::mutex> lock(lock_);
 
 	current_system_ = px4::SystemType::UNSPECIFIED;
+	rf_level_logged_ = false;
 
 	// ISDB-C は、TSMF のヘッダーの有無を受信した TS から判断するため、選局のたびに TSMF の分離を通す
 	// J.83 Annex B は TSMF を使わないため、地デジと同じく分離を通さずにブリッジで null パケットを除く
@@ -1033,6 +1034,25 @@ int PxMltDevice::PxMltReceiver::CheckLock(bool &locked)
 		break;
 	}
 
+	// 受信ソフトウェアは入力レベルを読まないため、アンテナ側の問題と受信機の問題を記録から切り分けられるよう、選局ごとに最初のロックで1回だけ記録する
+	// 読み取りはチューナーへ10回ほどの I2C 転送を加えるため、記録を出さない設定 (既定) では読まない
+	// 衛星は入力レベルを dBm で求められないため記録しない
+	if (!ret && locked && !rf_level_logged_ &&
+	    (msg_get_mode() & (MSG_MODE_CONSOLE | MSG_MODE_DEBUGGER | MSG_MODE_LOG_FILE)) &&
+	    current_system_ != px4::SystemType::ISDB_S) {
+		std::int32_t level = 0;
+		int level_ret = ReadRfLevel(level);
+
+		rf_level_logged_ = true;
+
+		if (level_ret)
+			dev_err(&parent_.dev_, "px4::PxMltDevice::PxMltReceiver::CheckLock(%u): ReadRfLevel() failed. (freq: %u, ret: %d)\n",
+				static_cast<unsigned>(index_), params_.freq, level_ret);
+		else
+			dev_info(&parent_.dev_, "px4::PxMltDevice::PxMltReceiver::CheckLock(%u): RF level: %.2f dBm (freq: %u)\n",
+				 static_cast<unsigned>(index_), level / 1000.0, params_.freq);
+	}
+
 	return ret;
 }
 
@@ -1168,6 +1188,34 @@ int PxMltDevice::PxMltReceiver::SetCapture(bool capture)
 	return ret;
 }
 
+int PxMltDevice::PxMltReceiver::ReadRfLevel(std::int32_t &value)
+{
+	switch (current_system_) {
+	case px4::SystemType::ISDB_T:
+	case px4::SystemType::ISDB_C:
+	case px4::SystemType::J83B:
+		break;
+
+	// 衛星の入力レベルは Sony のコードでも dB の値で、dBm として扱えるか確認できないため返さない
+	case px4::SystemType::ISDB_S:
+		return -ENOSYS;
+
+	default:
+		return -EINVAL;
+	}
+
+	// 全受信機のチューナーは同じ I2C バスの同じアドレスにあり、ゲートを開けている間はほかの受信機のチューナーと区別できないため、
+	// 選局と同じチューナーのロックを持つ。取得順は選局と同じく受信機のロックの後
+	std::lock_guard<std::mutex> tuner_lock(*tuner_lock_);
+	s32 level = 0;
+	int ret = cxd2858er_read_rf_level(&cxd2858er_, &level);
+
+	if (!ret)
+		value = level;
+
+	return ret;
+}
+
 int PxMltDevice::PxMltReceiver::ReadStat(px4::command::StatType type, std::int32_t &value)
 {
 	if (!open_)
@@ -1180,8 +1228,7 @@ int PxMltDevice::PxMltReceiver::ReadStat(px4::command::StatType type, std::int32
 
 	switch (type) {
 	case px4::command::StatType::SIGNAL_STRENGTH:
-		// not implemented
-		ret = -ENOSYS;
+		ret = ReadRfLevel(value);
 		break;
 
 	case px4::command::StatType::CNR:
