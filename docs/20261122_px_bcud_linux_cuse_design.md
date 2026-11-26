@@ -139,6 +139,8 @@ Linux 版も受信の開始で記述子を照合し、一致しない場合は `
 1. 開始: `libusb_set_interface_alt_setting(handle, 0, 1)`、`Frontend::Capture(true)`、転送の発行
 2. 停止: すべての転送の取り消しと完了の回収、`Frontend::Capture(false)` (ブリッジを先に止めて出力ピンを戻す)、alternate setting 0
 
+転送が5秒以内に回収できない場合、バッファは遅延した完了通知まで保持し、USB の挿し直しまでその個体での再開を止めます。
+
 1 本の転送は WinUSB 版と同じ 64 マイクロフレーム (8 ms、60,160 バイト) とし、本数は WinUSB 版の既定と同じ 10 本 (80 ms 分) から始めます。  
 `libusb_alloc_transfer(64)` と `libusb_fill_iso_transfer` で作り、完了のコールバックの中で各パケットの `status` と `actual_length` を確かめて `PlainFramer` と `PatGate` へ渡し、同じ転送を出し直します。  
 コールバックは `main.cpp` の libusb のイベントのスレッドで動き、ほかの機種の Bulk IN の完了と同じスレッドを共有します。  

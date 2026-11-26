@@ -58,7 +58,7 @@ private:
     int Submit(bool restart);
     // 転送をすべて取り消して回収を待つ。回収できなかったら false。
     bool CancelAndWait();
-    void SetFailure(int error, Failure failure);
+    void SetFailureLocked(int error, Failure failure);
     void Run();
     // 自動復旧。再開できたら true。
     bool Recover(int error, Failure failure, bool waited_for_input, pxbcud::RecoveryBudget &budget,
@@ -77,18 +77,32 @@ private:
     // VideoNode の状態のロックの下で使う。
     bool opened_ = false;
 
-    // isochronous の転送 (StartStream から StopStream まで)
-    struct Stream {
-        std::vector<libusb_transfer *> transfers;
-        std::vector<std::uint8_t> buffer;
-        std::unique_ptr<PxBcudStream> ts;
+    struct ReceiveState {
+        explicit ReceiveState(PxBcudDevice *device) : owner(device) {}
         std::mutex mutex;
+        // 停止期限後は遅延した完了通知からデバイスへの参照を切る。
+        PxBcudDevice *owner;
+    };
+
+    struct Transfer {
+        ~Transfer() { libusb_free_transfer(usb); }
+        std::shared_ptr<ReceiveState> state;
+        std::vector<std::uint8_t> buffer;
+        libusb_transfer *usb = nullptr;
+        bool in_flight = false;
+    };
+
+    // 転送の再投入、キャンセル、失敗の記録は ReceiveState::mutex の下で行う。
+    struct Stream {
+        std::vector<std::unique_ptr<Transfer>> transfers;
+        std::unique_ptr<PxBcudStream> ts;
         std::condition_variable changed;
         int in_flight = 0;
         bool stop = false;
-        std::atomic_bool resubmit{false}, pat_ready{false}, received_any{false}, recovering{false};
-        std::atomic_int error{0};
-        std::atomic<Failure> failure{Failure::None};
+        bool resubmit = false;
+        std::atomic_bool pat_ready{false}, received_any{false}, recovering{false};
+        int error = 0;
+        Failure failure = Failure::None;
         // steady_clock の時刻 (ナノ秒)。完了の通知が書き、worker が読む。
         std::atomic<std::int64_t> started_ns{0}, first_data_ns{0}, last_data_ns{0};
         // 完了の通知だけが使う。
@@ -98,8 +112,9 @@ private:
         std::uint64_t recovery_count = 0;
         // worker の終わりの異常 (StopStream の戻り値)
         int terminal_error = 0;
-        // 回収できなかった転送がある。libusb が使い続ける可能性があるため、解放せずに残す。
-        bool leaked = false;
+        // 完了を確認できなかった機器の受信を、挿し直すまで止める。
+        std::atomic_bool unconfirmed{false};
     } stream_;
+    std::shared_ptr<ReceiveState> receive_ = std::make_shared<ReceiveState>(this);
 };
 }

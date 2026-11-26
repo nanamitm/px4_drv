@@ -146,7 +146,7 @@ PxBcudDevice::~PxBcudDevice()
 
 void PxBcudDevice::OnShutdown()
 {
-    if (!opened_ || !available_)
+    if (!opened_ || !available_ || stream_.unconfirmed)
         return;
     std::lock_guard<std::mutex> lock(control_);
     io_->Begin(2000);
@@ -157,6 +157,8 @@ void PxBcudDevice::OnShutdown()
 
 int PxBcudDevice::VideoOpen()
 {
+    if (stream_.unconfirmed)
+        return -EIO;
     std::lock_guard<std::mutex> lock(control_);
     // WinUSB 版の Receiver::Open と同じく、開くたびにブリッジ、復調器、チューナーの全レジスターを初期化する。
     io_->Begin(8000);
@@ -178,7 +180,7 @@ void PxBcudDevice::VideoClose()
     if (!opened_)
         return;
     opened_ = false;
-    if (!available_)
+    if (!available_ || stream_.unconfirmed)
         return;
     std::lock_guard<std::mutex> lock(control_);
     io_->Begin(2000);
@@ -241,6 +243,8 @@ int PxBcudDevice::SetChannel(std::uint32_t system, const ptx_freq &freq, bool st
 int PxBcudDevice::LockStatus(bool &locked)
 {
     std::lock_guard<std::mutex> lock(control_);
+    if (stream_.unconfirmed)
+        return -EIO;
     io_->Begin(1000);
     return frontend_->Locked(locked);
 }
@@ -250,6 +254,8 @@ int PxBcudDevice::ReadCn(std::uint32_t &raw)
     // TC90532 の衛星側の CN (0xbc〜0xbd) の生の値。dB への換算は、ほかの機種の ISDB-S と同じく利用者側で行う。
     std::uint16_t cn = 0;
     std::lock_guard<std::mutex> lock(control_);
+    if (stream_.unconfirmed)
+        return -EIO;
     io_->Begin(1000);
     const int rc = frontend_->ReadCn(cn);
     raw = cn;
@@ -299,33 +305,34 @@ int PxBcudDevice::StopCaptureLocked()
 
 int PxBcudDevice::StartStream(bool &fatal)
 {
-    (void)fatal;
     auto &s = stream_;
     if (!frontend_->SelectedStream())
         return -EINVAL;
-    if (s.leaked)
+    if (s.unconfirmed) {
+        fatal = true;
         return -EIO;
+    }
     if (const int rc = CheckEndpoint())
         return rc;
     try {
         s.ts = std::make_unique<PxBcudStream>(frontend_->SelectedStream());
-        s.buffer.assign(static_cast<std::size_t>(TransferCount) * PacketsPerTransfer * PxBcudStream::PacketSize, 0);
+        s.transfers.reserve(TransferCount);
         for (int i = 0; i < TransferCount; ++i) {
-            auto *transfer = libusb_alloc_transfer(PacketsPerTransfer);
-            if (!transfer)
+            auto transfer = std::make_unique<Transfer>();
+            transfer->state = receive_;
+            transfer->buffer.resize(PacketsPerTransfer * PxBcudStream::PacketSize);
+            transfer->usb = libusb_alloc_transfer(PacketsPerTransfer);
+            if (!transfer->usb)
                 throw std::bad_alloc();
-            libusb_fill_iso_transfer(transfer, handle_, 0x84,
-                                     s.buffer.data() +
-                                         static_cast<std::size_t>(i) * PacketsPerTransfer * PxBcudStream::PacketSize,
-                                     PacketsPerTransfer * static_cast<int>(PxBcudStream::PacketSize),
-                                     PacketsPerTransfer, IsoDone, this, 0);
-            libusb_set_iso_packet_lengths(transfer, PxBcudStream::PacketSize);
-            s.transfers.push_back(transfer);
+            libusb_fill_iso_transfer(transfer->usb, handle_, 0x84, transfer->buffer.data(),
+                                     static_cast<int>(transfer->buffer.size()), PacketsPerTransfer,
+                                     IsoDone, transfer.get(), 0);
+            libusb_set_iso_packet_lengths(transfer->usb, PxBcudStream::PacketSize);
+            s.transfers.push_back(std::move(transfer));
         }
     } catch (...) {
-        for (auto *transfer : s.transfers)
-            libusb_free_transfer(transfer);
         s.transfers.clear();
+        s.ts.reset();
         return -ENOMEM;
     }
     s.stop = false;
@@ -357,44 +364,49 @@ int PxBcudDevice::StartStream(bool &fatal)
         }
     }
     // VideoNode は StartStream の失敗で StopStream を呼ばないため、転送の回収と capture の停止をここで行う。
-    if (rc) {
-        bool ignored = false;
-        StopStream(ignored);
-    }
+    if (rc)
+        StopStream(fatal);
     return rc;
 }
 
 int PxBcudDevice::Submit(bool restart)
 {
     auto &s = stream_;
-    if (restart)
-        s.ts->Restart();
-    s.error = 0;
-    s.failure = Failure::None;
-    s.pat_ready = s.ts->Ready();
-    s.received_any = false;
-    s.previous_completion_ns = 0;
-    s.max_gap_us = 0;
-    const auto now = NowNs();
-    s.started_ns = now;
-    s.first_data_ns = 0;
-    s.last_data_ns = now;
-    s.resubmit = true;
-    for (auto *transfer : s.transfers) {
-        {
-            std::lock_guard<std::mutex> lock(s.mutex);
+    int rc = 0;
+    {
+        std::lock_guard<std::mutex> lock(receive_->mutex);
+        if (s.unconfirmed || s.in_flight)
+            return -EIO;
+        if (s.stop || !available_)
+            return -ECANCELED;
+        if (restart)
+            s.ts->Restart();
+        s.error = 0;
+        s.failure = Failure::None;
+        s.pat_ready = s.ts->Ready();
+        s.received_any = false;
+        s.previous_completion_ns = 0;
+        s.max_gap_us = 0;
+        const auto now = NowNs();
+        s.started_ns = now;
+        s.first_data_ns = 0;
+        s.last_data_ns = now;
+        s.resubmit = true;
+        for (auto &transfer : s.transfers) {
+            rc = libusb_submit_transfer(transfer->usb);
+            if (rc) {
+                s.resubmit = false;
+                break;
+            }
+            transfer->in_flight = true;
             ++s.in_flight;
         }
-        if (const int rc = libusb_submit_transfer(transfer)) {
-            {
-                std::lock_guard<std::mutex> lock(s.mutex);
-                --s.in_flight;
-            }
-            msg_err("%s: isoch submit failed libusb=%s\n", label_.c_str(), libusb_error_name(rc));
-            s.resubmit = false;
-            CancelAndWait();
-            return rc == LIBUSB_ERROR_NO_DEVICE ? -ECANCELED : -EIO;
-        }
+    }
+    if (rc) {
+        msg_err("%s: isoch submit failed libusb=%s\n", label_.c_str(), libusb_error_name(rc));
+        if (!CancelAndWait())
+            return -EIO;
+        return rc == LIBUSB_ERROR_NO_DEVICE ? -ECANCELED : -EIO;
     }
     msg_info("%s: timing start requests=%d microframes_per_request=%d nominal_queue_us=%d restart=%d\n",
              label_.c_str(), TransferCount, PacketsPerTransfer, TransferCount * PacketsPerTransfer * 125,
@@ -405,39 +417,54 @@ int PxBcudDevice::Submit(bool restart)
 bool PxBcudDevice::CancelAndWait()
 {
     auto &s = stream_;
-    s.resubmit = false;
-    for (auto *transfer : s.transfers)
-        libusb_cancel_transfer(transfer);
-    std::unique_lock<std::mutex> lock(s.mutex);
-    if (!s.changed.wait_for(lock, std::chrono::seconds(5), [&s] { return s.in_flight == 0; })) {
-        msg_err("%s: %d isoch transfers did not complete\n", label_.c_str(), s.in_flight);
-        s.leaked = true;
+    std::unique_lock<std::mutex> lock(receive_->mutex);
+    if (s.unconfirmed)
         return false;
-    }
-    return true;
+    // 再投入の判定と実行を、停止の判定とキャンセルの間に挟ませない。
+    s.resubmit = false;
+    for (auto &transfer : s.transfers)
+        if (transfer->in_flight)
+            libusb_cancel_transfer(transfer->usb);
+    if (s.changed.wait_for(lock, std::chrono::seconds(5), [&s] { return s.in_flight == 0; }))
+        return true;
+
+    msg_err("%s: %d isoch transfers did not complete\n", label_.c_str(), s.in_flight);
+    s.unconfirmed = true;
+    receive_->owner = nullptr;
+    // libusb が使用中の要求は、遅延した完了通知までバッファも保持する。
+    for (auto &transfer : s.transfers)
+        if (transfer->in_flight)
+            transfer.release();
+    s.transfers.clear();
+    return false;
 }
 
-void PxBcudDevice::SetFailure(int error, Failure failure)
+void PxBcudDevice::SetFailureLocked(int error, Failure failure)
 {
     auto &s = stream_;
-    int expected = 0;
-    if (!s.error.compare_exchange_strong(expected, error))
+    if (s.error)
         return;
+    s.error = error;
     s.failure = failure;
     s.resubmit = false;
-    {
-        std::lock_guard<std::mutex> lock(s.mutex);
-    }
     s.changed.notify_all();
 }
 
 void LIBUSB_CALL PxBcudDevice::IsoDone(libusb_transfer *transfer)
 {
-    auto &self = *static_cast<PxBcudDevice *>(transfer->user_data);
+    auto &entry = *static_cast<Transfer *>(transfer->user_data);
+    const auto state = entry.state;
+    std::lock_guard<std::mutex> lock(state->mutex);
+    if (!state->owner) {
+        delete &entry;
+        return;
+    }
+    auto &self = *state->owner;
     auto &s = self.stream_;
+    const auto status = s.resubmit ? transfer->status : LIBUSB_TRANSFER_CANCELLED;
     bool no_data = false, injected = false;
 #ifdef PX4_CUSED_FAULT_INJECTION
-    if (self.fault_ && transfer->status == LIBUSB_TRANSFER_COMPLETED) {
+    if (self.fault_ && status == LIBUSB_TRANSFER_COMPLETED) {
         const auto now = NowNs();
         no_data = self.fault_->NoData(now);
         injected = !s.error && self.fault_->Error(now, s);
@@ -447,8 +474,8 @@ void LIBUSB_CALL PxBcudDevice::IsoDone(libusb_transfer *transfer)
     }
 #endif
     if (injected) {
-        self.SetFailure(-EIO, Failure::Complete);
-    } else if (transfer->status == LIBUSB_TRANSFER_COMPLETED) {
+        self.SetFailureLocked(-EIO, Failure::Complete);
+    } else if (status == LIBUSB_TRANSFER_COMPLETED) {
         const auto now = NowNs();
         if (s.previous_completion_ns)
             s.max_gap_us = std::max<std::uint64_t>(s.max_gap_us, (now - s.previous_completion_ns) / 1000);
@@ -470,7 +497,7 @@ void LIBUSB_CALL PxBcudDevice::IsoDone(libusb_transfer *transfer)
                 s.first_data_ns = now;
         }
         if (!valid) {
-            self.SetFailure(-EIO, Failure::PacketDescriptor);
+            self.SetFailureLocked(-EIO, Failure::PacketDescriptor);
         } else if (s.ts->Flush([&self](const std::uint8_t *packets, std::size_t size) {
                        self.video_.Push(packets, size);
                    })) {
@@ -479,23 +506,21 @@ void LIBUSB_CALL PxBcudDevice::IsoDone(libusb_transfer *transfer)
                          self.label_.c_str(), static_cast<unsigned long long>(s.ts->startup_discarded),
                          static_cast<unsigned long long>(s.recovery_count));
         }
-    } else if (transfer->status != LIBUSB_TRANSFER_CANCELLED) {
+    } else if (status != LIBUSB_TRANSFER_CANCELLED) {
         // 抜去では発行済みの転送がまとめて失敗するため、最初の 1 本だけを記録する。
         if (!s.error)
             msg_err("%s: isoch transfer status=%d\n", self.label_.c_str(), transfer->status);
-        self.SetFailure(transfer->status == LIBUSB_TRANSFER_NO_DEVICE ? -ENODEV : -EIO, Failure::Complete);
+        self.SetFailureLocked(status == LIBUSB_TRANSFER_NO_DEVICE ? -ENODEV : -EIO, Failure::Complete);
     }
-    if (s.resubmit && !s.error && transfer->status == LIBUSB_TRANSFER_COMPLETED) {
+    if (s.resubmit && status == LIBUSB_TRANSFER_COMPLETED) {
         const int rc = libusb_submit_transfer(transfer);
         if (!rc)
             return;
         msg_err("%s: isoch resubmit failed libusb=%s\n", self.label_.c_str(), libusb_error_name(rc));
-        self.SetFailure(rc == LIBUSB_ERROR_NO_DEVICE ? -ENODEV : -EIO, Failure::Submit);
+        self.SetFailureLocked(rc == LIBUSB_ERROR_NO_DEVICE ? -ENODEV : -EIO, Failure::Submit);
     }
-    {
-        std::lock_guard<std::mutex> lock(s.mutex);
-        --s.in_flight;
-    }
+    entry.in_flight = false;
+    --s.in_flight;
     s.changed.notify_all();
 }
 
@@ -506,7 +531,7 @@ void PxBcudDevice::LogStreamEnd(Failure failure)
              "empty_iso_packets=%llu startup_discarded_packets=%llu ring_overflow=%llu max_completion_gap_us=%llu\n",
              label_.c_str(), static_cast<unsigned long long>(s.ts->Packets()),
              static_cast<unsigned long long>(s.ts->Tei()), static_cast<unsigned long long>(s.ts->DiscardedBytes()),
-             s.error.load(), FailureName(static_cast<int>(failure)),
+             s.error, FailureName(static_cast<int>(failure)),
              static_cast<unsigned long long>(s.ts->iso_errors), static_cast<unsigned long long>(s.ts->empty_packets),
              static_cast<unsigned long long>(s.ts->startup_discarded),
              static_cast<unsigned long long>(video_.Overflow()), static_cast<unsigned long long>(s.max_gap_us));
@@ -517,33 +542,31 @@ void PxBcudDevice::Run()
     auto &s = stream_;
     pxbcud::RecoveryBudget budget;
     for (;;) {
+        int error;
+        Failure failure;
         {
-            std::unique_lock<std::mutex> lock(s.mutex);
+            std::unique_lock<std::mutex> lock(receive_->mutex);
             while (!s.stop && !s.error) {
                 const auto now = NowNs();
                 // 受信が 5 秒途切れた場合と、選んだ TSID の PAT が 5 秒届かない場合は WinUSB 版と同じく失敗にする。
                 if (std::chrono::nanoseconds(now - s.last_data_ns) > NoDataTimeout) {
-                    lock.unlock();
-                    SetFailure(-ETIMEDOUT, Failure::NoData);
-                    lock.lock();
+                    SetFailureLocked(-ETIMEDOUT, Failure::NoData);
                     break;
                 }
                 if (!s.pat_ready && std::chrono::nanoseconds(now - s.started_ns) > PatTimeout) {
-                    lock.unlock();
                     msg_err("%s: selected TSID PAT was not received tsid=0x%04x\n", label_.c_str(),
                             frontend_->SelectedStream());
-                    SetFailure(-EIO, Failure::PatTimeout);
-                    lock.lock();
+                    SetFailureLocked(-EIO, Failure::PatTimeout);
                     break;
                 }
                 s.changed.wait_for(lock, std::chrono::milliseconds(100));
             }
             if (s.stop)
                 break;
+            error = s.error;
+            failure = s.failure;
         }
         const auto failed_at = Clock::now();
-        const int error = s.error;
-        const Failure failure = s.failure;
         if (!CancelAndWait()) {
             s.terminal_error = -EIO;
             video_.Fail(-EIO);
@@ -568,16 +591,16 @@ void PxBcudDevice::Run()
                                          : Clock::duration::zero());
         const bool no_data = failure == Failure::NoData && !s.received_any;
         if (!Recover(error, failure, no_data, budget, failed_at)) {
-            std::lock_guard<std::mutex> lock(s.mutex);
+            std::lock_guard<std::mutex> lock(receive_->mutex);
             if (s.stop)
                 break;
-            s.terminal_error = error;
-            video_.Fail(error);
+            s.terminal_error = s.unconfirmed ? -EIO : error;
+            video_.Fail(s.terminal_error);
             return;
         }
     }
-    CancelAndWait();
-    LogStreamEnd(s.failure);
+    if (CancelAndWait())
+        LogStreamEnd(s.failure);
 }
 
 bool PxBcudDevice::Recover(int error, Failure failure, bool waited_for_input, pxbcud::RecoveryBudget &budget,
@@ -593,7 +616,7 @@ bool PxBcudDevice::Recover(int error, Failure failure, bool waited_for_input, px
             return false;
         }
         {
-            std::unique_lock<std::mutex> lock(s.mutex);
+            std::unique_lock<std::mutex> lock(receive_->mutex);
             if (s.changed.wait_for(lock, *delay, [&s] { return s.stop; }) || !available_)
                 return false;
         }
@@ -626,6 +649,8 @@ bool PxBcudDevice::Recover(int error, Failure failure, bool waited_for_input, px
                 return true;
             }
             s.recovering = false;
+            if (s.unconfirmed)
+                return false;
             msg_err("%s: auto recovery restart failed result=%d original_error=%d count=%llu\n", label_.c_str(), rc,
                     error, static_cast<unsigned long long>(s.recovery_count));
             // 途中で失敗しても、停止と帯域の解放を両方確かめられれば再試行できる。
@@ -645,29 +670,27 @@ int PxBcudDevice::StopStream(bool &fatal)
 {
     auto &s = stream_;
     {
-        std::lock_guard<std::mutex> lock(s.mutex);
+        std::lock_guard<std::mutex> lock(receive_->mutex);
         s.stop = true;
     }
     s.changed.notify_all();
     if (s.worker.joinable())
         s.worker.join();
     // worker を起動する前の失敗では、ここで転送を回収する。
-    if (!s.leaked)
-        CancelAndWait();
-    if (!s.leaked) {
-        for (auto *transfer : s.transfers)
-            libusb_free_transfer(transfer);
-        s.transfers.clear();
-    } else {
+    if (!CancelAndWait()) {
         fatal = true;
+        return -EIO;
     }
+    s.transfers.clear();
+    s.ts.reset();
     if (available_) {
         std::lock_guard<std::mutex> lock(control_);
         if (const int rc = StopCaptureLocked()) {
             msg_err("%s: capture stop failed result=%d\n", label_.c_str(), rc);
             fatal = true;
+            return rc;
         }
     }
-    return s.terminal_error;
+    return !available_ ? -EIO : s.terminal_error;
 }
 }
