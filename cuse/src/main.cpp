@@ -17,6 +17,7 @@
 #include <libusb.h>
 #include <algorithm>
 #include <cerrno>
+#include <chrono>
 #include <condition_variable>
 #include <csignal>
 #include <cstdio>
@@ -98,21 +99,43 @@ public:
             std::function<void()> work;
             {
                 std::unique_lock<std::mutex> lock(mutex_);
-                changed_.wait(lock, [this] { return exit_ || !queue_.empty(); });
+                const auto ready = [this] { return exit_ || !queue_.empty(); };
+                if (closing_.empty())
+                    changed_.wait(lock, ready);
+                else
+                    changed_.wait_for(lock, std::chrono::milliseconds(100), ready);
                 if (exit_)
                     break;
-                work = std::move(queue_.front());
-                queue_.pop_front();
+                if (!queue_.empty()) {
+                    work = std::move(queue_.front());
+                    queue_.pop_front();
+                }
             }
-            work();
+            if (work)
+                work();
+            CloseCompletedUsb();
         }
         for (auto &device : devices_) {
             device->Shutdown();
             device->StopSessions();
-            Close(*device);
+            Close(device);
         }
         devices_.clear();
         WriteReaderMap();
+    }
+
+    bool CloseCompletedUsb()
+    {
+        auto device = closing_.begin();
+        while (device != closing_.end()) {
+            if ((*device)->UsbTransfersPending()) {
+                ++device;
+            } else {
+                CloseUsb(**device);
+                device = closing_.erase(device);
+            }
+        }
+        return closing_.empty();
     }
 
     void Arrived(libusb_device *usb, const Model &model)
@@ -158,12 +181,12 @@ public:
         device->kernel_driver_detached = detached;
         if (const int rc = device->Init()) {
             msg_err("%s: initialization result=%d\n", device->Label().c_str(), rc);
-            Close(*device);
+            Close(device);
             return;
         }
         if (const int rc = device->StartVideo(FreeIndex(device->VideoPrefix()))) {
             msg_err("%s: video device not started result=%d\n", device->Label().c_str(), rc);
-            Close(*device);
+            Close(device);
             return;
         }
         devices_.push_back(device);
@@ -196,7 +219,7 @@ public:
         const std::string card_id = device->HasCard() ? device->CardId() : std::string();
         device->StopSessions();
         devices_.erase(std::find(devices_.begin(), devices_.end(), device));
-        Close(*device);
+        Close(device);
         if (!card_id.empty())
             CardReleased(card_id);
         WriteReaderMap();
@@ -212,7 +235,15 @@ private:
     }
 
     // セッションと Bulk IN の転送をすべて止めた後に呼ぶ。以降、device は USB の操作を行わない。
-    static void Close(Device &device)
+    void Close(const std::shared_ptr<Device> &device)
+    {
+        if (device->UsbTransfersPending())
+            closing_.push_back(device);
+        else
+            CloseUsb(*device);
+    }
+
+    static void CloseUsb(Device &device)
     {
         libusb_release_interface(device.Handle(), 0);
         // 外したカーネルのドライバーを戻し、デーモンを止めた後は DVB などのほかの使い方ができる状態にする。
@@ -289,7 +320,7 @@ private:
     std::condition_variable changed_;
     std::deque<std::function<void()>> queue_;
     bool exit_ = false;
-    std::vector<std::shared_ptr<Device>> devices_;
+    std::vector<std::shared_ptr<Device>> devices_, closing_;
 };
 
 struct HotplugContext {
@@ -389,7 +420,10 @@ int main()
     // シグナル以外の理由で Run() を抜けた場合も、sigwait のスレッドを回収できるようにする。
     pthread_kill(signals.native_handle(), SIGTERM);
     signals.join();
-    libusb_exit(usb);
+    if (manager.CloseCompletedUsb())
+        libusb_exit(usb);
+    else
+        msg_warn("USB cancellation is still pending; leaving the handles to process exit\n");
     msg_info("px4-cused stopped\n");
     return 0;
 }

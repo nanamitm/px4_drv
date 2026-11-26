@@ -58,6 +58,12 @@ Dt295Device::~Dt295Device()
     StopSessions();
 }
 
+bool Dt295Device::UsbTransfersPending() const
+{
+    std::lock_guard<std::mutex> lock(receive_->mutex);
+    return receive_->deferred != 0;
+}
+
 int Dt295Device::InitModel()
 {
     if (const int rc = source_.LoadEmbedded())
@@ -75,8 +81,7 @@ void Dt295Device::OnRemove()
 
 void Dt295Device::OnShutdown()
 {
-    if (initialized_ && available_)
-        RestoreLocked();
+    VideoClose();
 }
 
 int Dt295Device::VideoOpen()
@@ -88,8 +93,10 @@ int Dt295Device::VideoOpen()
 void Dt295Device::VideoClose()
 {
     // WinUSB 版の受信機の Close と同じく、閉じるたびに機器を起動前の状態へ戻す。
-    if (initialized_ && available_)
+    if (initialized_ && available_ && !restore_failed_) {
+        auto command = channel_.Lock();
         RestoreLocked();
+    }
     initialized_ = false;
 }
 
@@ -109,6 +116,9 @@ int Dt295Device::EnsureInitialized()
     transport_.ReportTiming("initialize");
     if (rc) {
         msg_err("%s: initialize failed result=%d libusb=%lu\n", label_.c_str(), rc, transport_.LastError());
+        // Start が途中まで書き込んだ場合も、カード処理を再開する前に前像を戻す。
+        if (available_)
+            RestoreLocked();
         return rc;
     }
     initialized_ = true;
@@ -117,14 +127,14 @@ int Dt295Device::EnsureInitialized()
 
 void Dt295Device::RestoreLocked()
 {
-    // カードの操作と転送が混ざらないよう、復元も制御ロックの下で行う。
-    auto command = channel_.Lock();
     transport_.BeginRestore(120000);
     const int rc = source_.Close();
     transport_.ReportTiming("source-close");
     restore_failed_ = rc != 0;
-    if (rc)
+    if (rc) {
+        transport_.Block();
         msg_err("%s: restore failed result=%d\n", label_.c_str(), rc);
+    }
     initialized_ = false;
 }
 
@@ -176,80 +186,102 @@ int Dt295Device::ReadCn(std::uint32_t &raw)
     return channel_.ReadCn(satellite, raw);
 }
 
-void LIBUSB_CALL Dt295Device::BulkDone(libusb_transfer *transfer)
+void LIBUSB_CALL Dt295Device::BulkDone(libusb_transfer *usb)
 {
-    auto &self = *static_cast<Dt295Device *>(transfer->user_data);
-    auto &s = self.stream_;
-    if (transfer->status == LIBUSB_TRANSFER_COMPLETED) {
-        const auto now = Clock::now();
-        if (s.previous_read != Clock::time_point{})
-            s.max_read_gap_us = std::max(s.max_read_gap_us, Micros(now - s.previous_read));
-        s.previous_read = now;
-        if (s.deliver && transfer->actual_length) {
-            const int rc = s.delivery->Deliver(self.source_, transfer->buffer,
-                                               static_cast<std::size_t>(transfer->actual_length),
-                                               [&self](const std::uint8_t *packets, std::size_t size) {
-                                                   self.video_.Push(packets, size);
-                                               });
-            if (rc)
-                s.error = rc;
-        }
-    } else if (transfer->status != LIBUSB_TRANSFER_CANCELLED) {
-        // 切断では投入済みの 64 本がまとめて失敗するため、最初の 1 本だけを記録する。
-        int expected = 0;
-        const int error = transfer->status == LIBUSB_TRANSFER_NO_DEVICE ? -ENODEV : -EIO;
-        if (s.error.compare_exchange_strong(expected, error))
-            msg_err("%s: bulk status=%d\n", self.label_.c_str(), transfer->status);
-    }
-    if (s.running && !s.error && transfer->status == LIBUSB_TRANSFER_COMPLETED && !libusb_submit_transfer(transfer))
+    auto &transfer = *static_cast<Transfer *>(usb->user_data);
+    const auto state = transfer.state;
+    std::lock_guard<std::mutex> lock(state->mutex);
+    if (!state->owner) {
+        delete &transfer;
+        --state->deferred;
         return;
-    bool idle = false;
-    {
-        std::lock_guard<std::mutex> lock(s.mutex);
-        idle = --s.in_flight == 0;
     }
-    if (idle)
-        s.idle.notify_all();
-    // Bulk IN の異常は SERVICE の停止を待たずに利用者の read へ伝える。
-    if (s.error)
-        self.video_.Fail(s.error);
+
+    auto &self = *state->owner;
+    auto &s = self.stream_;
+    if (s.running && !s.error) {
+        int error = 0;
+        if (usb->status == LIBUSB_TRANSFER_COMPLETED) {
+            const auto now = Clock::now();
+            if (s.previous_read != Clock::time_point{})
+                s.max_read_gap_us = std::max(s.max_read_gap_us, Micros(now - s.previous_read));
+            s.previous_read = now;
+            if (s.deliver && usb->actual_length) {
+                error = s.delivery->Deliver(self.source_, usb->buffer, static_cast<std::size_t>(usb->actual_length),
+                                            [&self](const std::uint8_t *packets, std::size_t size) {
+                                                self.video_.Push(packets, size);
+                                            });
+            }
+            if (!error) {
+                const int rc = libusb_submit_transfer(usb);
+                if (!rc)
+                    return;
+                error = rc == LIBUSB_ERROR_NO_DEVICE ? -ENODEV : -EIO;
+                msg_err("%s: bulk resubmit failed (%s)\n", self.label_.c_str(), libusb_error_name(rc));
+            }
+        } else if (usb->status != LIBUSB_TRANSFER_CANCELLED) {
+            error = usb->status == LIBUSB_TRANSFER_NO_DEVICE ? -ENODEV : -EIO;
+            msg_err("%s: bulk status=%d\n", self.label_.c_str(), usb->status);
+        }
+        int expected = 0;
+        if (error && s.error.compare_exchange_strong(expected, error))
+            self.video_.Fail(error);
+    }
+    transfer.pending = false;
+    if (--s.in_flight == 0)
+        state->idle.notify_all();
 }
 
 int Dt295Device::StartStream(bool &fatal)
 {
     auto &s = stream_;
+    if (restore_failed_) {
+        fatal = true;
+        return -EIO;
+    }
     try {
         s.delivery = std::make_unique<dt295::TsDelivery>();
-        s.buffers.assign(BulkCount, std::vector<std::uint8_t>(BulkSize));
+        s.transfers.reserve(BulkCount);
+        for (std::size_t i = 0; i < BulkCount; ++i) {
+            auto transfer = std::make_unique<Transfer>();
+            transfer->state = receive_;
+            transfer->buffer.resize(BulkSize);
+            transfer->usb = libusb_alloc_transfer(0);
+            if (!transfer->usb)
+                throw std::bad_alloc();
+            libusb_fill_bulk_transfer(transfer->usb, handle_, 0x81, transfer->buffer.data(),
+                                      static_cast<int>(transfer->buffer.size()), BulkDone, transfer.get(), 0);
+            s.transfers.push_back(std::move(transfer));
+        }
     } catch (...) {
+        s.transfers.clear();
+        s.delivery.reset();
         return -ENOMEM;
     }
     s.error = 0;
     s.stop = false;
     s.previous_read = Clock::time_point{};
     s.max_read_gap_us = 0;
-    s.running = true;
-    for (auto &buffer : s.buffers) {
-        auto *transfer = libusb_alloc_transfer(0);
-        if (!transfer) {
-            StopTransfers(fatal);
-            return -ENOMEM;
-        }
-        libusb_fill_bulk_transfer(transfer, handle_, 0x81, buffer.data(), static_cast<int>(buffer.size()), BulkDone,
-                                  this, 0);
-        s.transfers.push_back(transfer);
-        {
-            std::lock_guard<std::mutex> lock(s.mutex);
+    int submit_error = 0;
+    {
+        std::lock_guard<std::mutex> lock(receive_->mutex);
+        s.running = true;
+        for (auto &transfer : s.transfers) {
+            submit_error = libusb_submit_transfer(transfer->usb);
+            if (submit_error)
+                break;
+            transfer->pending = true;
             ++s.in_flight;
         }
-        if (libusb_submit_transfer(transfer)) {
-            {
-                std::lock_guard<std::mutex> lock(s.mutex);
-                --s.in_flight;
-            }
-            StopTransfers(fatal);
-            return -EIO;
-        }
+    }
+    if (submit_error) {
+        msg_err("%s: bulk submit failed (%s)\n", label_.c_str(), libusb_error_name(submit_error));
+        StopTransfers(fatal);
+        return submit_error == LIBUSB_ERROR_NO_DEVICE ? -ENODEV : -EIO;
+    }
+    if (const int error = s.error) {
+        StopTransfers(fatal);
+        return error;
     }
     int rc;
     {
@@ -263,7 +295,15 @@ int Dt295Device::StartStream(bool &fatal)
         return rc;
     }
     // input の初期化が終わる前の USB のデータは破棄し、フレーマーとの競合を避ける。
-    s.deliver = true;
+    {
+        std::lock_guard<std::mutex> lock(receive_->mutex);
+        s.deliver = true;
+        rc = s.error;
+    }
+    if (rc) {
+        StopTransfers(fatal);
+        return rc;
+    }
     try {
         s.service = std::thread([this] {
             auto &s = stream_;
@@ -314,26 +354,33 @@ int Dt295Device::StopTransfers(bool &fatal)
     s.stop = true;
     if (s.service.joinable())
         s.service.join();
-    s.running = false;
-    s.deliver = false;
-    for (auto *transfer : s.transfers)
-        libusb_cancel_transfer(transfer);
     {
-        std::unique_lock<std::mutex> lock(s.mutex);
-        if (!s.idle.wait_for(lock, std::chrono::seconds(5), [&s] { return s.in_flight == 0; }))
-            msg_err("%s: %d bulk transfers did not complete\n", label_.c_str(), s.in_flight);
+        // 再投入の判定・実行と、停止の判定・キャンセルを同じロックで行う。
+        std::lock_guard<std::mutex> lock(receive_->mutex);
+        s.running = s.deliver = false;
+        for (auto &transfer : s.transfers)
+            if (transfer->pending)
+                libusb_cancel_transfer(transfer->usb);
     }
-    const bool all_done = [&s] {
-        std::lock_guard<std::mutex> lock(s.mutex);
-        return s.in_flight == 0;
-    }();
-    // 完了しなかった転送は libusb が使い続ける可能性があるため、解放せずに残す。
-    if (all_done) {
-        for (auto *transfer : s.transfers)
-            libusb_free_transfer(transfer);
+    {
+        std::unique_lock<std::mutex> lock(receive_->mutex);
+        if (!receive_->idle.wait_for(lock, std::chrono::seconds(5), [&s] { return s.in_flight == 0; })) {
+            msg_err("%s: %d bulk transfers did not complete; reconnect USB\n", label_.c_str(), s.in_flight);
+            receive_->owner = nullptr;
+            receive_->deferred = static_cast<unsigned>(s.in_flight);
+            s.in_flight = 0;
+            // 遅れて完了した転送はデバイスに触れず、コールバックがバッファごと解放する。
+            for (auto &transfer : s.transfers)
+                if (transfer->pending)
+                    transfer.release();
+            transport_.Block();
+            restore_failed_ = fatal = true;
+            if (!s.error)
+                s.error = -EIO;
+        }
     }
     s.transfers.clear();
-    if (available_) {
+    if (available_ && !restore_failed_) {
         auto command = channel_.Lock();
         transport_.Begin(20000);
         const int rc = source_.Capture(false);

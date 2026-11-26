@@ -10,12 +10,12 @@ extern "C" int msg_printf(const char *,...){return 0;}
 using namespace px4::dt295;
 struct Mock final : ControlIo {
     DWORD submit=ERROR_IO_PENDING,collect=0;
-    bool signal=true,short_read=false,remove=false;
+    bool signal=true,short_read=false,remove=false,complete_on_cancel=true;
     unsigned submits=0,collects=0,cancels=0;
-    HANDLE removed=nullptr;PUCHAR buffer=nullptr;ULONG length=0;
+    HANDLE removed=nullptr,event=nullptr;PUCHAR buffer=nullptr;ULONG length=0;
     WINUSB_SETUP_PACKET setup{};
     DWORD Submit(WINUSB_INTERFACE_HANDLE,WINUSB_SETUP_PACKET packet,PUCHAR bytes,ULONG size,ULONG &actual,OVERLAPPED &op) override {
-        ++submits;setup=packet;buffer=bytes;length=size;actual=short_read?size-1:size;
+        ++submits;setup=packet;buffer=bytes;length=size;event=op.hEvent;actual=short_read?size-1:size;
         if(signal)SetEvent(op.hEvent);
         if(remove)SetEvent(removed);
         return submit;
@@ -25,7 +25,11 @@ struct Mock final : ControlIo {
         actual=short_read?length-1:length;
         if(length)buffer[0]=0x5a;return collect;
     }
-    void Cancel(HANDLE,OVERLAPPED &) noexcept override {++cancels;}
+    void Cancel(HANDLE, OVERLAPPED &op) noexcept override {
+        ++cancels;
+        if (complete_on_cancel)
+            SetEvent(op.hEvent);
+    }
 };
 int main(int argc,char **argv){
     CHECK(argc==2);FILE *f=nullptr;CHECK(!fopen_s(&f,argv[1],"rb") && f);
@@ -39,6 +43,7 @@ int main(int argc,char **argv){
     CHECK(image+262144<=firmware.size());broken[image+64]^=1;CHECK(dt295_validate(broken.data(),broken.size())<0);
     HANDLE removed=CreateEventW(nullptr,TRUE,FALSE,nullptr);CHECK(removed);
     uint8_t bytes[64]{};
+    const auto mock_usb = std::make_shared<UsbHandles>(INVALID_HANDLE_VALUE, nullptr);
     for(unsigned test=0;test<8;++test){
         ResetEvent(removed);Mock io;io.removed=removed;
         if(test==1)io.short_read=true;
@@ -46,7 +51,7 @@ int main(int argc,char **argv){
         if(test==3){io.remove=true;io.collect=ERROR_OPERATION_ABORTED;}
         if(test==4)io.submit=ERROR_DEVICE_NOT_CONNECTED;
         if(test==5)io.submit=ERROR_SUCCESS;
-        Transport transport(INVALID_HANDLE_VALUE,nullptr,removed,&io);transport.Begin(1000);
+        Transport transport(mock_usb,removed,&io);transport.Begin(1000);
         if(test==6)SetEvent(removed);
         if(test==7)transport.Begin(0);
         auto callbacks=transport.Callbacks();
@@ -67,7 +72,7 @@ int main(int argc,char **argv){
                 io.collects=collects; // 後続の回収数の検査を元の要求だけで行う。
             }
         }
-        CHECK(io.collects==((test<=3)?1u:0u));CHECK(io.cancels==((test==2 || test==3)?1u:0u));
+        CHECK(io.collects==((test<=1)?1u:0u));CHECK(io.cancels==((test==2 || test==3)?1u:0u));
         dt295_runtime *runtime=nullptr;
         CHECK(dt295_create(&runtime,firmware.data(),firmware.size(),&callbacks)==0);
         CHECK(dt295_tune(runtime,0,539143,UINT32_MAX)<0); // start前の送信を拒否する。
@@ -76,9 +81,62 @@ int main(int argc,char **argv){
     ResetEvent(removed);
     {
         static const uint8_t immutable[64]={0x31};Mock io;
-        Transport transport(INVALID_HANDLE_VALUE,nullptr,removed,&io);transport.Begin(1000);auto callbacks=transport.Callbacks();
+        Transport transport(mock_usb,removed,&io);transport.Begin(1000);auto callbacks=transport.Callbacks();
         CHECK(!callbacks.control(callbacks.opaque,0x40,0xbc,0,0,const_cast<uint8_t *>(immutable),64,100));
         CHECK(io.buffer!=immutable && immutable[0]==0x31 && io.collects==1);
     }
-    CloseHandle(removed);puts("DT295 firmware, writable OUT copy, cancellation, short transfer, disconnect, no-replay tests passed");return 0;
+    {
+        Mock io;
+        io.signal = false;
+        io.complete_on_cancel = false;
+        Transport transport(mock_usb, removed, &io);
+        transport.Begin(1000);
+        const auto callbacks = transport.Callbacks();
+        const auto transfer = [&](std::uint8_t *buffer) {
+            return callbacks.control(callbacks.opaque, 0xc0, 0xbc, 0, 0, buffer, 1, 2);
+        };
+        std::uint8_t value = 0x12;
+        const auto begin = Transport::Clock::now();
+        CHECK(transfer(&value) == -ETIMEDOUT);
+        CHECK(Transport::Clock::now() - begin < std::chrono::seconds(3));
+        CHECK(io.cancels == 1 && io.collects == 0 && !mock_usb->Ready());
+        CHECK(io.buffer != &value);
+        io.buffer[0] = 0x56; // The delayed request still owns its input buffer.
+        CHECK(value == 0x12);
+        transport.BeginRestore(1000);
+        CHECK(transfer(&value) == -EIO && io.submits == 1);
+        CHECK(SetEvent(io.event));
+        const auto reap_deadline = Transport::Clock::now() + std::chrono::seconds(2);
+        while (!mock_usb->Ready() && Transport::Clock::now() < reap_deadline)
+            Sleep(1);
+        CHECK(mock_usb->Ready());
+
+        io.signal = true;
+        transport.BeginRestore(1000);
+        CHECK(!transfer(&value) && io.submits == 2 && value == 0x5a);
+    }
+    {
+        Mock io;
+        io.complete_on_cancel = false;
+        auto batch = std::make_unique<UsbRequests>(mock_usb);
+        std::vector<HANDLE> events;
+        for (unsigned i = 0; i < 4; ++i) {
+            auto request = std::make_unique<UsbRequest>(8192);
+            CHECK(request->Reset());
+            request->pending = true;
+            events.push_back(request->operation.hEvent);
+            batch->requests.push_back(std::move(request));
+        }
+        const auto begin = Transport::Clock::now();
+        DrainUsbRequests(batch, &io);
+        CHECK(Transport::Clock::now() - begin < std::chrono::seconds(3));
+        CHECK(!batch && io.cancels == events.size() && !mock_usb->Ready());
+        for (HANDLE event : events)
+            CHECK(SetEvent(event));
+        const auto reap_deadline = Transport::Clock::now() + std::chrono::seconds(2);
+        while (!mock_usb->Ready() && Transport::Clock::now() < reap_deadline)
+            Sleep(1);
+        CHECK(mock_usb->Ready());
+    }
+    CloseHandle(removed);puts("DT295 firmware, staged I/O, bounded cancellation, short transfer, disconnect, no-replay tests passed");return 0;
 }

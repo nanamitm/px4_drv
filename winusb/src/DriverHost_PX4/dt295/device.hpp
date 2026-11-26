@@ -10,6 +10,7 @@
 #include <vector>
 
 namespace px4::dt295 {
+struct UsbHandles;
 class Device final : public px4::DeviceBase {
 public:
     Device(const std::wstring &,const px4::DeviceDefinition &,std::uintptr_t,px4::ReceiverManager &);
@@ -30,6 +31,7 @@ public:
     int WriteCardData(const std::uint8_t *buf, std::uint8_t len) override;
 private:
     class Receiver;
+    std::shared_ptr<UsbHandles> usb_;
     std::unique_ptr<Receiver> receiver_;
     // ATRとT=1ブロックの受信途中の状態。抜去・リセット・Closeで一括して破棄する。
     std::mutex card_mutex_;

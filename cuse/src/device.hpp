@@ -52,6 +52,9 @@ public:
     // デーモンの終了。受信を止め、機器を休止させる。
     void Shutdown();
 
+    // セッション停止後もキャンセル完了を待っている USB 転送があれば、ハンドルを閉じずに残す。
+    virtual bool UsbTransfersPending() const { return false; }
+
     bool Removed() const { return !available_; }
     // 受信とカードのどちらのデバイスファイルも開かれていない。
     bool Idle();
