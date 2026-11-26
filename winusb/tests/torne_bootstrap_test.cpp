@@ -307,6 +307,13 @@ static void StreamTests()
 	Check(boot.Initialize(2)==BootstrapResult::ok,"restart core generation");
 	const auto old_generation=chip.calls;
 	Check(engine.Start()==StreamResult::invalid_state && engine.Stop()==StreamResult::invalid_state && chip.calls==old_generation,"old stream generation rejects hardware operations");
+	Check(engine.Prepare()==StreamResult::ok && engine.Start()==StreamResult::ok,"start in new generation");
+	chip.fail_call=chip.calls+1;
+	Check(engine.Stop()==StreamResult::memory_error,"failed stop leaves old generation running");
+	Check(engine.Prepare()==StreamResult::invalid_state,"cannot prepare again before recovery");
+	Check(boot.Initialize(3)==BootstrapResult::ok,"bridge recovery after failed stop");
+	Check(engine.Prepare()==StreamResult::ok && engine.Start()==StreamResult::ok,"old stop failure cannot block a new generation");
+	Check(engine.Stop()==StreamResult::ok,"recovered stream stops");
 	Chip stuck;
 	MemoryAccess stuck_memory(stuck);
 	Bootstrap stuck_boot(stuck_memory,stuck);
