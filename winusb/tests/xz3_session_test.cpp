@@ -73,7 +73,7 @@ private:
 
 class MockPort final : public SessionPort {
 public:
-    void Begin(Clock::time_point) noexcept override {}
+    void Begin(Clock::time_point deadline_) noexcept override { deadline = deadline_; }
     int Pause(unsigned ms) override
     {
         std::this_thread::sleep_for(std::chrono::milliseconds(ms));
@@ -168,6 +168,8 @@ public:
     // 空でなければ、フックの番地にこの値があるときだけ操作を処理する。
     std::vector<std::uint8_t> hook_image;
     unsigned op14_count = 0;
+    // 最後に Begin で設定された期限。
+    Clock::time_point deadline{};
 
 private:
     bool Hooked() const
@@ -404,6 +406,55 @@ void TestCardBusFollowsRelayRestore()
             "card FIFO falls back to direct access after the restore");
     Require(!bus.Error(), "no transfer error after the restore");
 }
+
+// 本体の書き戻しは1語ごとに約3 msで約1.8秒かかり、SmartCard が B-CAS の ATR から求めるブロックの待機時間 (1.6秒) を超える。
+// 受信を閉じた直後に応答待ちのカード操作があれば、書き戻しの1語ごとにカード操作へ譲る。
+// 譲った間のカード操作はフックの外れた boot0 への直接の読み書きで、復元の期限は戻った後に元へ戻す。
+void TestRestoreYieldsToCardBetweenWords()
+{
+    static const std::uint8_t runtime_body[8]{1, 2, 3, 4, 5, 6, 7, 8};
+    static const std::uint8_t hook[8]{0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88};
+    const Images relay_images{{runtime_body, 8}, {runtime_body, 8}, {hook, 8}};
+    constexpr unsigned BodyAddress = 0xea61c, BodyBytes = 2236;
+    constexpr unsigned FifoStatus = 0xfea014, RxData = 0xfea02c;
+    MockPort port;
+    port.hook_image.assign(hook, hook + sizeof(hook));
+    Relay relay(port, relay_images);
+    Require(relay.Install(relay_images.runtime) == 0 && relay.RuntimeInstalled(), "runtime installs on the mock");
+    // 受信 FIFO に3バイトある状態のカード UART。直接の読み出しは RX_DATA の値を返す。
+    port.memory[FifoStatus + 1] = 3;
+    port.memory[RxData + 3] = 0x5a;
+
+    unsigned yields = 0, card_reads = 0;
+    bool hooked_during_yield = false, bulk_during_yield = false, body_written_before_first_yield = false;
+    Clock::time_point restore_deadline{};
+    const bool restored = relay.Restore([&] {
+        if (!yields++) {
+            restore_deadline = port.deadline;
+            body_written_before_first_yield = port.memory[BodyAddress] == 0 && port.memory[BodyAddress + 4] == 5;
+        }
+        hooked_during_yield = hooked_during_yield || port.memory[HookAddress] == hook[0];
+        // Session::Card と同じく、カード操作は自分の期限を設定する。
+        relay.Begin(Clock::now() + std::chrono::seconds(2));
+        RelayCardBus bus(relay, [](unsigned) { return 0; });
+        CardUart uart(bus);
+        bulk_during_yield = bulk_during_yield || bus.Bulk();
+        std::uint8_t data[CardUart::FifoChunk]{};
+        std::size_t count = 0;
+        if (uart.ReadBytes(data, sizeof(data), count) == 0 && count == 3 && data[0] == 0x5a)
+            ++card_reads;
+        Require(port.deadline != restore_deadline, "the card operation set its own deadline");
+    });
+    Require(restored, "restore succeeds with card operations between words");
+    Require(yields == BodyBytes / 4, "restore yields after each body word");
+    Require(body_written_before_first_yield, "the first yield comes after the first body word");
+    Require(!hooked_during_yield, "the hook is removed before the first yield");
+    Require(!bulk_during_yield && port.op14_count == 0, "card operations in a yield use direct access");
+    Require(card_reads == yields, "card operations in a yield read the card UART");
+    Require(port.deadline == restore_deadline, "the restore deadline is set again after each yield");
+    for (unsigned i = 0; i < BodyBytes; ++i)
+        Require(port.memory[BodyAddress + i] == 0, "the saved body is written back");
+}
 }
 
 int main()
@@ -415,6 +466,7 @@ int main()
     TestEndlessResidueFails();
     TestResidueReadErrorFails();
     TestCardBusFollowsRelayRestore();
+    TestRestoreYieldsToCardBetweenWords();
     std::puts("xz3_session_test: passed");
     return 0;
 }

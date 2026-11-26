@@ -213,14 +213,15 @@ int Relay::Install(const Image& image)
     return 0;
 }
 
-bool Relay::Restore()
+bool Relay::Restore(const std::function<void()>& yield)
 {
-    port_.Begin(Clock::now() + 15s);
+    const auto deadline = Clock::now() + 15s;
+    port_.Begin(deadline);
     if (!Unhook())
         return false;
     if (!body_changed_)
         return true;
-    const bool body = WriteRange(Body, saved_body_.data(), saved_body_.size()) &&
+    const bool body = WriteRange(Body, saved_body_.data(), saved_body_.size(), yield, deadline) &&
                       Verify(Body, saved_body_.data(), saved_body_.size());
     // 0xc4600はboot0のUSB IN応答バッファで、通常の読み出しでも上書きされる。
     // フックと本体を戻した後の照合で、ステージングは通常の応答に置き換わる。
@@ -346,11 +347,18 @@ bool Relay::Write(unsigned address, const std::uint8_t* data)
     return ok;
 }
 
-bool Relay::WriteRange(unsigned address, const std::uint8_t* data, std::size_t size)
+bool Relay::WriteRange(unsigned address, const std::uint8_t* data, std::size_t size,
+                       const std::function<void()>& yield, Clock::time_point deadline)
 {
-    for (std::size_t at = 0; at < size; at += 4)
+    for (std::size_t at = 0; at < size; at += 4) {
         if (!Write(address + static_cast<unsigned>(at), data + at))
             return false;
+        if (yield) {
+            // 譲った間のカード操作は自分の期限を設定するため、戻った後に元の期限へ戻す。
+            yield();
+            port_.Begin(deadline);
+        }
+    }
     return true;
 }
 
@@ -584,8 +592,25 @@ int Session::StopStream()
 
 bool Session::Restore()
 {
-    std::lock_guard<std::mutex> control(control_mutex_);
-    if (!relay_.Restore())
+    std::unique_lock<std::mutex> control(control_mutex_);
+    /*
+     * 本体の書き戻しは1語ごとに約3 msで、2236バイトでは約1.8秒かかる。SmartCardがB-CASのATRの
+     * TB3 (BWI=4) から求めるブロックの待機時間は1.6秒で、受信を閉じた直後に応答待ちのT=1ブロックがあると、カードが
+     * 期限内に応答してもSmartCardが読めずに同じブロックを再送する。カードは重複したIブロックへ
+     * Rブロックを返し、その応答が次のブロックの受信へ残って連番がずれ、次の送信が失敗する。
+     * フックを外した後はカードUARTの要求をboot0が処理するため、待っているカード操作があれば
+     * 1語ごとに制御ロックを譲る。カード操作の受付 (Card) は制御ロックの取得後に card_waiters_ を
+     * 減らすため、0になるまで待ってから取り直す。
+     */
+    const bool restored = relay_.Restore([this, &control] {
+        if (!card_waiters_.load())
+            return;
+        control.unlock();
+        while (card_waiters_.load() && port_.Available())
+            std::this_thread::yield();
+        control.lock();
+    });
+    if (!restored)
         return false;
     initialized_ = false;
     return true;

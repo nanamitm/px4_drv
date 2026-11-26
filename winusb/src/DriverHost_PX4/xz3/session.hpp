@@ -60,7 +60,10 @@ public:
     int Install(const Image& image);
     // 共通版 (操作7、11〜14) が導入され、フックが有効な間だけtrue。
     bool RuntimeInstalled() const { return runtime_installed_; }
-    bool Restore();
+    // フックを外した後、本体を1語ずつ戻す。yieldは各語の後に呼ばれ、呼び出し側はその中で
+    // 制御ロックを一時的に手放せる。フックは外れているため、その間のカードUARTの要求は
+    // boot0が通常どおり処理する。操作全体の期限は、yieldの後も最初の値を使う。
+    bool Restore(const std::function<void()>& yield = {});
     int Delay(unsigned ms);
     // カードUARTの1語をboot0のメモリ要求で読み書きする。boot0のUSBハンドラーは、フックの導入中も
     // ステージング以外の番地を処理する。呼び出し側が制御ロックを保持し、Beginで期限を設定する。
@@ -74,7 +77,8 @@ private:
     void Touch(unsigned address, std::size_t size);
     bool Read(unsigned address, std::uint8_t* data, std::size_t size);
     bool Write(unsigned address, const std::uint8_t* data);
-    bool WriteRange(unsigned address, const std::uint8_t* data, std::size_t size);
+    bool WriteRange(unsigned address, const std::uint8_t* data, std::size_t size,
+                    const std::function<void()>& yield = {}, Clock::time_point deadline = {});
     bool Verify(unsigned address, const std::uint8_t* data, std::size_t size);
     bool Unhook();
 
@@ -187,6 +191,8 @@ public:
     // worker を止め、操作13 で DMA を止める。失敗した場合、所有者は中継プログラムを復元しない。
     int StopStream();
     // フックと本体を元へ戻す。DMA が止まっているときだけ呼ぶ。
+    // 本体の書き戻しは約1.8秒かかり、SmartCard が ATR から求める T=1 のブロックの待機時間 (B-CAS は1.6秒) を超えるため、
+    // 待っているカード操作があれば1語ごとに制御ロックを譲る。
     bool Restore();
     bool StreamStarted() const { return stream_started_; }
     // worker が失敗したときのエラー。選局ごとに Clear で消す。
