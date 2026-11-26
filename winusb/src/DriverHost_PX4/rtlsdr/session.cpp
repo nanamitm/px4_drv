@@ -98,9 +98,9 @@ void Session::Supervise() noexcept
             std::lock_guard<std::mutex> handles(handle_mutex_);
             if (Stopping()) break;
             // 形式不正や応答なしでは helper がまだ動いているため、強制終了してから回収する
+            ClearStatus();
             exit_code = port_.Kill();
         }
-        ready_ = false; quality_ = 0; mer_x100_ = -1;
         const auto failed_at = NowMs();
         budget.NoteStream(std::chrono::milliseconds(run.received_ms));
         bool started = false;

@@ -14,9 +14,10 @@ TS は既存 StreamBuffer と世代付きパイプを通り、公開 BonDriver A
 実測約8.5秒を要した x86 の初期復号中も USB を止めずに受信する。
 診断用の有限長 I/Q 収録とは異なり、ライブ入力を同期 USB 要求の再発行でつなぐ方式は使わない。
 
-既存 DeviceBase が読み取る USB 記述子で VID/PID とシリアルを確認した後、
-RTLSDR デバイスだけが WinUSB ハンドルを解放する。実際の受信中は helper が唯一の USB 所有者となる。
-同一シリアルの複数機器は明示的なエラーとし、別個体を番号で推測するフォールバックは不要。
+DeviceBase が USB 記述子で VID/PID とシリアルを確認した後、RTLSDR デバイスは WinUSB ハンドルを解放し、
+選択済みの USB インターフェースパスを helper に渡す。helper は `rtlsdr_path.dll` を使い、
+SetupAPI が返す devnode と libusb の列挙結果を照合して、その個体の interface 0 を開く。
+指定先が消えた場合は起動失敗となる。同じシリアルの機器も Windows が別のパスを付与した個体なら選択できる。
 内蔵カードリーダー・LNB 給電は対象外。
 
 ## 選局と終了
@@ -108,7 +109,7 @@ TVTest 側の BonDriver 要求タイムアウトもこれより長くする必�
 `DriverN_FileName=BonDriver_RTLSDR.dll` に対応する `DriverN_RequestTimeout=30000` を指定する。
 未登録の場合は末尾に追加し、`DriverCount` も増やす。他の BonDriver の待機時間は変更しない。
 スキャンの待機時間 (`ChannelScanWait`) とは別の設定である。
-helper ログは DriverHost と同じフォルダーの `rtlsdr_frontend-<serial>.log` に残る。
+helper ログは DriverHost と同じフォルダーの `rtlsdr_frontend-<serial>-<接続先ID>.log` に残る。
 
 ## チャンネルスキャンの待ち時間
 
@@ -150,7 +151,12 @@ R820T の RTL2838UHIDIR（x64、初期窓1200シンボル）での実測は次�
 連続受信中の CP タイミング・CFO 追跡を含む。
 配布物の `Sources` には helper と Rust 依存を保存し、Visual Studio の開発環境から
 `cargo build --offline --locked --release --manifest-path winusb/tools/rtlsdr_frontend/Cargo.toml`
-で再ビルドできる。通常の helper はネットワーク接続や GNU Radio を必要としない。
+で再ビルドできる。`rtlsdr_path.dll` は同じ `Sources` から次のように再ビルドできる。例は x64 で、x86 のプラットフォーム指定は `Win32`。
+
+```powershell
+Expand-Archive .\libusb-1.0.30.zip -DestinationPath .
+.\winusb\tools\rtlsdr\build-path-runtime.ps1 -LibusbSource .\libusb-1.0.30 -RtlSdrSource .\rtl-sdr-blog -OutputDirectory .\build\x64 -Platform x64
+```
 
 既存の視聴・録画を止めずに試験する場合は、両プロジェクトを
 `/p:RtlSdrIsolatedTest=true` でビルドし、
@@ -164,7 +170,7 @@ R820T の RTL2838UHIDIR（x64、初期窓1200シンボル）での実測は次�
 実機の別チャンネル切り替えは `rtlsdr_bondriver_live.ps1 -AlternateChannel 1 -Cycles 4`
 で13chと14chを同じ接続で交互に選局し、PAT の TSID で旧局の混入も確認する。
 この試験には両チャンネルの受信と異なる TSID が必要。
-比較用の旧 helper は `-FrontendPath PATH` で指定できる。
+比較用の helper は `-FrontendPath PATH` で指定できる。この試験で使う helper は `--device-path` に対応している必要がある。
 
 ## 実機確認結果（2026-10-28）
 

@@ -1,6 +1,7 @@
 """Exercise missing/corrupt RTL-SDR packages using generated binaries; never load USB."""
 import shutil
 import struct
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -61,6 +62,30 @@ class PackageTests(unittest.TestCase):
 
     def test_missing_dsp_source(self):
         (self.folder / "Sources/winusb/tools/rtlsdr_frontend/vendor/isdbt-dsp/src/demod.rs").unlink()
+        self.rejected()
+
+    def test_missing_path_runtime(self):
+        (self.folder / "rtlsdr/rtlsdr_path.dll").unlink()
+        self.rejected()
+
+    @unittest.skipUnless(sys.platform == "win32", "requires the Windows RTL-SDR helper")
+    def test_unavailable_device_path_never_falls_back_to_serial(self):
+        helper = self.folder / "rtlsdr/rtlsdr_frontend.exe"
+        with subprocess.Popen(
+            [str(helper), "--device-path", "nonexistent-test-device-interface",
+             "--serial", "00000001", "--frequency", "473142857"],
+            stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+        ) as process:
+            # Keep stdin open so the stop request cannot mask the USB open error.
+            try:
+                self.assertEqual(process.wait(timeout=10), 1)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                raise
+            self.assertIn(b"Open selected USB interface: librtlsdr error -4", process.stderr.read())
+
+    def test_missing_path_runtime_source(self):
+        (self.folder / "Sources/rtl-sdr-blog/src/librtlsdr.c").unlink()
         self.rejected()
 
     def test_missing_runtime_source(self):

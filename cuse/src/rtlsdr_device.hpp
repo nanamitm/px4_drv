@@ -69,9 +69,18 @@ private:
     void StopReceive();
     static void LIBUSB_CALL BulkDone(libusb_transfer *transfer);
 
+    struct ReceiveState {
+        explicit ReceiveState(RtlSdrDevice *device) : owner(device) {}
+        std::mutex mutex;
+        // 停止期限を過ぎた転送からデバイスへの参照を切る。
+        RtlSdrDevice *owner;
+    };
+
     struct Transfer {
-        RtlSdrDevice *owner = nullptr;
+        ~Transfer() { libusb_free_transfer(transfer); }
+        std::shared_ptr<ReceiveState> state;
         libusb_transfer *transfer = nullptr;
+        bool in_flight = false; // ReceiveState::mutex で保護する
         std::vector<std::uint8_t> buffer;
     };
 
@@ -80,10 +89,10 @@ private:
     rtlsdr_dev *rtl_ = nullptr;
     RtlSdrHelperProcess helper_;
     std::vector<std::unique_ptr<Transfer>> transfers_;
-    std::mutex receive_mutex_;
+    std::shared_ptr<ReceiveState> receive_ = std::make_shared<ReceiveState>(this);
     std::condition_variable receive_changed_;
-    std::atomic_int in_flight_{0};
-    std::atomic_bool resubmit_{false};
+    int in_flight_ = 0; // ReceiveState::mutex で保護する
+    bool resubmit_ = false; // ReceiveState::mutex で保護する
     // Bulk IN の受信の失敗。Read が失敗を返し、Session が helper と受信を起動し直す
     std::atomic_bool usb_failed_{false};
     bool leaked_ = false;

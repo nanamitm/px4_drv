@@ -20,7 +20,7 @@ $output=[IO.Path]::GetFullPath($OutputDirectory)
 New-Item -ItemType Directory -Force -Path $run,(Join-Path $run 'rtlsdr'),$output | Out-Null
 Copy-Item -LiteralPath (Join-Path $hostNative 'DriverHost_PX4.exe') -Destination $run
 Copy-Item -LiteralPath (Join-Path $hostNative 'BonDriver_PX4.dll') -Destination (Join-Path $run 'BonDriver_RTLSDR.dll')
-foreach($file in @('rtlsdr_frontend.exe','rtlsdr.dll','pthreadVC2.dll','msvcr100.dll')){
+foreach($file in @('rtlsdr_frontend.exe','rtlsdr_path.dll','rtlsdr.dll','pthreadVC2.dll','msvcr100.dll','vcruntime140.dll')){
     Copy-Item -LiteralPath (Join-Path $native "rtlsdr\$file") -Destination (Join-Path $run 'rtlsdr')
 }
 if($FrontendPath){Copy-Item -LiteralPath $FrontendPath -Destination (Join-Path $run 'rtlsdr\rtlsdr_frontend.exe') -Force}

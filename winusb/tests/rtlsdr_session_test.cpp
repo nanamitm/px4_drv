@@ -159,6 +159,26 @@ void RestartAfterExit()
     session.Stop();
 }
 
+void RestartWaitsForNewTs()
+{
+    FakePort port; Sink sink;
+    port.scripts.push_back({{MakeFrame(1, {}), MakeFrame(2, Ts(1)), MakeFrame(3, Mer(1353))}, true});
+    port.scripts.push_back({{MakeFrame(1, {})}, false});
+    Session session(port, [&](const std::uint8_t *d, std::size_t n, std::uint64_t r) {sink(d, n, r);});
+    Require(session.Start(473142857) == 0, "start");
+    Require(WaitFor([&] {return port.Launches() == 2 && session.Ready();}), "replacement helper ready");
+    Require(sink.Count() == 1, "replacement helper has not sent TS");
+    Require(!session.Locked() && session.LastTs() == 0 && session.MerX100() == -1,
+            "replacement Ready does not reuse lock or MER from the previous helper");
+    {
+        std::lock_guard<std::mutex> lock(port.mutex);
+        port.current.chunks.push_back(MakeFrame(2, Ts(2)));
+        port.changed.notify_all();
+    }
+    Require(WaitFor([&] {return sink.Count() == 2 && session.Locked();}), "replacement TS restores lock");
+    session.Stop();
+}
+
 void RestartAfterInvalidOrError()
 {
     FakePort port; Sink sink;
@@ -210,6 +230,7 @@ int main()
     LockAndStop();
     LaunchFailure();
     RestartAfterExit();
+    RestartWaitsForNewTs();
     RestartAfterInvalidOrError();
     Exhaustion();
     NoRestartAfterRemoval();

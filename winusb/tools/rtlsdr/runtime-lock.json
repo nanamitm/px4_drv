@@ -6,6 +6,10 @@
   "license": "https://github.com/rtlsdrblog/rtl-sdr-blog/blob/V1.4.0/COPYING",
   "source_url": "https://github.com/rtlsdrblog/rtl-sdr-blog/archive/refs/tags/V1.4.0.zip",
   "source_sha256": "EFAAC50D53EA2F12D9853167AC9470BF4F04DE944F17C5D52D2FD73A9EC24C18",
+  "path_runtime": {
+    "libusb_source": "https://codeload.github.com/libusb/libusb/zip/refs/tags/v1.0.30",
+    "libusb_source_sha256": "543A61DBC8878435C096AEC6543D51FF73F6A80743621C66ECAB2BA1EB66A974"
+  },
   "libraries": {
     "x86": {
       "msvcr100.dll": "8227CA247EC6D9F75158DD8FECCD1075A41A21B6C675AE301BC4CBB741FC8505",

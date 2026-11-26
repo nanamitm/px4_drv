@@ -310,7 +310,7 @@ int RtlSdrDevice::StartReceive()
     try {
         for (int i = 0; i < TransferCount; ++i) {
             auto t = std::make_unique<Transfer>();
-            t->owner = this;
+            t->state = receive_;
             t->buffer.resize(TransferSize);
             t->transfer = libusb_alloc_transfer(0);
             if (!t->transfer)
@@ -320,52 +320,67 @@ int RtlSdrDevice::StartReceive()
             transfers_.push_back(std::move(t));
         }
     } catch (...) {
-        for (auto &t : transfers_)
-            libusb_free_transfer(t->transfer);
         transfers_.clear();
         return -ENOMEM;
     }
-    resubmit_ = true;
-    for (auto &t : transfers_) {
-        ++in_flight_;
-        if (const int rc = libusb_submit_transfer(t->transfer)) {
-            --in_flight_;
-            msg_err("%s: bulk submit failed libusb=%s\n", label_.c_str(), libusb_error_name(rc));
-            StopReceive();
-            return rc == LIBUSB_ERROR_NO_DEVICE ? -ECANCELED : -EIO;
+
+    int rc = 0;
+    {
+        std::lock_guard<std::mutex> lock(receive_->mutex);
+        resubmit_ = true;
+        for (auto &t : transfers_) {
+            rc = libusb_submit_transfer(t->transfer);
+            if (rc)
+                break;
+            t->in_flight = true;
+            ++in_flight_;
         }
     }
-    return 0;
+    if (!rc)
+        return 0;
+    msg_err("%s: bulk submit failed libusb=%s\n", label_.c_str(), libusb_error_name(rc));
+    StopReceive();
+    return rc == LIBUSB_ERROR_NO_DEVICE ? -ECANCELED : -EIO;
 }
 
 void RtlSdrDevice::StopReceive()
 {
+    if (transfers_.empty())
+        return;
+
+    // 再投入の判定と投入を、停止の判定とキャンセルの間に挟ませない。
+    std::unique_lock<std::mutex> lock(receive_->mutex);
     resubmit_ = false;
     for (auto &t : transfers_)
-        libusb_cancel_transfer(t->transfer);
-    {
-        std::unique_lock<std::mutex> lock(receive_mutex_);
-        if (!receive_changed_.wait_for(lock, std::chrono::seconds(5), [this] { return in_flight_ == 0; })) {
-            // libusb が使い続ける可能性があるため、転送とバッファーを解放せずに残す
-            msg_err("%s: %d bulk transfers did not complete\n", label_.c_str(), in_flight_.load());
-            leaked_ = true;
-            for (auto &t : transfers_)
+        if (t->in_flight)
+            libusb_cancel_transfer(t->transfer);
+    if (!receive_changed_.wait_for(lock, std::chrono::seconds(5), [this] { return in_flight_ == 0; })) {
+        msg_err("%s: %d bulk transfers did not complete\n", label_.c_str(), in_flight_);
+        leaked_ = true;
+        receive_->owner = nullptr;
+        // libusb が使い続ける転送は、遅延したコールバックから解放する。
+        for (auto &t : transfers_)
+            if (t->in_flight)
                 t.release();
-            transfers_.clear();
-            return;
-        }
     }
-    for (auto &t : transfers_)
-        libusb_free_transfer(t->transfer);
     transfers_.clear();
 }
 
 void LIBUSB_CALL RtlSdrDevice::BulkDone(libusb_transfer *transfer)
 {
     auto &t = *static_cast<Transfer *>(transfer->user_data);
-    auto &self = *t.owner;
+    const auto state = t.state;
+    std::lock_guard<std::mutex> lock(state->mutex);
+    if (!state->owner) {
+        delete &t;
+        return;
+    }
+
+    auto &self = *state->owner;
     bool resubmit = false;
-    switch (transfer->status) {
+    // 停止後は I/Q の処理を省き、転送の回収だけを行う。
+    const auto status = self.resubmit_ ? transfer->status : LIBUSB_TRANSFER_CANCELLED;
+    switch (status) {
     case LIBUSB_TRANSFER_COMPLETED:
         // キューが満杯なら helper が失敗を返し、Session が受信ごと起動し直す。I/Q を捨てて続けることはしない
         if (transfer->actual_length > 0)
@@ -379,21 +394,19 @@ void LIBUSB_CALL RtlSdrDevice::BulkDone(libusb_transfer *transfer)
         self.usb_failed_ = true;
         break;
     default:
-        if (self.resubmit_ && !self.usb_failed_.exchange(true))
+        if (!self.usb_failed_.exchange(true))
             msg_err("%s: bulk receive failed status=%d; restarting the helper\n", self.label_.c_str(), transfer->status);
         break;
     }
-    if (resubmit && self.resubmit_) {
+    if (resubmit) {
         const int rc = libusb_submit_transfer(transfer);
         if (!rc)
             return;
         msg_err("%s: bulk resubmit failed libusb=%s\n", self.label_.c_str(), libusb_error_name(rc));
         self.usb_failed_ = true;
     }
-    {
-        std::lock_guard<std::mutex> lock(self.receive_mutex_);
-        --self.in_flight_;
-    }
+    t.in_flight = false;
+    --self.in_flight_;
     self.receive_changed_.notify_all();
 }
 }
