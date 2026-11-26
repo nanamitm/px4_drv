@@ -148,6 +148,8 @@ private:
 		friend class PxMltDevice;
 
 		int SetNullPacketFilter(bool enable);
+		// 受信機のロック (lock_) を持った状態で呼ぶ。入力レベルを dBm × 1000 で返す
+		int ReadRfLevel(std::int32_t &value);
 
 		PxMltDevice &parent_;
 		std::uintptr_t index_;
@@ -160,6 +162,8 @@ private:
 		cxd2856er_demod cxd2856er_;
 		cxd2858er_tuner cxd2858er_;
 		px4::SystemType current_system_;
+		// 選局してから入力レベルを記録へ出したか。記録は選局ごとに最初のロックで1回だけ出す
+		bool rf_level_logged_ = false;
 		bool streaming_;
 		bool stream_buffer_started_ = false;
 		bool tsmf_;

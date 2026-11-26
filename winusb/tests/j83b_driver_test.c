@@ -19,6 +19,9 @@ struct mock_bus {
 	unsigned int fail_at;
 	bool frozen;
 	bool gate_open;
+	/* CXD2858ER の ADC がつないだ AGC の値。0x59 へ書いた接続先に応じて 0x5B の読み出し値を変える */
+	u8 tuner_if_agc;
+	u8 tuner_rf_agc;
 };
 
 static int gate(void *priv, bool open)
@@ -54,6 +57,9 @@ static int request(void *priv, const struct i2c_comm_request *req, int num)
 					bus->regs[chip][bus->bank[addr]][at] = req[n].data[i];
 				if (addr == 0x66 && at == 1)
 					bus->frozen = req[n].data[i] != 0;
+				if (chip == 2 && at == 0x59)
+					bus->regs[2][0][0x5b] = (req[n].data[i] == 0x05) ? bus->tuner_if_agc
+							      : (req[n].data[i] == 0x03) ? bus->tuner_rf_agc : 0;
 			}
 		}
 	}
@@ -115,6 +121,93 @@ static void check_freia_ter(bool j83b, u32 freq)
 	CHECK(memcmp(&r[0x91], "\x0a\x0c", 2) == 0);
 	/* 選局の後は CPU と内部の論理回路を待機させる */
 	CHECK(r[0x88] == 0x00 && r[0x87] == 0x80);
+}
+
+/* CXD2858ER の入力レベル (dBm × 1000)。期待値は Sony の sony_helene_ReadRssi() の式を手で計算した値で、
+ * RF 利得の6区間と IF 利得の2区間、地上波とケーブルの補正を通す
+ * 実際の電波の強さと合うかは、この試験の確認範囲外 */
+static void test_rf_level(void)
+{
+	static const struct {
+		enum cxd2858er_system system;
+		u32 freq;
+		u8 if_agc, rf_agc, if_bpf_gc;
+		s32 level;
+	} cases[] = {
+		/* RF の AGC が IF より大きく、RF 利得は2つ目の傾きの区間、IF 利得は AGC が 0.39 V を超える区間 */
+		{ CXD2858ER_ISDB_T_SYSTEM, 557143, 100, 150, 0x0a, -33930 },
+		/* RF 利得は 70 × 2.2 だけ下げる平らな区間、IF 利得は AGC に比例する区間、ケーブルの補正は -1.5 dB */
+		{ CXD2858ER_ISDB_C_SYSTEM, 93143, 50, 20, 0x04, -61340 },
+		/* RF 利得は 57 dB/V の区間 */
+		{ CXD2858ER_ISDB_T_SYSTEM, 767143, 200, 200, 0x00, -2160 },
+		/* RF 利得は 160 dB/V の区間、利得の番号は上位4ビットを無視する */
+		{ CXD2858ER_ISDB_C_SYSTEM, 50000, 255, 0, 0xff, 22020 },
+		/* RF 利得は最初の傾きの区間 */
+		{ CXD2858ER_ISDB_T_SYSTEM, 300000, 37, 37, 0x00, -69890 },
+		/* RF 利得は最大値のまま */
+		{ CXD2858ER_ISDB_T_SYSTEM, 300000, 30, 0, 0x00, -73630 },
+	};
+	struct cxd2856er_demod demod;
+	struct cxd2858er_tuner tuner;
+	unsigned int i, calls;
+	s32 level, expected;
+
+	for (i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+		level = 0;
+		CHECK(cxd2858er_calc_rf_level(cases[i].system, cases[i].freq, cases[i].if_agc, cases[i].rf_agc, cases[i].if_bpf_gc, &level) == 0);
+		if (level != cases[i].level) {
+			fprintf(stderr, "case %u: level %d, expected %d\n", i, (int)level, (int)cases[i].level);
+			exit(1);
+		}
+	}
+
+	/* 衛星と未選局は dBm で求められないため失敗させる */
+	CHECK(cxd2858er_calc_rf_level(CXD2858ER_ISDB_S_SYSTEM, 1049480, 100, 100, 0, &level) == -EINVAL);
+	CHECK(cxd2858er_calc_rf_level(CXD2858ER_UNSPECIFIED_SYSTEM, 557143, 100, 100, 0, &level) == -EINVAL);
+	puts("Tuner RF level calculation: PASS");
+
+	/* 地上波の選局後に ADC の接続を切り替えて IF と RF の AGC を読み、選局後と同じ待機の設定へ戻す */
+	reset(&demod, &tuner);
+	CHECK(cxd2858er_init(&tuner) == 0);
+	CHECK(cxd2858er_read_rf_level(&tuner, &level) == -EINVAL && !bus.gate_open);
+	CHECK(cxd2858er_set_params_t(&tuner, CXD2858ER_ISDB_T_SYSTEM, 557143, 6) == 0);
+	bus.tuner_if_agc = 100;
+	bus.tuner_rf_agc = 150;
+	/* 利得の番号 (0x69 の下位4ビット) は選局で書いた値を読む */
+	CHECK(cxd2858er_calc_rf_level(CXD2858ER_ISDB_T_SYSTEM, 557143, 100, 150, bus.regs[2][0][0x69], &expected) == 0);
+	bus.calls = 0;
+	CHECK(cxd2858er_read_rf_level(&tuner, &level) == 0 && level == expected);
+	calls = bus.calls;
+	CHECK(calls == 9 && !bus.gate_open);
+	CHECK(bus.regs[2][0][0x59] == 0x04 && bus.regs[2][0][0x88] == 0x00 && bus.regs[2][0][0x87] == 0xc0);
+	CHECK(tuner.system == CXD2858ER_ISDB_T_SYSTEM);
+
+	/* どの I2C 転送で失敗してもゲートを閉じ、失敗していない待機の設定は書き戻し、選局の状態は変えない */
+	for (i = 1; i <= calls; i++) {
+		bus.regs[2][0][0x87] = 0xc0;
+		bus.regs[2][0][0x88] = 0x00;
+		bus.calls = 0;
+		bus.fail_at = i;
+		CHECK(cxd2858er_read_rf_level(&tuner, &level) == -EIO && !bus.gate_open);
+		CHECK(i == 8 || bus.regs[2][0][0x87] == 0xc0);
+		CHECK(i == 7 || bus.regs[2][0][0x88] == 0x00);
+		CHECK(tuner.system == CXD2858ER_ISDB_T_SYSTEM);
+	}
+	bus.fail_at = 0;
+
+	/* J.83B もケーブルの補正で求め、周波数は最後の選局の値を使う */
+	CHECK(cxd2858er_set_params_c(&tuner, 697143, true) == 0);
+	CHECK(cxd2858er_calc_rf_level(CXD2858ER_ISDB_C_SYSTEM, 697143, 100, 150, bus.regs[2][0][0x69], &expected) == 0);
+	CHECK(cxd2858er_read_rf_level(&tuner, &level) == 0 && level == expected);
+
+	/* 衛星の選局中と停止後は読まない */
+	CHECK(cxd2858er_set_params_s(&tuner, CXD2858ER_ISDB_S_SYSTEM, 1049480, 28860) == 0);
+	bus.calls = 0;
+	CHECK(cxd2858er_read_rf_level(&tuner, &level) == -EINVAL && bus.calls == 0);
+	CHECK(cxd2858er_stop(&tuner) == 0);
+	bus.calls = 0;
+	CHECK(cxd2858er_read_rf_level(&tuner, &level) == -EINVAL && bus.calls == 0);
+	printf("Tuner RF level read with %u I2C failure boundaries: PASS\n", calls);
 }
 
 static void test_xit_sqr100(void)
@@ -532,6 +625,7 @@ int main(void)
 	CHECK(bus.regs[2][0][0x67] == 0x02);
 	puts("Tuner RF input matching in standby: PASS");
 
+	test_rf_level();
 	test_xit_sqr100();
 	return 0;
 }
