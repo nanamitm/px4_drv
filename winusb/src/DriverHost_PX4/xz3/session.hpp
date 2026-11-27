@@ -18,6 +18,7 @@
 #include <memory>
 #include <mutex>
 #include <thread>
+#include <utility>
 
 namespace px4::xz3 {
 using Clock = std::chrono::steady_clock;
@@ -88,6 +89,33 @@ private:
     bool staged_valid_ = false;
 };
 
+/*
+ * カードUARTの16語だけを、Relayのboot0のメモリ要求で読み書きする。
+ * 共通版の導入中は、FIFOの読み書きを操作14で最大31バイトずつまとめて行う。
+ * 失敗後は、同じ操作内の後続の転送を止める。
+ * Pauseの間は制御ロックを手放すため、その間に受信を閉じた復元 (Restore) や最初の選局の導入 (Init) で
+ * 共通版の有無が変わる。一括転送を使うかは、作成時の値を持たず、制御ロックの下の各転送の直前に判断する。
+ */
+class RelayCardBus final : public px4::dt295::CardBus {
+public:
+    RelayCardBus(Relay& relay, std::function<int(unsigned)> yield)
+        : relay_(relay), yield_(std::move(yield)) {}
+
+    bool Bulk() const override { return relay_.RuntimeInstalled(); }
+    int Fifo(bool write, std::uint8_t* data, std::size_t& count) override;
+    int Read32(std::uint32_t address, std::uint32_t& value) override;
+    int Write32(std::uint32_t address, std::uint32_t value) override;
+    int Pause(unsigned milliseconds) override;
+    int Error() const { return error_; }
+
+private:
+    int Check(std::uint32_t address) const;
+
+    Relay& relay_;
+    std::function<int(unsigned)> yield_;
+    int error_ = 0;
+};
+
 // 操作12 の送出量と同じ大きさの Bulk IN (0x81) の読み出し 1 本。
 // 破棄するときは発行中の読み出しを取り消し、完了を待ってからバッファを解放する。
 class BulkReader {
@@ -111,6 +139,10 @@ public:
     virtual void Nap() noexcept = 0;
     // Bulk IN (0x81) に残ったデータを捨てる。0 か OS のエラーを返す。
     virtual int FlushStream() = 0;
+    // Bulk IN (0x81) を size バイトまで 1 回読む。timeout_ms の間に届かなければ取り消し、
+    // transferred を 0 にして 0 を返す。抜去で -ENODEV、そのほかの失敗で負の値を返す。
+    virtual int ReadStream(std::uint8_t* data, std::size_t size, unsigned timeout_ms,
+                           std::size_t& transferred) = 0;
     virtual std::unique_ptr<BulkReader> CreateReader() = 0;
 };
 
@@ -177,6 +209,7 @@ private:
             std::uint8_t* rx, std::size_t count) override;
     int Delay(unsigned milliseconds) override { return relay_.Delay(milliseconds); }
     int ReadLoop(bool satellite, StreamSink& sink);
+    int DiscardResidue();
     unsigned NextStage(Clock::duration elapsed, unsigned stage) const;
     void HoldForCard();
     void Deliver(const std::uint8_t* bytes, std::size_t length, StreamSink& sink);

@@ -43,6 +43,7 @@ make -C cuse check
 - torne の共有セッション (`torne_session_test`)
 - torne の復調器の生成コードが、リポジトリにある Go の正解の記録と同じ I²C の要求列になること
 - GV-MVP/XZ3 のカード UART の手順と、TS の取り出しの境界の処理 (`xz3_card_test`、`xz3_stream_test`)
+- GV-MVP/XZ3 の受信の開始と停止で、EP81 に残った前の受信の末尾を次の受信へ渡さないこと (`xz3_session_test`)
 - PX-BCUD の初期化と選局の要求列、TS の境界の獲得、前のチャンネルの TS の除外、自動復旧の回数 (`pxbcud_frontend_test`) と、isochronous のパケットから TS を組み立てる処理 (`pxbcud_stream_test`)
 - PX-S1UD の firmware の転送と選局と統計の要求 (`siano_frontend_test`)、地デジと J.83B の firmware の切り替えの順序とメッセージの振り分け (`siano_session_test`)、J.83B の helper の子プロセスの起動と停止 (`iq_process_test`、模擬の helper のシェルスクリプトを使う)
 - RTL-SDR の helper の出力の形式 (`rtlsdr_protocol_test`)、周波数の換算とロックと helper の起動し直しの回数 (`rtlsdr_session_test`)、helper の子プロセスの標準入力の I/Q と停止とキューのあふれ (`rtlsdr_helper_test`、模擬の helper のシェルスクリプトを使う)
