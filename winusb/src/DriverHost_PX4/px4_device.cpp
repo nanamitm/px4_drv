@@ -977,8 +977,14 @@ struct tc90522_regbuf Px4Device::Px4Receiver::tc_init_s_[] = {
 	{ 0x04, NULL, { 0x02 } }
 };
 
+/*
+ * TC90522 のロックと TSID の切り替えを確認した直後に届く TS には、transport error indicator 付きのパケットが続けて含まれる
+ * BonDriver は選局の完了直後にパージするため、待たずに返すとこのパケットがパージ後の先頭としてクライアントへ渡る。
+ * 選局の完了からパージまでを 150ms 空けると BS と地デジのどちらでも届かなくなるため、
+ * 余裕を持たせて、ロック後に 200ms 待つ RECEIVER_WAIT_AFTER_LOCK を ISDB-S と ISDB-T の両方へ適用する
+ */
 Px4Device::Px4Receiver::Px4Receiver(Px4Device &parent, std::uintptr_t index)
-	: ReceiverBase(RECEIVER_SAT_SET_STREAM_ID_AFTER_TUNE | RECEIVER_WAIT_AFTER_LOCK_TC_T),
+	: ReceiverBase(RECEIVER_SAT_SET_STREAM_ID_AFTER_TUNE | RECEIVER_WAIT_AFTER_LOCK_TC_T | RECEIVER_WAIT_AFTER_LOCK),
 	parent_(parent),
 	index_(index),
 	lock_(),
