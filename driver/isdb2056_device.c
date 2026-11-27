@@ -626,7 +626,7 @@ static int isdb2056_chrdev_set_stream_id(struct ptx_chrdev *chrdev,
 		while (i--) {
 			ret = tc90522_tmcc_get_tsid_s(tc90522_s,
 						      stream_id, &tsid);
-			if ((!ret && tsid) || ret == -EINVAL)
+			if ((!ret && tc90522_tmcc_tsid_is_assigned(tsid)) || ret == -EINVAL)
 				break;
 
 			msleep(10);
@@ -639,7 +639,7 @@ static int isdb2056_chrdev_set_stream_id(struct ptx_chrdev *chrdev,
 			return ret;
 		}
 
-		if (!tsid) {
+		if (!tc90522_tmcc_tsid_is_assigned(tsid)) {
 			ret = -EAGAIN;
 			return ret;
 		}

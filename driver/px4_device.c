@@ -858,7 +858,7 @@ static int px4_chrdev_read_tmcc_tsid_list_s(struct ptx_chrdev *chrdev,
 		ret = tc90522_tmcc_get_tsid_s(&chrdev4->tc90522, i, &tsid);
 		if (ret)
 			return ret;
-		if (!tsid)
+		if (!tc90522_tmcc_tsid_is_assigned(tsid))
 			continue;
 		list->tsid[list->num++] = tsid;
 	}
@@ -892,7 +892,7 @@ static int px4_chrdev_set_stream_id_s(struct ptx_chrdev *chrdev, u16 stream_id)
 		while (i--) {
 			ret = tc90522_tmcc_get_tsid_s(tc90522,
 						      stream_id, &tsid);
-			if ((!ret && tsid) || ret == -EINVAL)
+			if ((!ret && tc90522_tmcc_tsid_is_assigned(tsid)) || ret == -EINVAL)
 				break;
 
 			msleep(10);
@@ -905,7 +905,7 @@ static int px4_chrdev_set_stream_id_s(struct ptx_chrdev *chrdev, u16 stream_id)
 			return ret;
 		}
 
-		if (!tsid) {
+		if (!tc90522_tmcc_tsid_is_assigned(tsid)) {
 			ret = -EAGAIN;
 			return ret;
 		}
