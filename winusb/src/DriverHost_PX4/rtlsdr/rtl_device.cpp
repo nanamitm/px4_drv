@@ -9,6 +9,7 @@
 #include <condition_variable>
 #include <thread>
 #include <algorithm>
+#include <filesystem>
 
 namespace px4::rtlsdr {
 namespace {
@@ -43,7 +44,10 @@ public:
         :ReceiverBase(0),serial_(std::move(serial)),helper_(config.Get(L"HelperPath",L"rtlsdr\\rtlsdr_frontend.exe")),device_path_(std::move(device_path)),
          session_(*this,[this](const std::uint8_t *data,std::size_t size,std::uint64_t run){WriteTs(data,size,run);})
     {
-        if(helper_.size()<2 || helper_[1]!=L':') helper_=px4::util::path::GetDir()+L"\\"+helper_;
+        // 相対パスだけを DriverHost のディレクトリから解決する。2 文字目の ':' だけで判定すると、UNC パス (\\server\share\...)
+        // の前にもディレクトリを付けてしまうため、PX-S1UD の HelperPath と同じく std::filesystem で判定する
+        if(const std::filesystem::path path=helper_;path.is_relative())
+            helper_=(std::filesystem::path(px4::util::path::GetDir())/path).lexically_normal().wstring();
         gain_=ConfigInt(config,L"GainTenthsDb",gain_,-600,600,"RTL-SDR");
         async_tune_=px4::util::wtob(config.Get(L"AsyncTune",L"false"));
     }
