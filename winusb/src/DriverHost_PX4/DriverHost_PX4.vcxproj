@@ -358,6 +358,7 @@
 	<ClInclude Include="card_reader_directory.hpp" />
     <ClInclude Include="tc90522_cnr.hpp" />
     <ClInclude Include="stream_overflow.hpp" />
+    <ClInclude Include="config_int.hpp" />
     <ClInclude Include="xz3\device.hpp" />
     <ClInclude Include="xz3\frontend.hpp" />
     <ClInclude Include="xz3\card_uart.hpp" />
