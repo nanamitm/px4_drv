@@ -14,6 +14,7 @@
 #include <condition_variable>
 #include <thread>
 #include <algorithm>
+#include <filesystem>
 
 namespace px4::msi2500 {
 namespace {
@@ -50,7 +51,10 @@ public:
     Receiver(std::wstring device_path,std::uintptr_t index,const Config &config,bool j83b)
         :ReceiverBase(0),device_path_(std::move(device_path)),index_(index),helper_(config.Get(L"HelperPath",L"msi2500\\msi2500_frontend.exe")),j83b_(j83b)
     {
-        if(helper_.size()<2 || helper_[1]!=L':') helper_=px4::util::path::GetDir()+L"\\"+helper_;
+        // 相対パスだけを DriverHost のディレクトリから解決する。2 文字目の ':' だけで判定すると、UNC パス (\\server\share\...)
+        // の前にもディレクトリを付けてしまうため、PX-S1UD の HelperPath と同じく std::filesystem で判定する
+        if(const std::filesystem::path path=helper_;path.is_relative())
+            helper_=(std::filesystem::path(px4::util::path::GetDir())/path).lexically_normal().wstring();
         // 利得は MSi001 の LNA・ミキサー・IF の合計 (dB)。helper の --gain と同じ 0〜102
         gain_=ConfigInt(config,L"GainDb",gain_,0,102,"MSi2500");
         // J.83B はケーブルの入力レベルが地上波のアンテナ入力と異なるため、別の値を持つ。
