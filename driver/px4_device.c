@@ -1130,8 +1130,15 @@ static int px4_chrdev_read_cnr_raw_t(struct ptx_chrdev *chrdev, u32 *value)
 static int px4_chrdev_read_cnr_raw_s(struct ptx_chrdev *chrdev, u32 *value)
 {
 	struct px4_chrdev *chrdev4 = chrdev->priv;
+	u16 cn = 0;
+	int ret;
 
-	return tc90522_get_cn_s(&chrdev4->tc90522, (u16 *)value);
+	/* u32 の領域へ u16 を直接書くと、ビッグエンディアンでは上位16ビットに値が入るため、u16 で受けてから広げる */
+	ret = tc90522_get_cn_s(&chrdev4->tc90522, &cn);
+	if (!ret)
+		*value = cn;
+
+	return ret;
 }
 
 static struct ptx_chrdev_operations px4_chrdev_t_ops = {
