@@ -245,24 +245,49 @@ int cxd2858er_init(struct cxd2858er_tuner *tuner)
 		return -EINVAL;
 
 	tuner->system = CXD2858ER_UNSPECIFIED_SYSTEM;
+	tuner->standby_rfin_matching = false;
 
 	ret = i2c_comm_master_gate_ctrl(tuner->i2c, true);
 	if (ret)
 		return ret;
 
 	ret = cxd2858er_power_on(tuner);
+	if (!ret)
+		tuner->standby_rfin_matching = tuner->config.ter.rfin_matching;
 
 	i2c_comm_master_gate_ctrl(tuner->i2c, false);
 
 	return ret;
 }
 
+int cxd2858er_apply_standby_rfin_matching(struct cxd2858er_tuner *tuner)
+{
+	int ret, gate_ret;
+
+	if (tuner->system != CXD2858ER_UNSPECIFIED_SYSTEM ||
+	    !tuner->config.ter.rfin_matching || tuner->standby_rfin_matching)
+		return 0;
+
+	ret = i2c_comm_master_gate_ctrl(tuner->i2c, true);
+	if (ret)
+		return ret;
+
+	/* 待機に入ったままのチューナーでは、RF_EXT を保持して整合ビットだけを更新する。 */
+	ret = cxd2858er_write_reg_mask(tuner, 0x67, 0x02, 0x02);
+	gate_ret = i2c_comm_master_gate_ctrl(tuner->i2c, false);
+	if (!ret && !gate_ret)
+		tuner->standby_rfin_matching = true;
+
+	return ret ? ret : gate_ret;
+}
+
 int cxd2858er_term(struct cxd2858er_tuner *tuner)
 {
 	int ret = 0;
 
+	/* 整合の設定を受け取ったあと、選局せずに閉じる場合も待機レジスターへ反映する。 */
 	if (tuner->system == CXD2858ER_UNSPECIFIED_SYSTEM)
-		return 0;
+		return cxd2858er_apply_standby_rfin_matching(tuner);
 
 	ret = i2c_comm_master_gate_ctrl(tuner->i2c, true);
 	if (!ret) {
@@ -283,6 +308,7 @@ int cxd2858er_term(struct cxd2858er_tuner *tuner)
 		i2c_comm_master_gate_ctrl(tuner->i2c, false);
 	} else {
 		tuner->system = CXD2858ER_UNSPECIFIED_SYSTEM;
+		tuner->standby_rfin_matching = false;
 	}
 
 	return 0;
@@ -372,6 +398,7 @@ int cxd2858er_set_params_t(struct cxd2858er_tuner *tuner,
 	if (ret)
 		goto exit;
 
+	tuner->standby_rfin_matching = false;
 	ret = cxd2858er_write_reg_mask(tuner, 0x67, 0x00, 0x02);
 	if (ret)
 		goto exit;
@@ -482,6 +509,7 @@ int cxd2858er_set_params_c(struct cxd2858er_tuner *tuner,
 	if (ret)
 		goto exit;
 
+	tuner->standby_rfin_matching = false;
 	ret = cxd2858er_write_reg_mask(tuner, 0x67, 0x00, 0x02);
 	if (ret)
 		goto exit;
@@ -687,6 +715,7 @@ static int cxd2858er_stop_t(struct cxd2858er_tuner *tuner)
 	if (ret)
 		return ret;
 
+	tuner->standby_rfin_matching = tuner->config.ter.rfin_matching;
 	tuner->system = CXD2858ER_UNSPECIFIED_SYSTEM;
 	return 0;
 }
@@ -736,6 +765,7 @@ static int cxd2858er_stop_s(struct cxd2858er_tuner *tuner)
 			return ret;
 	}
 
+	tuner->standby_rfin_matching = tuner->config.ter.rfin_matching;
 	tuner->system = CXD2858ER_UNSPECIFIED_SYSTEM;
 	return 0;
 }

@@ -55,8 +55,10 @@ static int pxmlt_backend_set_power(struct pxmlt_device *pxmlt, bool state)
 		msleep(20);
 
 		/* 電源を入れた直後のチューナーは、PLEX の公開ドライバーと同じ既定の待機状態から始める */
-		for (i = 0; i < pxmlt->chrdevm_num; i++)
+		for (i = 0; i < pxmlt->chrdevm_num; i++) {
 			pxmlt->chrdevm[i].cxd2858er.config.ter.rfin_matching = false;
+			pxmlt->chrdevm[i].cxd2858er.standby_rfin_matching = false;
+		}
 	} else {
 		it930x_write_gpio(it930x, 2, false);
 		it930x_write_gpio(it930x, 7, true);
@@ -208,8 +210,19 @@ static int pxmlt_device_stream_handler(void *context, void *buf, u32 len)
 
 static int pxmlt_chrdev_init(struct ptx_chrdev *chrdev)
 {
+	struct pxmlt_chrdev *chrdevm = chrdev->priv;
+	struct pxmlt_device *pxmlt = chrdevm->parent;
+	struct pxmlt_stream_context *stream_ctx = pxmlt->stream_ctx;
+
 	dev_dbg(chrdev->parent->dev, "pxmlt_chrdev_init\n");
 
+	/* /dev を公開する前に、選局と TS 配信が参照する受信機を関連付ける。 */
+	chrdevm->chrdev = chrdev;
+	stream_ctx->chrdev[chrdevm - pxmlt->chrdevm] = chrdev;
+
+	/* ブリッジの設定は初期化のときの値で決まるため、実行中にモジュールパラメーターを書き換えても、ここで渡した値を TSMF の分離に使い続ける */
+	chrdev->discard_null_packets = px4_device_params.discard_null_packets;
+	chrdev->tsmf_stale_packets = pxmlt->it930x.config.xfer_size / 188;
 	chrdev->params.system = PTX_UNSPECIFIED_SYSTEM;
 	return 0;
 }
@@ -312,6 +325,7 @@ static int pxmlt_chrdev_open(struct ptx_chrdev *chrdev)
 	if (ret)
 		goto fail_backend;
 
+	chrdevm->opened = true;
 	pxmlt->open_count++;
 	kref_get(&pxmlt->kref);
 
@@ -340,6 +354,7 @@ fail_backend_power:
 
 static int pxmlt_chrdev_release(struct ptx_chrdev *chrdev)
 {
+	int ret;
 	struct ptx_chrdev_group *chrdev_group = chrdev->parent;
 	struct pxmlt_chrdev *chrdevm = chrdev->priv;
 	struct pxmlt_device *pxmlt = chrdevm->parent;
@@ -357,11 +372,16 @@ static int pxmlt_chrdev_release(struct ptx_chrdev *chrdev)
 	}
 
 	mutex_lock(chrdevm->tuner_lock);
-	cxd2858er_term(&chrdevm->cxd2858er);
+	ret = cxd2858er_term(&chrdevm->cxd2858er);
 	mutex_unlock(chrdevm->tuner_lock);
+	if (ret)
+		dev_warn(pxmlt->dev,
+			 "pxmlt_chrdev_release %u:%u: tuner shutdown failed. (ret: %d)\n",
+			 chrdev_group->id, chrdev->id, ret);
 
 	cxd2856er_term(&chrdevm->cxd2856er);
 
+	chrdevm->opened = false;
 	pxmlt->open_count--;
 	if (!pxmlt->open_count && !pxmlt->card_powered)
 		pxmlt_backend_set_power(pxmlt, false);
@@ -448,36 +468,43 @@ static int pxmlt_chrdev_tune(struct ptx_chrdev *chrdev,
 		/* チューナーが待機と動作を切り替えるときに RF 入力の整合が変わり、隣のチューナーで受信中の 256QAM に誤りが出る
 		 * 地デジと BS/CS の受信ではこの誤りは出ないため、電源投入から初めて ISDB-C か J.83B を選局するときにだけ、全チューナーを待機中も整合を保つ設定 (rfin_matching) にする
 		 * 閉じているチューナーは、256QAM の受信が始まる前にこの設定で初期化し直して待機させる
-		 * 開いているチューナーの I2C は、その受信機の復調器のバンクの選択と同じ経路を通るため、ここからは書き込まず、次に待機へ戻るときにこの設定を書き込ませる
+		 * 開いているチューナーの I2C は、その受信機の復調器のバンクの選択と同じ経路を通るため、受信機のロックを取得できるときだけ、未選局のチューナーの待機レジスターを更新する
+		 * 使用中の受信機のロックは待たず、動作中のチューナーとともに停止時に反映させる
 		 * 初期化は1台ずつ、開く処理と同じ時間だけデバイスのロックを持って行い、ほかの受信機の操作とカードの通信を長く待たせない */
 		for (i = 0; i < pxmlt->chrdevm_num; i++) {
 			struct pxmlt_chrdev *other = &pxmlt->chrdevm[i];
+			struct cxd2858er_tuner *tuner = &other->cxd2858er;
+			bool active;
 
 			mutex_lock(&pxmlt->lock);
 			mutex_lock(other->tuner_lock);
 
-			if (other->cxd2858er.config.ter.rfin_matching) {
+			active = tuner->system != CXD2858ER_UNSPECIFIED_SYSTEM;
+			if (tuner->config.ter.rfin_matching &&
+			    (active ? other->opened : tuner->standby_rfin_matching)) {
 				mutex_unlock(other->tuner_lock);
 				mutex_unlock(&pxmlt->lock);
 				continue;
 			}
 
-			other->cxd2858er.config.ter.rfin_matching = true;
+			tuner->config.ter.rfin_matching = true;
 
-			if (!atomic_read(&other->chrdev->open)) {
+			if (!other->opened) {
 				ret = cxd2856er_init(&other->cxd2856er);
 				if (!ret)
-					ret = cxd2858er_init(&other->cxd2858er);
+					ret = cxd2858er_init(tuner);
 				cxd2856er_term(&other->cxd2856er);
+			} else if (!active && other != chrdevm &&
+				   mutex_trylock(&other->chrdev->lock)) {
+				ret = cxd2858er_apply_standby_rfin_matching(tuner);
+				mutex_unlock(&other->chrdev->lock);
+			}
 
-				if (ret) {
-					/* 初期化できなかったチューナーは、次に ISDB-C か J.83B を選局するときに初期化し直す */
-					dev_err(pxmlt->dev,
-						"pxmlt_chrdev_tune %u:%u: tuner %d initialization failed. (ret: %d)\n",
-						chrdev_group->id, chrdev->id, i, ret);
-					other->cxd2858er.config.ter.rfin_matching = false;
-					ret = 0;
-				}
+			if (ret) {
+				dev_err(pxmlt->dev,
+					"pxmlt_chrdev_tune %u:%u: tuner %d RF input matching failed. (ret: %d)\n",
+					chrdev_group->id, chrdev->id, i, ret);
+				ret = 0;
 			}
 
 			mutex_unlock(other->tuner_lock);
@@ -967,6 +994,7 @@ int pxmlt_device_init(struct pxmlt_device *pxmlt, struct device *dev,
 
 		chrdevm->chrdev = NULL;
 		chrdevm->parent = pxmlt;
+		chrdevm->opened = false;
 		chrdevm->lnb_power = false;
 		chrdevm->tuner_lock = &pxmlt->tuner_lock[tuner_lock_idx];
 	}
@@ -1068,23 +1096,13 @@ int pxmlt_device_init(struct pxmlt_device *pxmlt, struct device *dev,
 	chrdev_group_config.chrdev_num = pxmlt->chrdevm_num;
 	chrdev_group_config.chrdev_config = chrdev_config;
 
+	atomic_set(&pxmlt->available, 1);
 	ret = ptx_chrdev_context_add_group(chrdev_ctx, dev,
 					   &chrdev_group_config, &chrdev_group);
 	if (ret)
 		goto fail_chrdev;
 
 	pxmlt->chrdev_group = chrdev_group;
-
-	for (i = 0; i < pxmlt->chrdevm_num; i++) {
-		pxmlt->chrdevm[i].chrdev = &chrdev_group->chrdev[i];
-		stream_ctx->chrdev[i] = &chrdev_group->chrdev[i];
-
-		/* ブリッジの設定は初期化のときの値で決まるため、実行中にモジュールパラメーターを書き換えても、ここで渡した値を TSMF の分離に使い続ける */
-		chrdev_group->chrdev[i].discard_null_packets = px4_device_params.discard_null_packets;
-		chrdev_group->chrdev[i].tsmf_stale_packets = it930x->config.xfer_size / 188;
-	}
-
-	atomic_set(&pxmlt->available, 1);
 
 	/* PX-MLT8PE は5チューナー側と3チューナー側の2つの USB デバイスで構成され、カードスロットは5チューナー側だけにある */
 	if (model != PXMLT8PE3_MODEL) {
@@ -1104,6 +1122,7 @@ int pxmlt_device_init(struct pxmlt_device *pxmlt, struct device *dev,
 	return 0;
 
 fail_chrdev:
+	atomic_set(&pxmlt->available, 0);
 
 fail_device:
 	it930x_term(it930x);
