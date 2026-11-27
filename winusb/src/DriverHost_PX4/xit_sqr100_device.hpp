@@ -117,6 +117,8 @@ private:
 		cxd6866_tuner cxd6866_;
 		px4::SystemType current_system_;
 		std::atomic_bool streaming_;
+		/* 受信の一時停止中もデータ接続の読み出しを続けるため、バッファーは受信機を閉じるまで稼働させる */
+		bool stream_buffer_started_ = false;
 	};
 
 	void LoadConfig();

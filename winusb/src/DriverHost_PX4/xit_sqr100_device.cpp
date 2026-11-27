@@ -638,6 +638,10 @@ void XitSqr100Device::XitSqr100Receiver::Close()
 		cxd2856er_term(&cxd2856er_);
 	}
 
+	/* 受信機を閉じるときだけバッファーを止め、データ接続の読み出しを終わらせる */
+	stream_buf_->Stop();
+	stream_buffer_started_ = false;
+
 	parent_.receiver_open_ = false;
 	if (!parent_.card_open_)
 		parent_.SetBackendPower(false);
@@ -831,17 +835,22 @@ int XitSqr100Device::XitSqr100Receiver::SetCapture(bool capture)
 			return ret;
 
 		if (!streaming_) {
-			const std::size_t size = 188 * parent_.config_.device.receiver_max_packets;
-			// StartCaptureの完了を待たずにUSBスレッドが書き込むため、先にバッファを用意する。
-			if (!stream_buf_->Alloc(size))
-				return -ENOMEM;
-			stream_buf_->SetThresholdSize(size / 10);
-			stream_buf_->Start();
-			ret = parent_.StartCapture();
-			if (ret) {
-				stream_buf_->Stop();
-				return ret;
+			if (!stream_buffer_started_) {
+				const std::size_t size = 188 * parent_.config_.device.receiver_max_packets;
+				// StartCaptureの完了を待たずにUSBスレッドが書き込むため、先にバッファを用意する。
+				if (!stream_buf_->Alloc(size))
+					return -ENOMEM;
+				stream_buf_->SetThresholdSize(size / 10);
+				stream_buf_->Start();
+				stream_buffer_started_ = true;
+			} else if (!stream_buf_->AdvanceEpoch()) {
+				/* 再開時は停止前の TS を捨てて世代を進め、BonDriver が停止前のデータを区別できるようにする */
+				return -EIO;
 			}
+			/* 開始に失敗してもバッファーは止めない (Stop() するとデータ接続の読み出しが終わり、再開しても TS が届かない) */
+			ret = parent_.StartCapture();
+			if (ret)
+				return ret;
 			streaming_ = true;
 		} else {
 			stream_buf_->Purge();
@@ -851,7 +860,9 @@ int XitSqr100Device::XitSqr100Receiver::SetCapture(bool capture)
 		if (ret)
 			return ret;
 
-		stream_buf_->Stop();
+		/* バッファーを Stop() するとデータ接続の読み出しが終わるため、停止前の TS だけを捨て、Stop() は Close() で行う */
+		if (streaming_ && !stream_buf_->Purge())
+			ret = -EIO;
 		streaming_ = false;
 	}
 
