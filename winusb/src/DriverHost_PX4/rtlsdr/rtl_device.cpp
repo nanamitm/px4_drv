@@ -2,14 +2,13 @@
 #include "device.hpp"
 #include "session.hpp"
 #include "../stream_overflow.hpp"
+#include "../config_int.hpp"
 #include "msg.h"
 #include "util.hpp"
 #include <array>
 #include <condition_variable>
 #include <thread>
 #include <algorithm>
-#include <cerrno>
-#include <cwchar>
 
 namespace px4::rtlsdr {
 namespace {
@@ -37,24 +36,6 @@ std::wstring Quote(const std::wstring &input)
     }
     out.append(slashes*2,L'\\');return out+L'"';
 }
-// ini の整数。key がなければ fallback を返す。数値として読めない値を 0 として受け付けると、利得 0 dB で
-// エラーなく動き続けるため、範囲外の値と同じく受信機の作成を失敗させる (MSi2500 の GainDb と同じ扱い)
-int ConfigInt(const Config &config,const wchar_t *key,int fallback,int min,int max)
-{
-    if(!config.Exists(key))return fallback;
-    const auto text=config.Get(key);
-    const wchar_t *begin=text.c_str();
-    wchar_t *end=nullptr;
-    errno=0;
-    const long value=std::wcstol(begin,&end,10);
-    const bool parsed=end!=begin && errno!=ERANGE;
-    while(*end==L' ' || *end==L'\t')++end;
-    if(!parsed || *end || value<min || value>max){
-        msg_err("RTL-SDR: %ls=%ls is not an integer in %d..%d\n",key,text.c_str(),min,max);
-        throw DeviceError("RTL-SDR: invalid configuration value");
-    }
-    return static_cast<int>(value);
-}
 }
 class Receiver final: public ReceiverBase, private HelperPort {
 public:
@@ -63,7 +44,7 @@ public:
          session_(*this,[this](const std::uint8_t *data,std::size_t size,std::uint64_t run){WriteTs(data,size,run);})
     {
         if(helper_.size()<2 || helper_[1]!=L':') helper_=px4::util::path::GetDir()+L"\\"+helper_;
-        gain_=ConfigInt(config,L"GainTenthsDb",gain_,-600,600);
+        gain_=ConfigInt(config,L"GainTenthsDb",gain_,-600,600,"RTL-SDR");
         async_tune_=px4::util::wtob(config.Get(L"AsyncTune",L"false"));
     }
     ~Receiver() override
