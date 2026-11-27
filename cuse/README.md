@@ -108,7 +108,8 @@ sudo systemctl enable --now px4-cused
 作られたデバイスファイルの権限は `dist/90-px4-cused.rules` で設定し、受信は `video` グループ、カードは `pcscd` グループに許可します。
 
 内蔵カードリーダーを pcscd から使うには、px4-drv-pcsc ([pcsc/README.md](../pcsc/README.md)) も導入します。  
-IFD ハンドラーは、デーモンが書く `/run/px4-cused/readers` で USB 機器とカードのデバイスファイルを対応させるため、pcscd のホットプラグで認識されます。
+IFD ハンドラーは、デーモンが書く `/run/px4-cused/readers` で USB 機器とカードのデバイスファイルを対応させるため、pcscd のホットプラグで認識されます。  
+ユニットではこのディレクトリを systemd (`RuntimeDirectory=`) が作り、停止時に消します。`systemctl stop` の後にデーモンを手動で起動した場合は、デーモンが `/run/px4-cused` を 0755 で作ります。対応表を書けない場合は、ログにパスと理由 (`reader map: cannot ...`) が残ります。
 
 ### px4-dt295d からの移行
 

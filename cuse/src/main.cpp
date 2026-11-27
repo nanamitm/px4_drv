@@ -10,6 +10,7 @@
 #include "msi2500_device.hpp"
 #include "pxbcud_device.hpp"
 #include "pxs1ud_device.hpp"
+#include "reader_map.hpp"
 #include "rtlsdr_device.hpp"
 #include "torne_device.hpp"
 #include "xz3_device.hpp"
@@ -295,25 +296,17 @@ private:
                 StartCard(*device);
     }
 
-    // IFD ハンドラーへ渡す、USB 機器とカードのデバイスファイルの対応表。
-    // CUSE のデバイスは USB 機器を親に持たず、sysfs からたどれないため、この表で対応を示す。
+    // IFD ハンドラーへ渡す、USB 機器とカードのデバイスファイルの対応表 (reader_map.hpp)。
     void WriteReaderMap()
     {
-        const char *dir = std::getenv("RUNTIME_DIRECTORY");
-        const std::string base = dir && *dir ? std::string(dir) : std::string("/run/px4-cused");
-        const std::string path = base + "/readers", temp = path + ".tmp";
-        {
-            std::ofstream out(temp, std::ios::trunc);
-            if (!out)
-                return;
-            out << "# bus device path\n";
-            for (const auto &device : devices_)
-                if (device->HasCard() && !device->Removed())
-                    out << static_cast<unsigned>(device->Bus()) << ' ' << static_cast<unsigned>(device->Address())
-                        << " /dev/px4card/" << device->CardId() << '\n';
-        }
-        if (std::rename(temp.c_str(), path.c_str()))
-            std::remove(temp.c_str());
+        bool create = false;
+        const std::string directory = ReaderMapDirectory(create);
+        std::vector<ReaderMapEntry> entries;
+        for (const auto &device : devices_)
+            if (device->HasCard() && !device->Removed())
+                entries.push_back({static_cast<unsigned>(device->Bus()), static_cast<unsigned>(device->Address()),
+                                   device->CardId()});
+        px4::cuse::WriteReaderMap(directory, create, entries);
     }
 
     std::mutex mutex_;
