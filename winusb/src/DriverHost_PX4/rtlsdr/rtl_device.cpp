@@ -2,6 +2,7 @@
 #include "device.hpp"
 #include "session.hpp"
 #include "../stream_overflow.hpp"
+#include "../config_int.hpp"
 #include "msg.h"
 #include "util.hpp"
 #include <array>
@@ -47,9 +48,8 @@ public:
         // の前にもディレクトリを付けてしまうため、PX-S1UD の HelperPath と同じく std::filesystem で判定する
         if(const std::filesystem::path path=helper_;path.is_relative())
             helper_=(std::filesystem::path(px4::util::path::GetDir())/path).lexically_normal().wstring();
-        if(config.Exists(L"GainTenthsDb")) gain_=px4::util::wtoi(config.Get(L"GainTenthsDb"));
+        gain_=ConfigInt(config,L"GainTenthsDb",gain_,-600,600,"RTL-SDR");
         async_tune_=px4::util::wtob(config.Get(L"AsyncTune",L"false"));
-        if(gain_<-600 || gain_>600) throw DeviceError("RTL-SDR: invalid gain");
     }
     ~Receiver() override
     {
