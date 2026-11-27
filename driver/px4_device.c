@@ -1377,16 +1377,23 @@ int px4_device_init(struct px4_device *px4, struct device *dev,
 	if (ret)
 		goto fail_device;
 
+	/*
+	 * TC90522 のロックと TSID の切り替えを確認した直後に届く TS には、transport error indicator 付きのパケットが続けて含まれる
+	 * 利用側は選局の直後に受信を始めるため、待たずに返すとこのパケットが受信の先頭として届く。
+	 * WinUSB 版の PX-W3U4 では選局の完了から 150ms 空けると BS と地デジのどちらでも届かなくなったため、
+	 * 余裕を持たせて、ロック後に 200ms 待つ PTX_CHRDEV_WAIT_AFTER_LOCK を ISDB-S と ISDB-T の両方へ設定する
+	 */
 	for (i = 0; i < PX4_CHRDEV_NUM; i++) {
 		switch (chrdev_config[i].system_cap) {
 		case PTX_ISDB_T_SYSTEM:
 			chrdev_config[i].ops = &px4_chrdev_t_ops;
-			chrdev_config[i].options = PTX_CHRDEV_WAIT_AFTER_LOCK_TC_T;
+			chrdev_config[i].options = PTX_CHRDEV_WAIT_AFTER_LOCK_TC_T |
+						   PTX_CHRDEV_WAIT_AFTER_LOCK;
 			break;
 
 		case PTX_ISDB_S_SYSTEM:
 			chrdev_config[i].ops = &px4_chrdev_s_ops;
-			chrdev_config[i].options = 0;
+			chrdev_config[i].options = PTX_CHRDEV_WAIT_AFTER_LOCK;
 			break;
 
 		default:
