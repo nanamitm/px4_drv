@@ -427,8 +427,9 @@ private:
     // 取得順は mutex_、handle_mutex_ の順で、監視のスレッドは handle_mutex_ だけを取る
     std::mutex handle_mutex_;
     Handle process_,job_,input_,output_;
-    // 起動し直した回数 (handle_mutex_ を保持して更新する) と、起動し直した後に最初の TS を待つ間の失敗の時刻
-    std::uint64_t restart_count_=0;
+    // 起動し直した回数 (handle_mutex_ を保持して更新する) と、起動し直した後に最初の TS を待つ間の失敗の時刻。
+    // 回数は ReadHelper が handle_mutex_ を取らずにログへ出すため、atomic にする
+    std::atomic<std::uint64_t> restart_count_{0};
     std::atomic<ULONGLONG> restarted_at_{0};
     std::thread worker_;
 };
