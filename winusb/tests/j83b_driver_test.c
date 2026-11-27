@@ -623,6 +623,28 @@ int main(void)
 	tuner.config.ter.rfin_matching = true;
 	CHECK(cxd2858er_stop(&tuner) == 0);
 	CHECK(bus.regs[2][0][0x67] == 0x02);
+	/* 開いただけのチューナーに整合が要求された場合は、RF_EXT を保持して待機中に反映する。 */
+	reset(&demod, &tuner);
+	CHECK(cxd2858er_init(&tuner) == 0);
+	bus.regs[2][0][0x67] = 0x01;
+	tuner.config.ter.rfin_matching = true;
+	bus.fail_at = bus.calls + 2;
+	CHECK(cxd2858er_apply_standby_rfin_matching(&tuner) == -EIO);
+	CHECK(!tuner.standby_rfin_matching && !bus.gate_open);
+	CHECK(bus.regs[2][0][0x67] == 0x01);
+
+	/* 選局前に反映できなかった場合は、未選局のまま閉じるときにも再試行する。 */
+	CHECK(cxd2858er_term(&tuner) == 0);
+	CHECK(tuner.standby_rfin_matching && !bus.gate_open);
+	CHECK(bus.regs[2][0][0x67] == 0x03);
+	count = bus.calls;
+	CHECK(cxd2858er_apply_standby_rfin_matching(&tuner) == 0);
+	CHECK(bus.calls == count);
+
+	CHECK(cxd2858er_set_params_t(&tuner, CXD2858ER_ISDB_T_SYSTEM, 557143, 6) == 0);
+	count = bus.calls;
+	CHECK(cxd2858er_apply_standby_rfin_matching(&tuner) == 0);
+	CHECK(bus.calls == count && bus.regs[2][0][0x67] == 0x01);
 	puts("Tuner RF input matching in standby: PASS");
 
 	test_rf_level();

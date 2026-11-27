@@ -42,6 +42,8 @@ struct cxd2858er_tuner {
 	u8 i2c_addr;
 	struct cxd2858er_config config;
 	enum cxd2858er_system system;
+	/* 待機中の RF 入力整合をハードウェアに反映済みか。 */
+	bool standby_rfin_matching;
 	/* 地上波側で選局した周波数 (kHz)。入力レベルの換算に使う最大 RF 利得が周波数で変わるため保持する */
 	u32 freq;
 };
@@ -51,6 +53,7 @@ extern "C" {
 #endif
 int cxd2858er_init(struct cxd2858er_tuner *tuner);
 int cxd2858er_term(struct cxd2858er_tuner *tuner);
+int cxd2858er_apply_standby_rfin_matching(struct cxd2858er_tuner *tuner);
 
 int cxd2858er_set_params_t(struct cxd2858er_tuner *tuner,
 			   enum cxd2858er_system system,

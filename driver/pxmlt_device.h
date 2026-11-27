@@ -40,6 +40,8 @@ struct pxmlt_device;
 struct pxmlt_chrdev {
 	struct ptx_chrdev *chrdev;
 	struct pxmlt_device *parent;
+	/* 受信機の初期化と解放に合わせ、デバイスのロック下で更新する。 */
+	bool opened;
 	bool lnb_power;
 	bool null_packet_filter_disabled;
 	struct mutex *tuner_lock;
