@@ -80,7 +80,7 @@ int XitSqr100Device::Init()
 {
 	dev_dbg(&dev_, "px4::XitSqr100Device::Init: init_: %s\n", (init_) ? "true" : "false");
 
-	std::lock_guard<std::recursive_mutex> lock(lock_);
+	std::unique_lock<std::recursive_mutex> lock(lock_);
 
 	if (init_)
 		return -EALREADY;
@@ -193,6 +193,9 @@ int XitSqr100Device::Init()
 	backend_power_.SetOff();
 	init_ = true;
 
+	/* ReceiverManager は登録済みの受信機を開くときにデバイスのロックを取得する。 */
+	lock.unlock();
+
 	for (auto it = device_def_.receivers.cbegin(); it != device_def_.receivers.cend(); ++it) {
 		px4::command::ReceiverInfo ri;
 
@@ -238,17 +241,21 @@ void XitSqr100Device::Term()
 	if (!init_)
 		return;
 
-	receiver_manager_.Unregister(receiver_.get());
-
+	/* 登録解除が進行中の Open() を待てるよう、デバイスのロックを先に解放する。 */
 	lock.unlock();
 
-	stream_ctx_.stream_buf = nullptr;
-	receiver_.reset();
+	receiver_manager_.Unregister(receiver_.get());
+
+	receiver_->WaitForClose();
 
 	lock.lock();
 
 	it930x_term(&it930x_);
 	itedtv_bus_term(&it930x_.bus);
+
+	/* 最後の USB コールバックが完了してから参照先を解放する。 */
+	stream_ctx_.stream_buf.reset();
+	receiver_.reset();
 
 	init_ = false;
 	return;
@@ -518,11 +525,15 @@ XitSqr100Device::XitSqr100Receiver::~XitSqr100Receiver()
 {
 	dev_dbg(&parent_.dev_, "px4::XitSqr100Device::XitSqr100Receiver::~XitSqr100Receiver(%u)\n", index_);
 
-	std::unique_lock<std::mutex> lock(lock_);
-
-	close_cond_.wait(lock, [this] { return !open_; });
+	WaitForClose();
 
 	dev_dbg(&parent_.dev_, "px4::XitSqr100Device::XitSqr100Receiver::~XitSqr100Receiver(%u): exit\n", index_);
+}
+
+void XitSqr100Device::XitSqr100Receiver::WaitForClose()
+{
+	std::unique_lock<std::mutex> lock(lock_);
+	close_cond_.wait(lock, [this] { return !open_; });
 }
 
 int XitSqr100Device::XitSqr100Receiver::Open()

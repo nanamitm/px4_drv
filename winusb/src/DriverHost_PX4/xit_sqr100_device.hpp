@@ -85,6 +85,7 @@ private:
 		XitSqr100Receiver() = delete;
 		XitSqr100Receiver(XitSqr100Device &parent, std::uintptr_t index);
 		~XitSqr100Receiver();
+		void WaitForClose();
 
 		// cannot copy
 		XitSqr100Receiver(const XitSqr100Receiver &) = delete;

@@ -129,7 +129,7 @@ int Px4Device::Init()
 {
 	dev_dbg(&dev_, "px4::Px4Device::Init: init_: %s\n", (init_) ? "true" : "false");
 
-	std::lock_guard<std::recursive_mutex> lock(lock_);
+	std::unique_lock<std::recursive_mutex> lock(lock_);
 
 	if (init_)
 		return -EALREADY;
@@ -250,6 +250,9 @@ int Px4Device::Init()
 
 	init_ = true;
 
+	/* ReceiverManager は登録済みの受信機を開くときにデバイスのロックを取得する。 */
+	lock.unlock();
+
 	for (auto it = device_def_.receivers.cbegin(); it != device_def_.receivers.cend(); ++it) {
 		px4::command::ReceiverInfo ri;
 
@@ -301,10 +304,11 @@ void Px4Device::Term()
 	if (!init_)
 		return;
 
+	/* 登録解除が進行中の Open() を待てるよう、デバイスのロックを先に解放する。 */
+	lock.unlock();
+
 	for (int i = 0; i < 4; i++)
 		receiver_manager_.Unregister(receivers_[i].get());
-
-	lock.unlock();
 
 	/* Close() は他の受信機と共有バッファを参照するため、すべて閉じるまで保持する。 */
 	for (const auto &receiver : receivers_)
