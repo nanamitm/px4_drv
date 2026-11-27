@@ -22,6 +22,13 @@
  * a stream_id of this value or greater is treated as an absolute TSID */
 #define TC90522_ISDB_S_RELATIVE_STREAM_COUNT 8
 
+/* TMCC の相対 TS 番号の欄は、取得前は 0、TS が割り当てられていない欄は 0xffff になる
+ * どちらも TSID として設定すると読み返しが一致して選局が成功扱いになり、slot 0 の TS が届くため、割り当て済みの値だけを受理する */
+static inline bool tc90522_tmcc_tsid_is_assigned(u16 tsid)
+{
+	return tsid && tsid != 0xffff;
+}
+
 struct tc90522_priv {
 	struct mutex lock;
 };
