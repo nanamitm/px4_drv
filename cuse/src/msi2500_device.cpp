@@ -288,12 +288,19 @@ int Msi2500Device::LoadOps(std::uint32_t hz, std::vector<ControlOp> &setup, std:
         text.append(buffer, static_cast<std::size_t>(got));
     }
     close(out[0]);
+    // 標準出力の EOF は helper が記述子を閉じた時点で届き、回収できる状態になるのはその後になる。
+    // EOF の直後に回収できないのは正常な終了の途中のため、読み出しと同じ期限まで待ってから強制終了する
     int status = 0;
-    if (waitpid(pid, &status, WNOHANG) == 0) {
+    pid_t done = 0;
+    while (((done = waitpid(pid, &status, WNOHANG)) == 0 || (done < 0 && errno == EINTR)) && Clock::now() < deadline)
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    if (done != pid) {
         kill(pid, SIGKILL);
-        waitpid(pid, &status, 0);
+        while ((done = waitpid(pid, &status, 0)) < 0 && errno == EINTR) {
+        }
     }
-    if (!WIFEXITED(status) || WEXITSTATUS(status)) {
+    // 回収できなかった場合は終了状態が分からないため、成功として扱わない
+    if (done != pid || !WIFEXITED(status) || WEXITSTATUS(status)) {
         msg_err("%s: helper ops failed status=%d\n", label_.c_str(), status);
         return -EIO;
     }
