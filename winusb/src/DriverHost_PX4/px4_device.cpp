@@ -1553,6 +1553,10 @@ int Px4Device::Px4Receiver::SetStreamId()
 		if (ret)
 			return ret;
 
+		/* TMCC のスロットが空のまま TSID 0 を設定すると、読み返しも一致して成功扱いになり、TS の来ない選局が確定するため再試行を求める */
+		if (!tsid)
+			return -EAGAIN;
+
 		dev_dbg(&parent_.dev_, "px4::Px4Device::Px4Receiver::SetStreamId(%u): slot: %u, tsid: 0x%04x\n", index_, params_.stream_id, tsid);
 	} else {
 		tsid = params_.stream_id;
