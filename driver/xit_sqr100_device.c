@@ -7,7 +7,7 @@
  * 基板電源の GPIO の信号名と極性は、Windows ドライバー (IT9300BDA.sys) の解析から得た候補で、回路図や実測では確かめられていない
  *
  * J.83 Annex B (5.6Msps) は、PX-MLT 系と同じ復調器 (CXD2856ER) の手順と、チューナー (CXD6866AER) の Sony の J.83B の設定で受信する
- * J.83B の信号での受信は、この機種ではまだ確認していない
+ * J.83B の受信は WinUSB 版の実機で確認しているが、Linux 版では実機での受信を確認していない
  */
 
 #include "print_format.h"
@@ -231,8 +231,14 @@ static int xit_sqr100_chrdev_release(struct ptx_chrdev *chrdev)
 		return -EALREADY;
 	}
 
-	cxd6866_term(&chrdevx->cxd6866);
-	cxd2856er_term(&chrdevx->cxd2856er);
+	/*
+	 * 切断後は失敗するだけの USB の制御転送を発行しない (WinUSB 版の Close() と同じ)
+	 * 切断後の構造体は最後の参照が外れると解放され再利用されないため、復調器とチューナーのソフトウェアの状態は戻さなくてよい
+	 */
+	if (atomic_read(&xit->available)) {
+		cxd6866_term(&chrdevx->cxd6866);
+		cxd2856er_term(&chrdevx->cxd2856er);
+	}
 
 	xit->tuner_open = false;
 	if (!xit->card_powered)
