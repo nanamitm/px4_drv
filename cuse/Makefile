@@ -54,7 +54,7 @@ PLATFORM_OBJS := $(BUILD)/platform_linux.o $(BUILD)/firmware.o
 DAEMON_OBJS := $(BUILD)/main.o $(BUILD)/device.o $(BUILD)/video_node.o $(BUILD)/card_node.o \
 	$(BUILD)/dt295_device.o $(BUILD)/torne_device.o $(BUILD)/torne_port.o $(BUILD)/xz3_device.o $(BUILD)/pxbcud_device.o \
 	$(BUILD)/pxs1ud_device.o $(BUILD)/iq_process.o $(BUILD)/rtlsdr_device.o $(BUILD)/rtlsdr_helper.o $(BUILD)/msi2500_device.o \
-	$(BUILD)/cuse_session.o $(BUILD)/usb_transport.o $(BUILD)/log.o
+	$(BUILD)/cuse_session.o $(BUILD)/usb_transport.o $(BUILD)/reader_map.o $(BUILD)/log.o
 
 all: $(BUILD)/px4-cused
 
@@ -122,6 +122,10 @@ $(BUILD)/control_channel_test: $(ROOT)/winusb/tests/dt295_control_channel_test.c
 
 $(BUILD)/channel_test: tests/channel_test.cpp src/channel.hpp | $(BUILD)
 	$(CXX) $(CPPFLAGS) $(CXXFLAGS) $< -o $@
+
+# IFD ハンドラーへ渡す対応表 (/run/px4-cused/readers) の書き込みと失敗の記録。一時ディレクトリで動き、root は不要。
+$(BUILD)/reader_map_test: tests/reader_map_test.cpp $(BUILD)/reader_map.o $(BUILD)/log.o
+	$(CXX) $(CPPFLAGS) $(CXXFLAGS) $^ -o $@
 
 $(BUILD)/platform_test: tests/platform_test.cpp $(PLATFORM_OBJS) $(BUILD)/shared/source_firmware.o $(BUILD)/shared/frontend_init.o $(BUILD)/log.o $(UPSTREAM_OBJS)
 	$(CXX) $(CPPFLAGS) $(CXXFLAGS) $^ -o $@
@@ -204,12 +208,13 @@ rtlsdr: $(BUILD)/cargo/release/rtlsdr_frontend
 install-rtlsdr: rtlsdr
 	install -D -m 0755 $(BUILD)/cargo/release/rtlsdr_frontend $(DESTDIR)$(LIBDIR)/rtlsdr_frontend
 
-check: $(BUILD)/control_channel_test $(BUILD)/channel_test $(BUILD)/platform_test $(BUILD)/torne_session_test \
+check: $(BUILD)/control_channel_test $(BUILD)/channel_test $(BUILD)/reader_map_test $(BUILD)/platform_test $(BUILD)/torne_session_test \
 		$(BUILD)/torne_native_frontend_test $(BUILD)/xz3_card_test $(BUILD)/xz3_stream_test \
 		$(BUILD)/pxbcud_frontend_test $(BUILD)/pxbcud_stream_test $(BUILD)/siano_frontend_test $(BUILD)/siano_session_test \
 		$(BUILD)/iq_process_test $(BUILD)/rtlsdr_protocol_test $(BUILD)/rtlsdr_session_test $(BUILD)/rtlsdr_helper_test 		| $(BUILD)/torne-trace
 	$(BUILD)/control_channel_test
 	$(BUILD)/channel_test
+	$(BUILD)/reader_map_test
 	$(BUILD)/platform_test
 	$(BUILD)/torne_session_test
 	$(BUILD)/torne_native_frontend_test
