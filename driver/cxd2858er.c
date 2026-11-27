@@ -398,6 +398,7 @@ int cxd2858er_set_params_t(struct cxd2858er_tuner *tuner,
 	if (ret)
 		goto exit;
 
+	tuner->standby_rfin_matching = false;
 	ret = cxd2858er_write_reg_mask(tuner, 0x67, 0x00, 0x02);
 	if (ret)
 		goto exit;
@@ -508,6 +509,7 @@ int cxd2858er_set_params_c(struct cxd2858er_tuner *tuner,
 	if (ret)
 		goto exit;
 
+	tuner->standby_rfin_matching = false;
 	ret = cxd2858er_write_reg_mask(tuner, 0x67, 0x00, 0x02);
 	if (ret)
 		goto exit;

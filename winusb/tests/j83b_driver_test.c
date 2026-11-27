@@ -645,6 +645,22 @@ int main(void)
 	count = bus.calls;
 	CHECK(cxd2858er_apply_standby_rfin_matching(&tuner) == 0);
 	CHECK(bus.calls == count && bus.regs[2][0][0x67] == 0x01);
+	/* 選局途中で整合ビットを落としてから I2C エラーが出ても、閉じるときに復元する。 */
+	reset(&demod, &tuner);
+	tuner.config.ter.rfin_matching = true;
+	CHECK(cxd2858er_init(&tuner) == 0);
+	count = bus.calls;
+	CHECK(cxd2858er_set_params_c(&tuner, 697143, true) == 0);
+	count = bus.calls - count;
+
+	reset(&demod, &tuner);
+	tuner.config.ter.rfin_matching = true;
+	CHECK(cxd2858er_init(&tuner) == 0);
+	bus.fail_at = bus.calls + count;
+	CHECK(cxd2858er_set_params_c(&tuner, 697143, true) == -EIO);
+	CHECK(!tuner.standby_rfin_matching && bus.regs[2][0][0x67] == 0x00);
+	CHECK(cxd2858er_term(&tuner) == 0);
+	CHECK(tuner.standby_rfin_matching && bus.regs[2][0][0x67] == 0x02);
 	puts("Tuner RF input matching in standby: PASS");
 
 	test_rf_level();
