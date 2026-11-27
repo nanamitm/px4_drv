@@ -220,7 +220,7 @@ static int pxmlt_chrdev_init(struct ptx_chrdev *chrdev)
 	chrdevm->chrdev = chrdev;
 	stream_ctx->chrdev[chrdevm - pxmlt->chrdevm] = chrdev;
 
-	/* 実行中にモジュールパラメーターが変わっても、TSMF には初期化時の値を使う。 */
+	/* ブリッジの設定は初期化のときの値で決まるため、実行中にモジュールパラメーターを書き換えても、ここで渡した値を TSMF の分離に使い続ける */
 	chrdev->discard_null_packets = px4_device_params.discard_null_packets;
 	chrdev->tsmf_stale_packets = pxmlt->it930x.config.xfer_size / 188;
 	chrdev->params.system = PTX_UNSPECIFIED_SYSTEM;
@@ -468,7 +468,7 @@ static int pxmlt_chrdev_tune(struct ptx_chrdev *chrdev,
 		/* チューナーが待機と動作を切り替えるときに RF 入力の整合が変わり、隣のチューナーで受信中の 256QAM に誤りが出る
 		 * 地デジと BS/CS の受信ではこの誤りは出ないため、電源投入から初めて ISDB-C か J.83B を選局するときにだけ、全チューナーを待機中も整合を保つ設定 (rfin_matching) にする
 		 * 閉じているチューナーは、256QAM の受信が始まる前にこの設定で初期化し直して待機させる
-		 * 開いたまま未選局のチューナーは、受信機のロックを取得できるときに待機レジスターを更新する
+		 * 開いているチューナーの I2C は、その受信機の復調器のバンクの選択と同じ経路を通るため、受信機のロックを取得できるときだけ、未選局のチューナーの待機レジスターを更新する
 		 * 使用中の受信機のロックは待たず、動作中のチューナーとともに停止時に反映させる
 		 * 初期化は1台ずつ、開く処理と同じ時間だけデバイスのロックを持って行い、ほかの受信機の操作とカードの通信を長く待たせない */
 		for (i = 0; i < pxmlt->chrdevm_num; i++) {
