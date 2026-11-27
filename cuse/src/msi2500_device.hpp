@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 #pragma once
 #include "device.hpp"
+#include "msi2500_ops.hpp"
 #include "rtlsdr_helper.hpp"
 #include "rtlsdr/session.hpp"
 #include <atomic>
@@ -63,10 +64,7 @@ private:
     bool DevicePresent() override { return !removal_.Removed(); }
 
     // 1 回の制御転送 (bmRequestType 0x40、wLength 0)
-    struct ControlOp {
-        std::uint8_t request = 0;
-        std::uint16_t value = 0, index = 0;
-    };
+    using ControlOp = msi2500::ControlOp;
     // helper の ops を実行して、取り込みの前に送る列 (setup) と停止要求の後に送る列 (stop) を得る
     int LoadOps(std::uint32_t hz, std::vector<ControlOp> &setup, std::vector<ControlOp> &stop);
     int SendOps(const std::vector<ControlOp> &ops);

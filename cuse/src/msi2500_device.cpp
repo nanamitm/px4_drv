@@ -6,20 +6,12 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <fcntl.h>
-#include <poll.h>
-#include <signal.h>
-#include <spawn.h>
-#include <sstream>
-#include <sys/wait.h>
 #include <thread>
 #include <unistd.h>
 
 #ifndef PX4_CUSED_LIBDIR
 #define PX4_CUSED_LIBDIR "/usr/local/lib/px4-cused"
 #endif
-
-extern char **environ;
 
 namespace px4::cuse {
 namespace {
@@ -31,7 +23,7 @@ constexpr std::uint8_t UsbStartRequest = 0x43, UsbStopRequest = 0x45;
 // (usbfs_memory_mb)、64 転送では約 12.6 MB をこの機器だけで使うため、半分にして N150 の実機で欠落を確かめた
 constexpr int Packets = 64;
 constexpr int TransferCount = 32;
-constexpr std::size_t Block = 1024;
+using msi2500::Block;
 // WinUSB 版の helper の CaptureLimits と同じ。データの届かない時間と、転送の失敗が続く回数の上限
 constexpr std::uint64_t StallMs = 3000;
 constexpr std::uint32_t MaxConsecutiveErrors = 64;
@@ -248,86 +240,26 @@ int Msi2500Device::StopStream(bool &fatal)
 
 int Msi2500Device::LoadOps(std::uint32_t hz, std::vector<ControlOp> &setup, std::vector<ControlOp> &stop)
 {
-    // helper の ops は計算だけで終わる。標準出力を読み切ってから終了を待つ
-    int out[2];
-    if (pipe2(out, O_CLOEXEC))
-        return -errno;
     std::vector<std::string> args = {helper_path_, "ops", "--frequency", std::to_string(hz), "--gain",
                                      std::to_string(system_j83b_ ? gain_j83b_ : gain_)};
     if (system_j83b_) {
         args.push_back("--system");
         args.push_back("j83b");
     }
-    std::vector<char *> argv;
-    for (auto &a : args)
-        argv.push_back(a.data());
-    argv.push_back(nullptr);
-    posix_spawn_file_actions_t actions;
-    posix_spawn_file_actions_init(&actions);
-    posix_spawn_file_actions_adddup2(&actions, out[1], STDOUT_FILENO);
-    pid_t pid = -1;
-    const int spawned = posix_spawn(&pid, helper_path_.c_str(), &actions, nullptr, argv.data(), environ);
-    posix_spawn_file_actions_destroy(&actions);
-    close(out[1]);
-    if (spawned) {
-        close(out[0]);
-        msg_err("%s: helper ops spawn failed (%s)\n", label_.c_str(), std::strerror(spawned));
+    std::string text, error;
+    bool spawned = false;
+    int status = -1;
+    const int rc = msi2500::RunOps(args, std::chrono::seconds(5), text, spawned, status);
+    if (!spawned) {
+        msg_err("%s: helper ops spawn failed (%s)\n", label_.c_str(), std::strerror(-rc));
         return -EIO;
     }
-    std::string text;
-    const auto deadline = Clock::now() + std::chrono::seconds(5);
-    char buffer[4096];
-    for (;;) {
-        pollfd p{out[0], POLLIN, 0};
-        const auto left = std::chrono::duration_cast<std::chrono::milliseconds>(deadline - Clock::now()).count();
-        if (left <= 0 || poll(&p, 1, static_cast<int>(left)) <= 0)
-            break;
-        const ssize_t got = read(out[0], buffer, sizeof(buffer));
-        if (got <= 0)
-            break;
-        text.append(buffer, static_cast<std::size_t>(got));
-    }
-    close(out[0]);
-    // 標準出力の EOF は helper が記述子を閉じた時点で届き、回収できる状態になるのはその後になる。
-    // EOF の直後に回収できないのは正常な終了の途中のため、読み出しと同じ期限まで待ってから強制終了する
-    int status = 0;
-    pid_t done = 0;
-    while (((done = waitpid(pid, &status, WNOHANG)) == 0 || (done < 0 && errno == EINTR)) && Clock::now() < deadline)
-        std::this_thread::sleep_for(std::chrono::milliseconds(10));
-    if (done != pid) {
-        kill(pid, SIGKILL);
-        while ((done = waitpid(pid, &status, 0)) < 0 && errno == EINTR) {
-        }
-    }
-    // 回収できなかった場合は終了状態が分からないため、成功として扱わない
-    if (done != pid || !WIFEXITED(status) || WEXITSTATUS(status)) {
+    if (rc) {
         msg_err("%s: helper ops failed status=%d\n", label_.c_str(), status);
         return -EIO;
     }
-    setup.clear();
-    stop.clear();
-    std::istringstream in(text);
-    for (std::string line; std::getline(in, line);) {
-        char stage[8] = {};
-        unsigned request = 0, value = 0, index = 0;
-        if (std::sscanf(line.c_str(), "%7s %x %x %x", stage, &request, &value, &index) != 4 || request > 0xff ||
-            value > 0xffff || index > 0xffff) {
-            msg_err("%s: invalid helper ops line: %s\n", label_.c_str(), line.c_str());
-            return -EIO;
-        }
-        const ControlOp op{static_cast<std::uint8_t>(request), static_cast<std::uint16_t>(value),
-                           static_cast<std::uint16_t>(index)};
-        if (!std::strcmp(stage, "setup"))
-            setup.push_back(op);
-        else if (!std::strcmp(stage, "stop"))
-            stop.push_back(op);
-        else {
-            msg_err("%s: invalid helper ops stage: %s\n", label_.c_str(), line.c_str());
-            return -EIO;
-        }
-    }
-    if (setup.empty()) {
-        msg_err("%s: helper ops returned no setup\n", label_.c_str());
+    if (!msi2500::ParseOps(text, setup, stop, error)) {
+        msg_err("%s: %s\n", label_.c_str(), error.c_str());
         return -EIO;
     }
     return 0;
@@ -557,24 +489,12 @@ void LIBUSB_CALL Msi2500Device::IsoDone(libusb_transfer *transfer)
         // パケットごとに状態と長さを確かめ、失敗したパケットと空のパケットを除いて 1024 バイトのブロックだけを渡す。
         // 1 パケットの通信エラーで転送ごと捨てると欠落が 64 倍に広がるため (WinUSB 版の helper と同じ扱い)。
         // 除いたブロックは helper の OFDM がブロック番号の欠落として扱う
-        t.blocks.clear();
-        for (int i = 0; i < transfer->num_iso_packets; ++i) {
-            const auto &d = transfer->iso_packet_desc[i];
-            ++self.stat_packets_;
-            if (d.status != LIBUSB_TRANSFER_COMPLETED) {
-                ++self.stat_bad_packets_;
-                continue;
-            }
-            if (!d.actual_length) {
-                ++self.stat_empty_packets_;
-                continue;
-            }
-            if (d.actual_length % Block)
-                ++self.stat_odd_packets_;
-            const std::size_t whole = d.actual_length / Block * Block;
-            const auto *data = libusb_get_iso_packet_buffer_simple(transfer, static_cast<unsigned>(i));
-            t.blocks.insert(t.blocks.end(), data, data + whole);
-        }
+        msi2500::PacketCounts counts;
+        msi2500::CollectBlocks(*transfer, t.blocks, counts);
+        self.stat_packets_ += counts.packets;
+        self.stat_bad_packets_ += counts.bad;
+        self.stat_empty_packets_ += counts.empty;
+        self.stat_odd_packets_ += counts.odd;
         if (!t.blocks.empty()) {
             self.stat_blocks_ += t.blocks.size() / Block;
             self.last_data_ms_ = rtlsdr::NowMs();
