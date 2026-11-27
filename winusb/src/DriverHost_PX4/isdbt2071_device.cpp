@@ -75,7 +75,7 @@ int Isdbt2071Device::Init()
 {
 	dev_dbg(&dev_, "px4::Isdbt2071Device::Init: init_: %s\n", (init_) ? "true" : "false");
 
-	std::lock_guard<std::recursive_mutex> lock(lock_);
+	std::unique_lock<std::recursive_mutex> lock(lock_);
 
 	if (init_)
 		return -EALREADY;
@@ -160,6 +160,9 @@ int Isdbt2071Device::Init()
 	}
 
 	init_ = true;
+
+	/* ReceiverManager は登録済みの受信機を開くときにデバイスのロックを取得する。 */
+	lock.unlock();
 
 	for (auto it = device_def_.receivers.cbegin(); it != device_def_.receivers.cend(); ++it) {
 		px4::command::ReceiverInfo ri;
