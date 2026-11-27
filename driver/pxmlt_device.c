@@ -208,8 +208,19 @@ static int pxmlt_device_stream_handler(void *context, void *buf, u32 len)
 
 static int pxmlt_chrdev_init(struct ptx_chrdev *chrdev)
 {
+	struct pxmlt_chrdev *chrdevm = chrdev->priv;
+	struct pxmlt_device *pxmlt = chrdevm->parent;
+	struct pxmlt_stream_context *stream_ctx = pxmlt->stream_ctx;
+
 	dev_dbg(chrdev->parent->dev, "pxmlt_chrdev_init\n");
 
+	/* /dev を公開する前に、選局と TS 配信が参照する受信機を関連付ける。 */
+	chrdevm->chrdev = chrdev;
+	stream_ctx->chrdev[chrdevm - pxmlt->chrdevm] = chrdev;
+
+	/* 実行中にモジュールパラメーターが変わっても、TSMF には初期化時の値を使う。 */
+	chrdev->discard_null_packets = px4_device_params.discard_null_packets;
+	chrdev->tsmf_stale_packets = pxmlt->it930x.config.xfer_size / 188;
 	chrdev->params.system = PTX_UNSPECIFIED_SYSTEM;
 	return 0;
 }
@@ -1068,23 +1079,13 @@ int pxmlt_device_init(struct pxmlt_device *pxmlt, struct device *dev,
 	chrdev_group_config.chrdev_num = pxmlt->chrdevm_num;
 	chrdev_group_config.chrdev_config = chrdev_config;
 
+	atomic_set(&pxmlt->available, 1);
 	ret = ptx_chrdev_context_add_group(chrdev_ctx, dev,
 					   &chrdev_group_config, &chrdev_group);
 	if (ret)
 		goto fail_chrdev;
 
 	pxmlt->chrdev_group = chrdev_group;
-
-	for (i = 0; i < pxmlt->chrdevm_num; i++) {
-		pxmlt->chrdevm[i].chrdev = &chrdev_group->chrdev[i];
-		stream_ctx->chrdev[i] = &chrdev_group->chrdev[i];
-
-		/* ブリッジの設定は初期化のときの値で決まるため、実行中にモジュールパラメーターを書き換えても、ここで渡した値を TSMF の分離に使い続ける */
-		chrdev_group->chrdev[i].discard_null_packets = px4_device_params.discard_null_packets;
-		chrdev_group->chrdev[i].tsmf_stale_packets = it930x->config.xfer_size / 188;
-	}
-
-	atomic_set(&pxmlt->available, 1);
 
 	/* PX-MLT8PE は5チューナー側と3チューナー側の2つの USB デバイスで構成され、カードスロットは5チューナー側だけにある */
 	if (model != PXMLT8PE3_MODEL) {
@@ -1104,6 +1105,7 @@ int pxmlt_device_init(struct pxmlt_device *pxmlt, struct device *dev,
 	return 0;
 
 fail_chrdev:
+	atomic_set(&pxmlt->available, 0);
 
 fail_device:
 	it930x_term(it930x);
