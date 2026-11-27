@@ -122,7 +122,7 @@ int PxMltDevice::Init()
 {
 	dev_dbg(&dev_, "px4::PxMltDevice::Init: init_: %s\n", (init_) ? "true" : "false");
 
-	std::lock_guard<std::recursive_mutex> lock(lock_);
+	std::unique_lock<std::recursive_mutex> lock(lock_);
 
 	if (init_)
 		return -EALREADY;
@@ -223,6 +223,9 @@ int PxMltDevice::Init()
 	backend_power_.SetOff();
 	init_ = true;
 
+	/* ReceiverManager は登録済みの受信機を開くときにデバイスのロックを取得する。 */
+	lock.unlock();
+
 	for (auto it = device_def_.receivers.cbegin(); it != device_def_.receivers.cend(); ++it) {
 		px4::command::ReceiverInfo ri;
 
@@ -270,10 +273,11 @@ void PxMltDevice::Term()
 	if (!init_)
 		return;
 
+	/* 登録解除が進行中の Open() を待てるよう、デバイスのロックを先に解放する。 */
+	lock.unlock();
+
 	for (int i = 0; i < receiver_num_; i++)
 		receiver_manager_.Unregister(receivers_[i].get());
-
-	lock.unlock();
 
 	/* Close() と USB ワーカーの参照先を、終了が確定するまで保持する。 */
 	for (int i = 0; i < receiver_num_; i++)
