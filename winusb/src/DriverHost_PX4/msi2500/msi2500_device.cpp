@@ -180,7 +180,7 @@ private:
         {
             std::lock_guard<std::mutex> handles(handle_mutex_);
             drain_only_=false;
-            const int result=StartProcess();
+            const int result=StartProcess(false);
             if(result){drain_only_=true;return result;}
         }
         stop_=false;worker_error_=false;ready_=false;last_ts_=0;quality_=0;mer_x100_=-1;
@@ -188,8 +188,9 @@ private:
         msg_info("MSi2500: started device=%llu system=%s frequency=%u\n",static_cast<unsigned long long>(index_),system_j83b_ ? "J.83B" : "ISDB-T",frequency_);
         return 0;
     }
-    // helper のプロセスとパイプを作る。handle_mutex_ を保持して呼ぶ。失敗した場合は作りかけのハンドルを閉じる
-    int StartProcess()
+    // helper のプロセスとパイプを作る。handle_mutex_ を保持して呼ぶ。失敗した場合は作りかけのハンドルを閉じる。
+    // restart は監視のスレッドによる自動の起動し直しか (ログを追記で開く)
+    int StartProcess(bool restart)
     {
         auto fail=[this](int result){input_.Set(nullptr);output_.Set(nullptr);process_.Set(nullptr);job_.Set(nullptr);return result;};
         SECURITY_ATTRIBUTES sa{sizeof(sa),nullptr,TRUE};
@@ -203,10 +204,12 @@ private:
         output_.Set(a);child_output.Set(b);
         if(!SetHandleInformation(output_.Get(),HANDLE_FLAG_INHERIT,0))return fail(-EIO);
         // この機器はシリアル番号を返さない個体があるため、ログ名は DriverHost 内の機器番号で区別する。
-        // 起動し直した helper も同じ名前へ書くため、前の helper の終了理由を残すよう追記で開く
+        // 起動し直した helper も同じ名前へ書くため、前の helper の終了理由を残すよう追記で開く。
+        // 選局と取り込みの開始では作り直す。機器の寿命で判定すると、一度でも起動し直した後は数日の録画の間すべての
+        // 選局の出力が追記され続けるため、追記は同じ選局の中の起動し直しに限る
         const auto log=px4::util::path::GetDir()+L"\\msi2500_frontend-"+std::to_wstring(index_)+L".log";
         child_error.Set(CreateFileW(log.c_str(),FILE_APPEND_DATA,FILE_SHARE_READ|FILE_SHARE_WRITE,&sa,
-            restart_count_ ? OPEN_ALWAYS : CREATE_ALWAYS,FILE_ATTRIBUTE_NORMAL,nullptr));
+            restart ? OPEN_ALWAYS : CREATE_ALWAYS,FILE_ATTRIBUTE_NORMAL,nullptr));
         if(!child_error)return fail(-EIO);
         job_.Set(CreateJobObjectW(nullptr,nullptr));
         JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits{};
@@ -330,7 +333,7 @@ private:
                 msg_warn("MSi2500: helper restart count=%llu exit_code=%lu consecutive=%u backoff_ms=%lld possible_ts_loss=1\n",
                     static_cast<unsigned long long>(restart_count_),exit_code,static_cast<unsigned>(budget.Consecutive()),
                     static_cast<long long>(backoff.count()));
-                started=!StartProcess();
+                started=!StartProcess(true);
                 if(!started)msg_err("MSi2500: helper restart failed count=%llu\n",static_cast<unsigned long long>(restart_count_));
             }
             restarted_at_=failed_at;
