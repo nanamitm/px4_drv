@@ -53,7 +53,7 @@ LIBRTLSDR_OBJS := $(BUILD)/librtlsdr/librtlsdr.o $(BUILD)/librtlsdr/tuner_e4k.o 
 PLATFORM_OBJS := $(BUILD)/platform_linux.o $(BUILD)/firmware.o
 DAEMON_OBJS := $(BUILD)/main.o $(BUILD)/device.o $(BUILD)/video_node.o $(BUILD)/card_node.o \
 	$(BUILD)/dt295_device.o $(BUILD)/torne_device.o $(BUILD)/torne_port.o $(BUILD)/xz3_device.o $(BUILD)/pxbcud_device.o \
-	$(BUILD)/pxs1ud_device.o $(BUILD)/iq_process.o $(BUILD)/rtlsdr_device.o $(BUILD)/rtlsdr_helper.o $(BUILD)/msi2500_device.o \
+	$(BUILD)/pxs1ud_device.o $(BUILD)/iq_process.o $(BUILD)/rtlsdr_device.o $(BUILD)/rtlsdr_helper.o $(BUILD)/msi2500_device.o $(BUILD)/msi2500_ops.o \
 	$(BUILD)/cuse_session.o $(BUILD)/usb_transport.o $(BUILD)/reader_map.o $(BUILD)/log.o
 
 all: $(BUILD)/px4-cused
@@ -175,6 +175,10 @@ $(BUILD)/rtlsdr_session_test: $(ROOT)/winusb/tests/rtlsdr_session_test.cpp $(RTL
 $(BUILD)/rtlsdr_helper_test: tests/rtlsdr_helper_test.cpp $(BUILD)/rtlsdr_helper.o $(RTLSDR_OBJS) $(BUILD)/log.o
 	$(CXX) $(CPPFLAGS) $(CXXFLAGS) $^ -o $@
 
+# MSi2500 の helper の ops (模擬の helper のシェルスクリプト) と、等時転送のパケットからのブロックの取り出し
+$(BUILD)/msi2500_ops_test: tests/msi2500_ops_test.cpp $(BUILD)/msi2500_ops.o
+	$(CXX) $(CPPFLAGS) $(DEPS_CFLAGS) $(CXXFLAGS) $^ $(DEPS_LIBS) -o $@
+
 # PX-S1UD の J.83B に使う helper (winusb/tools/msi2500_frontend の serve-s1ud、GPL-3.0-or-later) と firmware
 # (fwtool/s1ud/capture_probe.S から作る s1ud_j83b.inp、GPL-2.0-only)。地デジだけを使う場合は不要で、
 # Rust (cargo) と ARC の binutils (binutils-arc-linux-gnu) が必要なため、既定の all には含めない。
@@ -214,7 +218,7 @@ install-rtlsdr: rtlsdr
 check: $(BUILD)/control_channel_test $(BUILD)/channel_test $(BUILD)/reader_map_test $(BUILD)/platform_test $(BUILD)/torne_session_test \
 		$(BUILD)/torne_native_frontend_test $(BUILD)/xz3_card_test $(BUILD)/xz3_stream_test $(BUILD)/xz3_session_test \
 		$(BUILD)/pxbcud_frontend_test $(BUILD)/pxbcud_stream_test $(BUILD)/siano_frontend_test $(BUILD)/siano_session_test \
-		$(BUILD)/iq_process_test $(BUILD)/rtlsdr_protocol_test $(BUILD)/rtlsdr_session_test $(BUILD)/rtlsdr_helper_test 		| $(BUILD)/torne-trace
+		$(BUILD)/iq_process_test $(BUILD)/rtlsdr_protocol_test $(BUILD)/rtlsdr_session_test $(BUILD)/rtlsdr_helper_test 		$(BUILD)/msi2500_ops_test | $(BUILD)/torne-trace
 	$(BUILD)/control_channel_test
 	$(BUILD)/channel_test
 	$(BUILD)/reader_map_test
@@ -235,6 +239,8 @@ check: $(BUILD)/control_channel_test $(BUILD)/channel_test $(BUILD)/reader_map_t
 	$(BUILD)/rtlsdr_session_test
 	install -m 0755 tests/fake_rtlsdr_helper.sh $(BUILD)/fake_rtlsdr_helper
 	$(BUILD)/rtlsdr_helper_test $(BUILD)/fake_rtlsdr_helper
+	install -m 0755 tests/fake_msi2500_ops.sh $(BUILD)/fake_msi2500_ops
+	$(BUILD)/msi2500_ops_test $(BUILD)/fake_msi2500_ops
 
 install: $(BUILD)/px4-cused
 	install -D -m 0755 $(BUILD)/px4-cused $(DESTDIR)$(SBINDIR)/px4-cused
