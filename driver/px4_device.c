@@ -1200,8 +1200,9 @@ static int px4_device_load_config(struct px4_device *px4,
 			ret);
 		return ret;
 	} else if (!tmp) {
+		/* 成功を返すと、呼び出し元は未設定の受信機構成とストリーム入力のまま初期化を続けるため、他機種と同じく失敗を返す */
 		dev_warn(dev, "EEPROM error.\n");
-		return ret;
+		return -EIO;
 	}
 
 	chrdev_config[0].system_cap = PTX_ISDB_S_SYSTEM;
