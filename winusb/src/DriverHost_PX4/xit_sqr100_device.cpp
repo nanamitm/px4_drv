@@ -246,13 +246,16 @@ void XitSqr100Device::Term()
 
 	receiver_manager_.Unregister(receiver_.get());
 
-	stream_ctx_.stream_buf = nullptr;
-	receiver_.reset();
+	receiver_->WaitForClose();
 
 	lock.lock();
 
 	it930x_term(&it930x_);
 	itedtv_bus_term(&it930x_.bus);
+
+	/* 最後の USB コールバックが完了してから参照先を解放する。 */
+	stream_ctx_.stream_buf.reset();
+	receiver_.reset();
 
 	init_ = false;
 	return;
@@ -522,11 +525,15 @@ XitSqr100Device::XitSqr100Receiver::~XitSqr100Receiver()
 {
 	dev_dbg(&parent_.dev_, "px4::XitSqr100Device::XitSqr100Receiver::~XitSqr100Receiver(%u)\n", index_);
 
-	std::unique_lock<std::mutex> lock(lock_);
-
-	close_cond_.wait(lock, [this] { return !open_; });
+	WaitForClose();
 
 	dev_dbg(&parent_.dev_, "px4::XitSqr100Device::XitSqr100Receiver::~XitSqr100Receiver(%u): exit\n", index_);
+}
+
+void XitSqr100Device::XitSqr100Receiver::WaitForClose()
+{
+	std::unique_lock<std::mutex> lock(lock_);
+	close_cond_.wait(lock, [this] { return !open_; });
 }
 
 int XitSqr100Device::XitSqr100Receiver::Open()
