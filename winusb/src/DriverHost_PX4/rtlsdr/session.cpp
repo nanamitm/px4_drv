@@ -39,7 +39,9 @@ int Session::Start(std::uint32_t hz)
         std::lock_guard<std::mutex> handles(handle_mutex_);
         drain_only_ = false;
         hz_ = hz;
-        const int result = port_.Launch(hz, restart_count_ != 0);
+        // 選局と取り込みの再開は起動し直しではないため、ログを新しく開く。restart_count_ は Session の寿命の累計で、
+        // これを条件にすると一度起動し直した後の選局がすべて追記になり、常駐中にログが増え続ける
+        const int result = port_.Launch(hz, false);
         if (result) {
             drain_only_ = true;
             return result;

@@ -157,6 +157,11 @@ void RestartAfterExit()
     Require(sink.runs[0] != sink.runs[1], "restart starts a new delivery run");
     Require(session.Locked() && !session.Exhausted(), "locked again after restart");
     session.Stop();
+    // 起動し直しの後の選局は起動し直しではない (helper のログを追記にしない)
+    port.scripts.push_back({{MakeFrame(1, {})}, false});
+    Require(session.Start(479142857) == 0, "retune after restart");
+    Require(port.Launches() == 3 && port.restarted_launches == 1, "retune after a restart is not a restart");
+    session.Stop();
 }
 
 void RestartWaitsForNewTs()
