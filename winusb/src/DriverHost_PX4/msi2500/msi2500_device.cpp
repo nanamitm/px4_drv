@@ -7,6 +7,7 @@
 #include "../rtlsdr/protocol.hpp"
 #include "../stream_overflow.hpp"
 #include "../pxbcud/recovery_budget.hpp"
+#include "../config_int.hpp"
 #include "msg.h"
 #include "util.hpp"
 #include <array>
@@ -51,14 +52,12 @@ public:
     {
         if(helper_.size()<2 || helper_[1]!=L':') helper_=px4::util::path::GetDir()+L"\\"+helper_;
         // 利得は MSi001 の LNA・ミキサー・IF の合計 (dB)。helper の --gain と同じ 0〜102
-        if(config.Exists(L"GainDb")) gain_=px4::util::wtoi(config.Get(L"GainDb"));
+        gain_=ConfigInt(config,L"GainDb",gain_,0,102,"MSi2500");
         // J.83B はケーブルの入力レベルが地上波のアンテナ入力と異なるため、別の値を持つ。
         // 検証環境では 58 で ADC が飽和して RS の訂正が急増し、46〜52 で誤りがなかった
-        if(config.Exists(L"GainDbJ83B")) gain_j83b_=px4::util::wtoi(config.Get(L"GainDbJ83B"));
-        if(config.Exists(L"ViterbiThreads")) viterbi_threads_=px4::util::wtoi(config.Get(L"ViterbiThreads"));
+        gain_j83b_=ConfigInt(config,L"GainDbJ83B",gain_j83b_,0,102,"MSi2500");
+        viterbi_threads_=ConfigInt(config,L"ViterbiThreads",viterbi_threads_,0,64,"MSi2500");
         async_tune_=px4::util::wtob(config.Get(L"AsyncTune",L"false"));
-        if(gain_<0 || gain_>102 || gain_j83b_<0 || gain_j83b_>102) throw DeviceError("MSi2500: invalid gain");
-        if(viterbi_threads_<0 || viterbi_threads_>64) throw DeviceError("MSi2500: invalid Viterbi thread count");
     }
     ~Receiver() override
     {
