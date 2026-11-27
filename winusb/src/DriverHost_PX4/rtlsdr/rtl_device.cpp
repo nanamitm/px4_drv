@@ -224,8 +224,10 @@ private:
         DWORD available=0;
         if(!PeekNamedPipe(output_.Get(),nullptr,0,nullptr,&available,nullptr))return -EIO;
         if(!available){
-            if(WaitForSingleObject(process_.Get(),0)!=WAIT_TIMEOUT)return -EPIPE;
-            Sleep(static_cast<DWORD>(wait.count()));return 0;
+            if(WaitForSingleObject(process_.Get(),0)==WAIT_TIMEOUT){Sleep(static_cast<DWORD>(wait.count()));return 0;}
+            // 空と確かめてから終了を確かめるまでの間に、helper が最後のフレーム (終了直前のエラー) を書いて終わることがある。
+            // 終了を確かめた後にもう一度確かめ、残りを読み切ってから EOF とする
+            if(!PeekNamedPipe(output_.Get(),nullptr,0,nullptr,&available,nullptr) || !available)return -EPIPE;
         }
         DWORD got=0;
         if(!ReadFile(output_.Get(),buffer,(std::min)(available,static_cast<DWORD>(size)),&got,nullptr)||!got)return -EIO;
