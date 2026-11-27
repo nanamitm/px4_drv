@@ -511,7 +511,7 @@ int Px4Device::SetBackendPower(bool state)
 
 int Px4Device::SetLnbVoltage(std::int32_t voltage)
 {
-	dev_dbg(&dev_, "px4::Px4Device::SetBackendPower: voltage: %d\n", voltage);
+	dev_dbg(&dev_, "px4::Px4Device::SetLnbVoltage: voltage: %d\n", voltage);
 
 	int ret = 0;
 	std::lock_guard<std::recursive_mutex> lock(lock_);

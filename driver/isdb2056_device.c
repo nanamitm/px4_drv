@@ -811,8 +811,15 @@ static int isdb2056_chrdev_read_cnr_raw(struct ptx_chrdev *chrdev, u32 *value)
 		break;
 
 	case PTX_ISDB_S_SYSTEM:
-		ret = tc90522_get_cn_s(&chrdev2056->tc90522_s, (u16 *)value);
+	{
+		u16 cn = 0;
+
+		/* u32 の領域へ u16 を直接書くと、ビッグエンディアンでは上位16ビットに値が入るため、u16 で受けてから広げる */
+		ret = tc90522_get_cn_s(&chrdev2056->tc90522_s, &cn);
+		if (!ret)
+			*value = cn;
 		break;
+	}
 
 	default:
 		ret = -EINVAL;
