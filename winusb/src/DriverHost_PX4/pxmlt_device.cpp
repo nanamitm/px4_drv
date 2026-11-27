@@ -518,11 +518,10 @@ int PxMltDevice::StopCapture()
 	streaming_count_--;
 	if (!streaming_count_) {
 		dev_dbg(&dev_, "px4::PxMltDevice::StopCapture: stopping...\n");
-		itedtv_bus_stop_streaming(&it930x_.bus);
-	} else {
-		dev_dbg(&dev_, "px4::PxMltDevice::StopCapture: streaming_count_: %u\n", streaming_count_);
+		return itedtv_bus_stop_streaming(&it930x_.bus);
 	}
 
+	dev_dbg(&dev_, "px4::PxMltDevice::StopCapture: streaming_count_: %u\n", streaming_count_);
 	return 0;
 }
 
@@ -1174,8 +1173,7 @@ int PxMltDevice::PxMltReceiver::SetCapture(bool capture)
 			parent_.stream_ctx_.enabled[index_] = false;
 		}
 		ret = parent_.StopCapture();
-		if (ret)
-			return ret;
+		/* USB 転送を隔離した場合も配信は終了しており、停止を再試行すると参照数が崩れる。 */
 		streaming_ = false;
 
 		const auto diagnostics = stream_buf_->GetWriteDiagnostics();
@@ -1185,8 +1183,8 @@ int PxMltDevice::PxMltReceiver::SetCapture(bool capture)
 			static_cast<unsigned long long>(diagnostics.rejected_writes),
 			static_cast<unsigned long long>(diagnostics.purge_write_discarded_bytes),
 			static_cast<unsigned long long>(diagnostics.purge_requests));
-		if (!stream_buf_->Purge())
-			return -EIO;
+		if (!stream_buf_->Purge() && !ret)
+			ret = -EIO;
 	}
 
 	return ret;
