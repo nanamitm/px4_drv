@@ -13,6 +13,8 @@
 #include <condition_variable>
 #include <thread>
 #include <algorithm>
+#include <cerrno>
+#include <cwchar>
 
 namespace px4::msi2500 {
 namespace {
@@ -40,6 +42,24 @@ std::wstring Quote(const std::wstring &input)
     }
     out.append(slashes*2,L'\\');return out+L'"';
 }
+// ini の整数。key がなければ fallback を返す。数値として読めない値を 0 として受け付けると、利得 0 (受信できない) で
+// エラーなく動き続けるため、範囲外の値と同じく受信機の作成を失敗させる
+int ConfigInt(const Config &config,const wchar_t *key,int fallback,int min,int max)
+{
+    if(!config.Exists(key))return fallback;
+    const auto text=config.Get(key);
+    const wchar_t *begin=text.c_str();
+    wchar_t *end=nullptr;
+    errno=0;
+    const long value=std::wcstol(begin,&end,10);
+    const bool parsed=end!=begin && errno!=ERANGE;
+    while(*end==L' ' || *end==L'\t')++end;
+    if(!parsed || *end || value<min || value>max){
+        msg_err("MSi2500: %ls=%ls is not an integer in %d..%d\n",key,text.c_str(),min,max);
+        throw DeviceError("MSi2500: invalid configuration value");
+    }
+    return static_cast<int>(value);
+}
 }
 using px4::rtlsdr::Frame;
 using px4::rtlsdr::Frames;
@@ -51,14 +71,12 @@ public:
     {
         if(helper_.size()<2 || helper_[1]!=L':') helper_=px4::util::path::GetDir()+L"\\"+helper_;
         // 利得は MSi001 の LNA・ミキサー・IF の合計 (dB)。helper の --gain と同じ 0〜102
-        if(config.Exists(L"GainDb")) gain_=px4::util::wtoi(config.Get(L"GainDb"));
+        gain_=ConfigInt(config,L"GainDb",gain_,0,102);
         // J.83B はケーブルの入力レベルが地上波のアンテナ入力と異なるため、別の値を持つ。
         // 検証環境では 58 で ADC が飽和して RS の訂正が急増し、46〜52 で誤りがなかった
-        if(config.Exists(L"GainDbJ83B")) gain_j83b_=px4::util::wtoi(config.Get(L"GainDbJ83B"));
-        if(config.Exists(L"ViterbiThreads")) viterbi_threads_=px4::util::wtoi(config.Get(L"ViterbiThreads"));
+        gain_j83b_=ConfigInt(config,L"GainDbJ83B",gain_j83b_,0,102);
+        viterbi_threads_=ConfigInt(config,L"ViterbiThreads",viterbi_threads_,0,64);
         async_tune_=px4::util::wtob(config.Get(L"AsyncTune",L"false"));
-        if(gain_<0 || gain_>102 || gain_j83b_<0 || gain_j83b_>102) throw DeviceError("MSi2500: invalid gain");
-        if(viterbi_threads_<0 || viterbi_threads_>64) throw DeviceError("MSi2500: invalid Viterbi thread count");
     }
     ~Receiver() override
     {
