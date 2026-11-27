@@ -73,7 +73,7 @@ private:
 
 class MockPort final : public SessionPort {
 public:
-    void Begin(Clock::time_point) noexcept override {}
+    void Begin(Clock::time_point deadline_) noexcept override { deadline = deadline_; }
     int Pause(unsigned ms) override
     {
         std::this_thread::sleep_for(std::chrono::milliseconds(ms));
@@ -168,6 +168,11 @@ public:
     // 空でなければ、フックの番地にこの値があるときだけ操作を処理する。
     std::vector<std::uint8_t> hook_image;
     unsigned op14_count = 0;
+    // 処理した操作3、5、6 の順と、操作5 の手順番号。
+    std::vector<unsigned> ops;
+    std::vector<std::uint8_t> op5_steps;
+    // 最後に Begin で設定された期限。
+    Clock::time_point deadline{};
 
 private:
     bool Hooked() const
@@ -188,6 +193,15 @@ private:
         PutWord(stage.data() + 8, 0x80000000u | op);
         PutWord(stage.data() + 12, 0);
         switch (op) {
+        case 3:
+        case 6:
+            ops.push_back(op);
+            return false;
+        case 5:
+            // 手順番号は操作データの先頭バイト。
+            ops.push_back(op);
+            op5_steps.push_back(stage[24]);
+            return false;
         case 7:
             PutWord(stage.data() + 16, 1);
             PutWord(stage.data() + 20, rx);
@@ -404,6 +418,129 @@ void TestCardBusFollowsRelayRestore()
             "card FIFO falls back to direct access after the restore");
     Require(!bus.Error(), "no transfer error after the restore");
 }
+
+// 本体の書き戻しは1語ごとに約3 msで約1.8秒かかり、SmartCard が B-CAS の ATR から求めるブロックの待機時間 (1.6秒) を超える。
+// 受信を閉じた直後に応答待ちのカード操作があれば、書き戻しの1語ごとにカード操作へ譲る。
+// 譲った間のカード操作はフックの外れた boot0 への直接の読み書きで、復元の期限は戻った後に元へ戻す。
+void TestRestoreYieldsToCardBetweenWords()
+{
+    static const std::uint8_t runtime_body[8]{1, 2, 3, 4, 5, 6, 7, 8};
+    static const std::uint8_t hook[8]{0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88};
+    const Images relay_images{{runtime_body, 8}, {runtime_body, 8}, {hook, 8}};
+    constexpr unsigned BodyAddress = 0xea61c, BodyBytes = 2236;
+    constexpr unsigned FifoStatus = 0xfea014, RxData = 0xfea02c;
+    MockPort port;
+    port.hook_image.assign(hook, hook + sizeof(hook));
+    Relay relay(port, relay_images);
+    Require(relay.Install(relay_images.runtime) == 0 && relay.RuntimeInstalled(), "runtime installs on the mock");
+    // 受信 FIFO に3バイトある状態のカード UART。直接の読み出しは RX_DATA の値を返す。
+    port.memory[FifoStatus + 1] = 3;
+    port.memory[RxData + 3] = 0x5a;
+
+    unsigned yields = 0, card_reads = 0;
+    bool hooked_during_yield = false, bulk_during_yield = false, body_written_before_first_yield = false;
+    Clock::time_point restore_deadline{};
+    const bool restored = relay.Restore([&] {
+        if (!yields++) {
+            restore_deadline = port.deadline;
+            body_written_before_first_yield = port.memory[BodyAddress] == 0 && port.memory[BodyAddress + 4] == 5;
+        }
+        hooked_during_yield = hooked_during_yield || port.memory[HookAddress] == hook[0];
+        // Session::Card と同じく、カード操作は自分の期限を設定する。
+        relay.Begin(Clock::now() + std::chrono::seconds(2));
+        RelayCardBus bus(relay, [](unsigned) { return 0; });
+        CardUart uart(bus);
+        bulk_during_yield = bulk_during_yield || bus.Bulk();
+        std::uint8_t data[CardUart::FifoChunk]{};
+        std::size_t count = 0;
+        if (uart.ReadBytes(data, sizeof(data), count) == 0 && count == 3 && data[0] == 0x5a)
+            ++card_reads;
+        Require(port.deadline != restore_deadline, "the card operation set its own deadline");
+    });
+    Require(restored, "restore succeeds with card operations between words");
+    Require(yields == BodyBytes / 4, "restore yields after each body word");
+    Require(body_written_before_first_yield, "the first yield comes after the first body word");
+    Require(!hooked_during_yield, "the hook is removed before the first yield");
+    Require(!bulk_during_yield && port.op14_count == 0, "card operations in a yield use direct access");
+    Require(card_reads == yields, "card operations in a yield read the card UART");
+    Require(port.deadline == restore_deadline, "the restore deadline is set again after each yield");
+    for (unsigned i = 0; i < BodyBytes; ++i)
+        Require(port.memory[BodyAddress + i] == 0, "the saved body is written back");
+}
+
+// 最初の選局の導入は、本体の2回の書き込みと操作5の手順の間の待機 (計1.73秒) を含み、約5秒かかる。
+// 本体の各語の後 (yield) と操作5の手順の間 (wait) にカード操作を通し、フックの2語が揃っていない
+// 状態では通さない。カード操作は導入の途中でも、boot0 への直接の読み書きでカード UART を読める。
+void TestBootLetsCardRunAtSafePoints()
+{
+    static const std::uint8_t bootstrap_body[8]{0xb1, 0xb2, 0xb3, 0xb4, 0xb5, 0xb6, 0xb7, 0xb8};
+    static const std::uint8_t runtime_body[12]{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12};
+    static const std::uint8_t hook[8]{0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88};
+    const Images relay_images{{bootstrap_body, 8}, {runtime_body, 12}, {hook, 8}};
+    constexpr unsigned BodyAddress = 0xea61c;
+    constexpr unsigned FifoStatus = 0xfea014, RxData = 0xfea02c;
+    MockPort port;
+    port.hook_image.assign(hook, hook + sizeof(hook));
+    port.memory[FifoStatus + 1] = 3;
+    port.memory[RxData + 3] = 0x5a;
+    Relay relay(port, relay_images);
+
+    // フックの8バイトが、すべて元の値 (模擬の RAM では 0) か、すべて導入する値のどちらかか。
+    const auto hook_state = [&]() -> int {
+        bool original = true, installed = true;
+        for (unsigned i = 0; i < sizeof(hook); ++i) {
+            const auto value = port.memory[HookAddress + i];
+            original = original && value == 0;
+            installed = installed && value == hook[i];
+        }
+        return original ? 0 : installed ? 1 : -1;
+    };
+    bool half_hooked = false, bulk = false;
+    unsigned card_reads = 0;
+    const auto card = [&] {
+        half_hooked = half_hooked || hook_state() < 0;
+        relay.Begin(Clock::now() + std::chrono::seconds(2));
+        RelayCardBus bus(relay, [](unsigned) { return 0; });
+        CardUart uart(bus);
+        bulk = bulk || bus.Bulk();
+        std::uint8_t data[CardUart::FifoChunk]{};
+        std::size_t count = 0;
+        if (uart.ReadBytes(data, sizeof(data), count) == 0 && count == 3 && data[0] == 0x5a)
+            ++card_reads;
+    };
+
+    unsigned yields = 0, unhooked_yields = 0;
+    std::vector<unsigned> waits;
+    std::vector<std::size_t> ops_at_wait;
+    bool hooked_at_wait = true;
+    const int result = relay.Boot(
+        [&] {
+            ++yields;
+            unhooked_yields += hook_state() == 0;
+            card();
+        },
+        [&](unsigned ms) {
+            waits.push_back(ms);
+            ops_at_wait.push_back(port.ops.size());
+            hooked_at_wait = hooked_at_wait && hook_state() == 1;
+            card();
+            return 0;
+        });
+    Require(result == 0 && relay.RuntimeInstalled(), "boot installs the runtime on the mock");
+    Require(yields == 8 / 4 + 12 / 4, "boot yields after each word of both bodies");
+    Require(unhooked_yields == yields, "every yield comes while the hook is removed");
+    Require(waits == std::vector<unsigned>({10, 10, 1000, 10, 500, 200}), "boot waits between the operation 5 steps");
+    Require(port.op5_steps == std::vector<std::uint8_t>({0, 1, 2, 3, 4, 5}), "operation 5 runs steps 0 to 5");
+    Require(port.ops == std::vector<unsigned>({6, 5, 5, 5, 5, 5, 5, 3}), "operations 6, 5 and 3 run in order");
+    Require(ops_at_wait == std::vector<std::size_t>({2, 3, 4, 5, 6, 7}), "each wait follows its operation 5 step");
+    Require(hooked_at_wait, "the bootstrap hook is fully installed during the waits");
+    Require(!half_hooked, "no card operation runs between the two hook words");
+    Require(!bulk && port.op14_count == 0, "card operations during the boot use direct access");
+    Require(card_reads == yields + waits.size(), "card operations during the boot read the card UART");
+    for (unsigned i = 0; i < sizeof(runtime_body); ++i)
+        Require(port.memory[BodyAddress + i] == runtime_body[i], "the runtime body is installed");
+    Require(hook_state() == 1, "the runtime hook is installed");
+}
 }
 
 int main()
@@ -415,6 +552,8 @@ int main()
     TestEndlessResidueFails();
     TestResidueReadErrorFails();
     TestCardBusFollowsRelayRestore();
+    TestRestoreYieldsToCardBetweenWords();
+    TestBootLetsCardRunAtSafePoints();
     std::puts("xz3_session_test: passed");
     return 0;
 }

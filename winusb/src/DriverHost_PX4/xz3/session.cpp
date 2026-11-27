@@ -162,7 +162,7 @@ bool Relay::Valid() const
            hook_.bytes && hook_.size == saved_hook_.size();
 }
 
-int Relay::Init()
+int Relay::Init(const std::function<void()>& yield, const std::function<int(unsigned)>& wait)
 {
     if (!Valid())
         return -EINVAL;
@@ -180,32 +180,44 @@ int Relay::Init()
         msg_err("GV-MVP/XZ3: unsupported boot RAM image or read failure\n");
         return -EIO;
     }
-    int result = Install(bootstrap_);
+    return Boot(yield, wait);
+}
+
+int Relay::Boot(const std::function<void()>& yield, const std::function<int(unsigned)>& wait)
+{
+    int result = Install(bootstrap_, yield);
     if (result)
         return result;
     Packet reply{};
     if ((result = Exchange(6, reply)))
         return result;
+    // 操作5の手順の間の待機はホストが行い、機器を操作しない。フックは導入済みで、
+    // カードUARTの番地への要求はboot0が通常どおり処理するため、waitの間はカード操作を通せる。
     constexpr unsigned delay[]{10, 10, 1000, 10, 500, 200};
     for (std::uint8_t step = 0; step < 6; ++step) {
-        if ((result = Exchange(5, reply, &step, 1)) || (result = Delay(delay[step])))
+        if ((result = Exchange(5, reply, &step, 1)) ||
+            (result = wait ? wait(delay[step]) : Delay(delay[step])))
             return result;
     }
     if ((result = Exchange(3, reply)))
         return result;
     // ブートストラップは機器初期化だけを担当する。以降の選局・TS取得は共通版を使う。
-    return Install(runtime_);
+    return Install(runtime_, yield);
 }
 
-int Relay::Install(const Image& image)
+int Relay::Install(const Image& image, const std::function<void()>& yield)
 {
-    port_.Begin(Clock::now() + 15s);
+    const auto deadline = Clock::now() + 15s;
+    port_.Begin(deadline);
     if (!Unhook())
         return -EIO;
     body_changed_ = true;
-    if (!WriteRange(Body, image.bytes, image.size) || !Verify(Body, image.bytes, image.size))
+    // フックを外して照合した後の本体の書き込みの間は、boot0の通常の処理だけが動く。
+    if (!WriteRange(Body, image.bytes, image.size, yield, deadline) || !Verify(Body, image.bytes, image.size))
         return -EIO;
     // 通常ハンドラーを残したまま末尾を置き、先頭ワードでフックを有効にする。
+    // 末尾の語はboot0の読み出しの処理の途中の命令を置き換えるため、2語の書き込みの間に
+    // 読み出しの要求 (カードUARTの読み出しを含む) を入れない。ここではyieldを呼ばない。
     hook_changed_ = true;
     if (!Write(Hook + 4, hook_.bytes + 4) || !Write(Hook, hook_.bytes))
         return -EIO;
@@ -213,14 +225,15 @@ int Relay::Install(const Image& image)
     return 0;
 }
 
-bool Relay::Restore()
+bool Relay::Restore(const std::function<void()>& yield)
 {
-    port_.Begin(Clock::now() + 15s);
+    const auto deadline = Clock::now() + 15s;
+    port_.Begin(deadline);
     if (!Unhook())
         return false;
     if (!body_changed_)
         return true;
-    const bool body = WriteRange(Body, saved_body_.data(), saved_body_.size()) &&
+    const bool body = WriteRange(Body, saved_body_.data(), saved_body_.size(), yield, deadline) &&
                       Verify(Body, saved_body_.data(), saved_body_.size());
     // 0xc4600はboot0のUSB IN応答バッファで、通常の読み出しでも上書きされる。
     // フックと本体を戻した後の照合で、ステージングは通常の応答に置き換わる。
@@ -346,11 +359,18 @@ bool Relay::Write(unsigned address, const std::uint8_t* data)
     return ok;
 }
 
-bool Relay::WriteRange(unsigned address, const std::uint8_t* data, std::size_t size)
+bool Relay::WriteRange(unsigned address, const std::uint8_t* data, std::size_t size,
+                       const std::function<void()>& yield, Clock::time_point deadline)
 {
-    for (std::size_t at = 0; at < size; at += 4)
+    for (std::size_t at = 0; at < size; at += 4) {
         if (!Write(address + static_cast<unsigned>(at), data + at))
             return false;
+        if (yield) {
+            // 譲った間のカード操作は自分の期限を設定するため、戻った後に元の期限へ戻す。
+            yield();
+            port_.Begin(deadline);
+        }
+    }
     return true;
 }
 
@@ -472,19 +492,54 @@ int Session::Tune(bool satellite, std::uint32_t frequency_khz, std::uint32_t tsi
                   bool relative)
 {
     init_failed = false;
-    // 初期化と選局の間はカード操作を待たせる。どちらもI²Cと待機を交互に行う連続した手順で、
-    // 途中でRelayを譲るとフックの導入途中や選局途中の状態でカードUARTへ要求が入る。
     std::unique_lock<std::mutex> control(control_mutex_);
     int result = 0;
     if (!initialized_) {
-        if ((result = relay_.Init()) || (result = frontend_.Initialize())) {
+        /*
+         * 中継プログラムの導入は、本体の2回の書き込み (各約1.7秒) と操作5の手順の間の待機 (計1.73秒) を含み、
+         * 復調器の初期化までで約6.6秒かかる。SmartCardがB-CASのATRのTB3 (BWI=4) から求めるブロックの待機時間は
+         * 1.6秒で、受信を開いた直後に応答待ちのT=1ブロックがあると、カードが期限内に応答しても読めずに
+         * SmartCardが同じブロックを再送し、そのAPDUが失敗する。
+         * カードUARTの要求はboot0のメモリ要求で、boot0はフックの有無にかかわらずステージング以外の番地を
+         * 通常どおり処理し、操作5の端子 (0x00f10014、0x00f10018) はカードの電源 (bit 12) を変えない。
+         * このため、フックを外した後の本体の各語の後では待っているカード操作へ制御ロックを譲り、
+         * 操作5の手順の間の待機では制御ロックを手放す。フックの2語の書き込みの間と、各操作の要求から
+         * 応答の読み出しまでは譲らない。受信の状態のmutexを持つ所有者の下では、この間に制御ロックを
+         * 取るのはカード操作だけで、TS workerは選局の前に止まっている。
+         */
+        const auto wait = [this, &control](unsigned ms) {
+            control.unlock();
+            const int rc = port_.WaitRemoved(ms);
+            control.lock();
+            return rc;
+        };
+        if ((result = relay_.Init([this, &control] { YieldToCard(control); }, wait))) {
             init_failed = true;
             return result;
         }
-        initialized_ = true;
     }
-    result = satellite && relative ? frontend_.TuneRelative(frequency_khz, tsid)
-                                   : frontend_.Tune(satellite, frequency_khz, tsid);
+    /*
+     * 復調器の初期化は約1.3秒のI²Cの操作の連続で、選局はロックの判定を50 ms間隔で最大35回繰り返す
+     * (相対TS番号ではTMCCの読み直しも10 ms間隔で最大100回)。通常の選局でも約0.8秒、ロックしない衛星の
+     * 選局では約1.8秒を超え、ブロックの待機時間 (1.6秒) を超えることがある。このため、各I²Cの操作の前に
+     * 待っているカード操作へ譲り、選局の待機 (Delay) では制御ロックを手放す。I²Cの操作は1回ごとに
+     * STARTからSTOPまでを中継プログラムが行い、カード操作 (操作14) はI²Cを使わない。
+     * 譲るのはTuneを実行しているスレッドのI2cとDelayだけで、ほかのスレッドのReadCndatは対象外。
+     */
+    frontend_lock_ = &control;
+    frontend_thread_ = std::this_thread::get_id();
+    if (!initialized_) {
+        result = frontend_.Initialize();
+        initialized_ = !result;
+        init_failed = !!result;
+    }
+    if (!result)
+        result = satellite && relative ? frontend_.TuneRelative(frequency_khz, tsid)
+                                       : frontend_.Tune(satellite, frequency_khz, tsid);
+    frontend_lock_ = nullptr;
+    frontend_thread_ = {};
+    if (init_failed)
+        return result;
     control.unlock();
     // 地デジはロック直後に訂正前のTSを出すことがある。
     // ファームウェア交換による待ちがなくなったため、DMAを始める前に安定を待つ。
@@ -584,11 +639,49 @@ int Session::StopStream()
 
 bool Session::Restore()
 {
-    std::lock_guard<std::mutex> control(control_mutex_);
-    if (!relay_.Restore())
+    std::unique_lock<std::mutex> control(control_mutex_);
+    /*
+     * 本体の書き戻しは1語ごとに約3 msで、2236バイトでは約1.8秒かかる。SmartCardがB-CASのATRの
+     * TB3 (BWI=4) から求めるブロックの待機時間は1.6秒で、受信を閉じた直後に応答待ちのT=1ブロックがあると、カードが
+     * 期限内に応答してもSmartCardが読めずに同じブロックを再送する。カードは重複したIブロックへ
+     * Rブロックを返し、その応答が次のブロックの受信へ残って連番がずれ、次の送信が失敗する。
+     * フックを外した後はカードUARTの要求をboot0が処理するため、待っているカード操作があれば
+     * 1語ごとに制御ロックを譲る。カード操作の受付 (Card) は制御ロックの取得後に card_waiters_ を
+     * 減らすため、0になるまで待ってから取り直す。
+     */
+    const bool restored = relay_.Restore([this, &control] { YieldToCard(control); });
+    if (!restored)
         return false;
     initialized_ = false;
     return true;
+}
+
+std::unique_lock<std::mutex>* Session::FrontendLock() const
+{
+    return frontend_lock_ && frontend_thread_ == std::this_thread::get_id() ? frontend_lock_ : nullptr;
+}
+
+// 選局の待機は機器を操作しないため、Tuneの中では制御ロックを手放してカード操作を通す。
+int Session::Delay(unsigned milliseconds)
+{
+    const auto control = FrontendLock();
+    if (!control)
+        return relay_.Delay(milliseconds);
+    control->unlock();
+    const int rc = port_.WaitRemoved(milliseconds);
+    control->lock();
+    return rc;
+}
+
+// カード操作の受付 (Card) は制御ロックの取得後に card_waiters_ を減らすため、0になるまで待ってから取り直す。
+void Session::YieldToCard(std::unique_lock<std::mutex>& control)
+{
+    if (!card_waiters_.load())
+        return;
+    control.unlock();
+    while (card_waiters_.load() && port_.Available())
+        std::this_thread::yield();
+    control.lock();
 }
 
 std::uint32_t Session::ReadCndat()
@@ -636,6 +729,8 @@ int Session::I2c(std::uint8_t address, const std::uint8_t* tx, std::size_t size,
 {
     if (size > 40 || count > 40 - size)
         return -EINVAL;
+    if (const auto control = FrontendLock())
+        YieldToCard(*control);
     Packet reply{};
     const int result = relay_.Exchange(7, reply, tx, size, address, count);
     if (result)

@@ -56,11 +56,21 @@ public:
         : port_(port), bootstrap_(images.bootstrap), runtime_(images.runtime), hook_(images.hook) {}
 
     bool Valid() const;
-    int Init();
-    int Install(const Image& image);
+    // boot RAMを照合してからBootを行う。
+    int Init(const std::function<void()>& yield = {}, const std::function<int(unsigned)>& wait = {});
+    // ブートストラップの導入、操作6、操作5の手順0〜5、操作3、共通版の導入。
+    // yieldは本体の各語の書き込みの後に呼ばれ、waitは操作5の手順の間の待機を行う。
+    // どちらも呼び出し側が制御ロックを手放してカード操作を通せる時点で、フックは外れているか
+    // 2語とも導入済みで、boot0はカードUARTの番地への要求を通常どおり処理する。
+    // waitを省くと、制御ロックを保持したままRelayの待機 (Delay) を使う。
+    int Boot(const std::function<void()>& yield = {}, const std::function<int(unsigned)>& wait = {});
+    int Install(const Image& image, const std::function<void()>& yield = {});
     // 共通版 (操作7、11〜14) が導入され、フックが有効な間だけtrue。
     bool RuntimeInstalled() const { return runtime_installed_; }
-    bool Restore();
+    // フックを外した後、本体を1語ずつ戻す。yieldは各語の後に呼ばれ、呼び出し側はその中で
+    // 制御ロックを一時的に手放せる。フックは外れているため、その間のカードUARTの要求は
+    // boot0が通常どおり処理する。操作全体の期限は、yieldの後も最初の値を使う。
+    bool Restore(const std::function<void()>& yield = {});
     int Delay(unsigned ms);
     // カードUARTの1語をboot0のメモリ要求で読み書きする。boot0のUSBハンドラーは、フックの導入中も
     // ステージング以外の番地を処理する。呼び出し側が制御ロックを保持し、Beginで期限を設定する。
@@ -74,7 +84,8 @@ private:
     void Touch(unsigned address, std::size_t size);
     bool Read(unsigned address, std::uint8_t* data, std::size_t size);
     bool Write(unsigned address, const std::uint8_t* data);
-    bool WriteRange(unsigned address, const std::uint8_t* data, std::size_t size);
+    bool WriteRange(unsigned address, const std::uint8_t* data, std::size_t size,
+                    const std::function<void()>& yield = {}, Clock::time_point deadline = {});
     bool Verify(unsigned address, const std::uint8_t* data, std::size_t size);
     bool Unhook();
 
@@ -173,7 +184,10 @@ public:
     Session& operator=(const Session&) = delete;
 
     bool Valid() const { return relay_.Valid(); }
-    // 最初の選局では、中継プログラムの導入と復調器の初期化を同じ制御ロックの下で先に行う。
+    // 最初の選局では、中継プログラムの導入と復調器の初期化を先に行う。導入は約5秒、選局はロックの判定の
+    // 待機を含めて最長約1.8秒かかり、SmartCard の T=1 のブロックの待機時間 (1.6秒) を超えるため、
+    // 本体の各語の後、操作5の手順の間の待機、復調器の初期化と選局の各I²Cの操作の前、選局の待機で
+    // カード操作へ制御ロックを譲る。
     // その失敗は init_failed で返し、所有者は Restore まで受信を失敗の状態にする。
     // 地デジはロック直後の訂正前の TS を避けるため、制御ロックを手放して 350 ms 待つ。
     // relative が true なら、衛星の tsid を相対 TS 番号 (0〜7) として扱う (Linux 版の PTX の ioctl)。
@@ -187,6 +201,8 @@ public:
     // worker を止め、操作13 で DMA を止める。失敗した場合、所有者は中継プログラムを復元しない。
     int StopStream();
     // フックと本体を元へ戻す。DMA が止まっているときだけ呼ぶ。
+    // 本体の書き戻しは約1.8秒かかり、SmartCard が ATR から求める T=1 のブロックの待機時間 (B-CAS は1.6秒) を超えるため、
+    // 待っているカード操作があれば1語ごとに制御ロックを譲る。
     bool Restore();
     bool StreamStarted() const { return stream_started_; }
     // worker が失敗したときのエラー。選局ごとに Clear で消す。
@@ -207,11 +223,15 @@ private:
     class RingStats;
     int I2c(std::uint8_t address, const std::uint8_t* tx, std::size_t size,
             std::uint8_t* rx, std::size_t count) override;
-    int Delay(unsigned milliseconds) override { return relay_.Delay(milliseconds); }
+    int Delay(unsigned milliseconds) override;
+    // Tuneを実行しているスレッドから呼ばれたときだけ、Tuneが持つ制御ロックを返す。
+    std::unique_lock<std::mutex>* FrontendLock() const;
     int ReadLoop(bool satellite, StreamSink& sink);
     int DiscardResidue();
     unsigned NextStage(Clock::duration elapsed, unsigned stage) const;
     void HoldForCard();
+    // 待っているカード操作があれば、制御ロックを一時的に譲る。
+    void YieldToCard(std::unique_lock<std::mutex>& control);
     void Deliver(const std::uint8_t* bytes, std::size_t length, StreamSink& sink);
 
     SessionPort& port_;
@@ -228,6 +248,10 @@ private:
     std::atomic<std::int32_t> cnr_{0};
     std::atomic<std::uint32_t> cndat_{0};
     bool stream_started_ = false, initialized_ = false;
+    // 復調器の初期化と選局の間だけ、Tune が持つ制御ロックとそのスレッドを指す。どちらも制御ロックの下で書く。
+    // I2c はその前にカード操作へ譲り、Delay は制御ロックを手放す。
+    std::unique_lock<std::mutex>* frontend_lock_ = nullptr;
+    std::thread::id frontend_thread_{};
 };
 
 /*
