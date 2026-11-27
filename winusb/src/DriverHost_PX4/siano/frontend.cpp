@@ -126,9 +126,13 @@ int Frontend::Reload(const std::vector<std::uint8_t>& firmware, bool isdbt)
     if ((ret=Request(MSG_SMS_INIT_DEVICE_REQ,MSG_SMS_INIT_DEVICE_RES,{DEVICE_MODE_ISDBT_BDA},p)) || (ret=VersionInfo())) return ret;
     return !isdbt || mode_==DEVICE_MODE_ISDBT_BDA ? 0 : -EIO;
 }
+bool Frontend::IsdbtFrequencySupported(std::uint32_t frequency_khz)
+{
+    return frequency_khz>=473000 && frequency_khz<=767500;
+}
 int Frontend::Tune(std::uint32_t frequency_khz)
 {
-    if (frequency_khz<473000 || frequency_khz>767500) return -EINVAL;
+    if (!IsdbtFrequencySupported(frequency_khz)) return -EINVAL;
     // ChSet の kHz 精度から日本の 1/7 MHz オフセットを復元する。
     std::uint32_t hz=frequency_khz*1000;
     if (frequency_khz%1000==143) hz-=143;

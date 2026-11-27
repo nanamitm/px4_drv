@@ -7,7 +7,9 @@
 #include "session.hpp"
 #include "ts_diagnostic_log.hpp"
 #include "../stream_overflow.hpp"
+#include "../winusb_io.hpp"
 #include "msg.h"
+#include <algorithm>
 #include <array>
 #include <chrono>
 #include <condition_variable>
@@ -18,8 +20,20 @@
 namespace px4::siano {
 namespace {
 using Clock=std::chrono::steady_clock;
+using winusb::CancelUsbRequests;
+using winusb::PendingIo;
+using winusb::WinUsbHandles;
 // 上流 Windows と同じ 32 x 16 KiB。制御応答と TS は同じ bulk IN を通る。
 constexpr std::size_t TransferSize=16384, TransferCount=32;
+struct WriteRequest {
+    WriteRequest(const std::shared_ptr<WinUsbHandles>& handles, const std::uint8_t* data, std::size_t size)
+        : handles(handles), data(data,data+size) {}
+    void CancelAll() noexcept { io.Cancel(handles->file); }
+    bool WaitUntil(Clock::time_point deadline) noexcept { return io.WaitUntil(deadline); }
+    std::shared_ptr<WinUsbHandles> handles;
+    PendingIo io;
+    std::vector<std::uint8_t> data;
+};
 int UsbError(DWORD e)
 {
     if (e==ERROR_DEVICE_NOT_CONNECTED || e==ERROR_OPERATION_ABORTED || e==ERROR_INVALID_HANDLE) return -ECANCELED;
@@ -48,9 +62,9 @@ class Receiver final : public ReceiverBase, private SessionPort {
 public:
     // J.83B は、利用者が用意した IQ を送出する firmware と helper を指定したときだけ受け付ける
     struct J83bConfig {std::filesystem::path firmware,helper,log;};
-    Receiver(HANDLE file,WINUSB_INTERFACE_HANDLE usb,HANDLE removed,UCHAR in,std::size_t alignment,
+    Receiver(std::shared_ptr<WinUsbHandles> handles,HANDLE removed,UCHAR in,std::size_t alignment,
              const std::filesystem::path& directory,const std::filesystem::path& firmware,const J83bConfig* j83b)
-        : ReceiverBase(0),file_(file),usb_(usb),removed_(removed),in_(in),alignment_(alignment),
+        : ReceiverBase(0),handles_(std::move(handles)),usb_(handles_->usb),removed_(removed),in_(in),alignment_(alignment),
           host_directory_(directory),firmware_(firmware),
           session_(*this,j83b ? &iq_helper_ : nullptr,static_cast<unsigned>(TransferCount))
     {
@@ -141,12 +155,24 @@ protected:
     }
 private:
     struct Read {
-        OVERLAPPED op{};
+        PendingIo io;
         std::array<std::uint8_t,TransferSize> data{};
-        bool pending=false;
         std::uint64_t generation=0;
     };
     using Reads=std::array<Read,TransferCount>;
+    struct ReadBatch {
+        explicit ReadBatch(const std::shared_ptr<WinUsbHandles>& handles) : handles(handles) {}
+        void CancelAll() noexcept
+        {
+            for (auto& read:reads) read.io.Cancel(handles->file);
+        }
+        bool WaitUntil(Clock::time_point deadline) noexcept
+        {
+            return std::all_of(reads.begin(),reads.end(),[deadline](Read& read) {return read.io.WaitUntil(deadline);});
+        }
+        std::shared_ptr<WinUsbHandles> handles;
+        Reads reads;
+    };
     bool Removed() const override { return WaitForSingleObject(removed_,0)==WAIT_OBJECT_0; }
     int Delay(unsigned ms) override
     {
@@ -155,26 +181,36 @@ private:
     int Send(const std::uint8_t* data,std::size_t size,Clock::time_point deadline) override
     {
         if (Removed()) return -ECANCELED;
+        if (!handles_->Ready()) return -EIO;
         const auto left=deadline-Clock::now();
-        const auto ms=left<=Clock::duration::zero() ? DWORD{0} :
-            static_cast<DWORD>(std::chrono::duration_cast<std::chrono::milliseconds>(left).count());
-        OVERLAPPED op{}; op.hEvent=CreateEventW(nullptr,TRUE,FALSE,nullptr);
+        if (left<=Clock::duration::zero()) return -ETIMEDOUT;
+        std::unique_ptr<WriteRequest> request;
+        try { request=std::make_unique<WriteRequest>(handles_,data,size); }
+        catch (const std::bad_alloc&) { return -ENOMEM; }
+        auto& io=request->io;
+        auto& op=io.operation;
+        op.hEvent=CreateEventW(nullptr,TRUE,FALSE,nullptr);
         if (!op.hEvent) return -ENOMEM;
         ULONG bytes=0;
-        BOOL ok=WinUsb_WritePipe(usb_,2,const_cast<PUCHAR>(data),static_cast<ULONG>(size),nullptr,&op);
+        BOOL ok=WinUsb_WritePipe(usb_,2,request->data.data(),static_cast<ULONG>(size),nullptr,&op);
         DWORD e=ok ? ERROR_SUCCESS : GetLastError();
-        if (ok || e==ERROR_IO_PENDING) {
+        io.pending=!ok && e==ERROR_IO_PENDING;
+        if (ok || io.pending) {
             HANDLE events[]={removed_,op.hEvent};
-            auto result=ok ? WAIT_OBJECT_0+1 : WaitForMultipleObjects(2,events,FALSE,ms);
+            const auto ms=std::chrono::ceil<std::chrono::milliseconds>(deadline-Clock::now()).count();
+            const auto result=ok ? WAIT_OBJECT_0+1 : WaitForMultipleObjects(2,events,FALSE,
+                static_cast<DWORD>((std::max)(0LL,ms)));
             if (result!=WAIT_OBJECT_0+1) {
-                CancelIoEx(file_,&op); WinUsb_GetOverlappedResult(usb_,&op,&bytes,TRUE);
-                ok=FALSE; e=result==WAIT_TIMEOUT ? ERROR_TIMEOUT : ERROR_OPERATION_ABORTED;
+                ok=FALSE;
+                e=result==WAIT_TIMEOUT ? ERROR_TIMEOUT : result==WAIT_OBJECT_0 ? ERROR_OPERATION_ABORTED : GetLastError();
             } else {
                 ok=WinUsb_GetOverlappedResult(usb_,&op,&bytes,FALSE);
                 e=ok ? ERROR_SUCCESS : GetLastError();
+                if (ok) io.pending=false;
+                else io.WaitUntil(Clock::now());
             }
         }
-        CloseHandle(op.hEvent);
+        if (io.pending) CancelUsbRequests(std::move(request));
         const int ret=ok ? (bytes==size ? 0 : -EIO) : UsbError(e);
         if (ret) msg_err("PX-S1UD: USB write failed bytes=%zu ret=%d win32=%lu\n",size,ret,e);
         return ret;
@@ -216,7 +252,8 @@ private:
     {
         unsigned outstanding=0;
         if (const auto* reads=reads_.load())
-            for (const auto& q:*reads) if (q.pending && WaitForSingleObject(q.op.hEvent,0)!=WAIT_OBJECT_0) ++outstanding;
+            for (const auto& q:*reads)
+                if (q.io.pending && WaitForSingleObject(q.io.operation.hEvent,0)!=WAIT_OBJECT_0) ++outstanding;
         return outstanding;
     }
     bool SignalLogEnabled() override {return (msg_get_mode() & (MSG_MODE_LOG_FILE | MSG_MODE_CONSOLE))!=0;}
@@ -224,6 +261,7 @@ private:
     {
         if (Removed()) return -ECANCELED;
         if (worker_.joinable()) return -EALREADY;
+        if (!handles_->Ready()) return -EIO;
         stop_=false;
         if (!WinUsb_ResetPipe(usb_,in_) || !WinUsb_ResetPipe(usb_,2) || !WinUsb_FlushPipe(usb_,in_)) {
             msg_err("PX-S1UD: pipe reset/flush failed in=0x%02x win32=%lu\n",in_,GetLastError());
@@ -237,7 +275,7 @@ private:
     void StopWorker()
     {
         stop_=true;
-        if (worker_.joinable()) { WinUsb_AbortPipe(usb_,in_); worker_.join(); }
+        if (worker_.joinable()) worker_.join();
     }
     void Run() noexcept
     {
@@ -252,18 +290,16 @@ private:
     void RunTransfers()
     {
         // 32要求は x86 の既定スタックを圧迫するためヒープへ確保する。
-        auto reads=std::make_unique<Reads>();
-        // 例外経路でも取消完了まで OVERLAPPED とバッファの寿命を保つ。
+        auto batch=std::make_unique<ReadBatch>(handles_);
+        auto& reads=batch->reads;
+        // 例外経路でも全要求に取消を出し、期限を過ぎた要求の回収を委ねる。
         struct Cleanup {
-            Receiver& owner; Reads& reads;
+            Receiver& owner; std::unique_ptr<ReadBatch>& batch;
             ~Cleanup() {
                 owner.reads_=nullptr;
-                for (auto& r:reads) {
-                    if (r.pending) {CancelIoEx(owner.file_,&r.op);ULONG n=0;WinUsb_GetOverlappedResult(owner.usb_,&r.op,&n,TRUE);}
-                    if (r.op.hEvent) CloseHandle(r.op.hEvent);
-                }
+                CancelUsbRequests(std::move(batch));
             }
-        } cleanup{*this,*reads};
+        } cleanup{*this,batch};
         TsDiagnosticLog diagnostics("siano_usb_input");
         px4::StreamOverflowLog overflow("PX-S1UD");
         const bool diagnostic_enabled=(msg_get_mode() & (MSG_MODE_LOG_FILE | MSG_MODE_CONSOLE))!=0;
@@ -272,18 +308,20 @@ private:
             const auto& requests=*static_cast<Reads*>(context);
             int ready=0;
             for (const auto& request:requests)
-                if (request.pending && WaitForSingleObject(request.op.hEvent,0)==WAIT_OBJECT_0) ++ready;
+                if (request.io.pending && WaitForSingleObject(request.io.operation.hEvent,0)==WAIT_OBJECT_0) ++ready;
             return ready;
-        },reads.get());
+        },&reads);
         TsTransferTracer tracer;
         auto last_submit=Clock::now();
         std::uint64_t last_gap_us=0;
         auto submit=[&](Read& r) {
             if (stop_ || Removed()) return false;
-            ResetEvent(r.op.hEvent); r.generation=session_.Ticket();
-            BOOL ok=WinUsb_ReadPipe(usb_,in_,r.data.data(),static_cast<ULONG>(r.data.size()),nullptr,&r.op);
-            if (!ok && GetLastError()!=ERROR_IO_PENDING) {
-                const auto e=GetLastError();session_.Fail(UsbError(e));
+            auto& op=r.io.operation;
+            ResetEvent(op.hEvent); r.generation=session_.Ticket();
+            const BOOL ok=WinUsb_ReadPipe(usb_,in_,r.data.data(),static_cast<ULONG>(r.data.size()),nullptr,&op);
+            const auto e=ok ? ERROR_SUCCESS : GetLastError();
+            if (!ok && e!=ERROR_IO_PENDING) {
+                session_.Fail(UsbError(e));
                 msg_err("PX-S1UD: USB read submission failed endpoint=0x%02x win32=%lu\n",in_,e);
                 return false;
             }
@@ -292,18 +330,19 @@ private:
                 last_gap_us=static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(now-last_submit).count());
                 last_submit=now;
             }
-            r.pending=true;return true;
+            r.io.pending=true;return true;
         };
-        for (auto& r:*reads) {
-            r.op.hEvent=CreateEventW(nullptr,TRUE,FALSE,nullptr);
-            if (!r.op.hEvent) {session_.Fail(-ENOMEM);return;}
+        for (auto& r:reads) {
+            r.io.operation.hEvent=CreateEventW(nullptr,TRUE,FALSE,nullptr);
+            if (!r.io.operation.hEvent) {session_.Fail(-ENOMEM);return;}
         }
-        reads_=reads.get();
-        for (auto& r:*reads) if (!submit(r)) return;
+        reads_=&reads;
+        for (auto& r:reads) if (!submit(r)) return;
         std::size_t next=0;
         while (!stop_ && !Removed() && !session_.Error()) {
-            auto& r=(*reads)[next];
-            HANDLE events[]={removed_,r.op.hEvent};
+            auto& r=reads[next];
+            auto& op=r.io.operation;
+            HANDLE events[]={removed_,op.hEvent};
             auto result=WaitForMultipleObjects(2,events,FALSE,100);
             if (result==WAIT_TIMEOUT) continue;
             if (result!=WAIT_OBJECT_0+1) {
@@ -314,13 +353,13 @@ private:
                 break;
             }
             ULONG n=0;
-            if (!WinUsb_GetOverlappedResult(usb_,&r.op,&n,FALSE)) {
+            if (!WinUsb_GetOverlappedResult(usb_,&op,&n,FALSE)) {
                 const auto e=GetLastError();
                 // firmware の読み込み直しで J.83B 用の firmware が ROM へ戻るとき、受信が ERROR_GEN_FAILURE で失敗し、
                 // パイプのリセットで残りの要求も取り消される。BonDriver_S1UD.dll と同じく IN をリセットして要求を出し直す。
                 // 読み込み直しの間だけ、要求の数の 4 倍までに限る (Session::ReloadRecovery)
                 if (!stop_ && (e==ERROR_GEN_FAILURE || e==ERROR_OPERATION_ABORTED) && session_.ReloadRecovery()) {
-                    r.pending=false;
+                    r.io.pending=false;
                     if (e==ERROR_GEN_FAILURE) {
                         msg_warn("PX-S1UD: USB read failed during firmware reload win32=%lu; resetting the IN pipe\n",e);
                         WinUsb_ResetPipe(usb_,in_);
@@ -335,7 +374,7 @@ private:
                 }
                 break;
             }
-            r.pending=false;
+            r.io.pending=false;
             // 異常の前後で転送単位の欠落・入替えを判別するため、完了順にメタデータを残す。
             TsTransferTrace* trace=nullptr;
             const auto anomalies=diagnostics.AnomalyCount();
@@ -381,7 +420,8 @@ private:
             static_cast<unsigned long long>(framer.discarded),static_cast<unsigned long long>(session_.Malformed()),
             static_cast<unsigned long long>(session_.IqMalformed()),session_.Error());
     }
-    HANDLE file_; WINUSB_INTERFACE_HANDLE usb_; HANDLE removed_; UCHAR in_; std::size_t alignment_;
+    std::shared_ptr<WinUsbHandles> handles_;
+    WINUSB_INTERFACE_HANDLE usb_; HANDLE removed_; UCHAR in_; std::size_t alignment_;
     std::filesystem::path host_directory_,firmware_;
     J83bConfig j83b_;
     // session_ より先に作り、後に壊す (session_ が helper を参照する)
@@ -438,7 +478,10 @@ int Device::Init()
         // ログ名は DriverHost 内の機器番号で区別する (MSi2500 と同じ)
         j83b_config.log=directory/(L"px-s1ud_j83b-"+std::to_wstring(index_)+L".log");
     }
-    receiver_=std::make_unique<Receiver>(usb_dev_.dev,usb_dev_.winusb,removed_,in,packet-SMS_HEADER_SIZE,directory,firmware,
+    auto handles=std::make_shared<WinUsbHandles>(usb_dev_.dev,usb_dev_.winusb);
+    usb_dev_.dev=INVALID_HANDLE_VALUE;
+    usb_dev_.winusb=nullptr;
+    receiver_=std::make_unique<Receiver>(std::move(handles),removed_,in,packet-SMS_HEADER_SIZE,directory,firmware,
         j83b ? &j83b_config : nullptr);
     const auto& def=device_def_.receivers[0];command::ReceiverInfo info{};
     wcscpy_s(info.device_name,device_def_.name.c_str());info.device_guid=device_def_.guid;

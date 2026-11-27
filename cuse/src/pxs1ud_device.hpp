@@ -20,6 +20,7 @@ public:
     static constexpr std::uint16_t Vendor = 0x3275, Product = 0x0080;
     PxS1udDevice(libusb_device_handle *handle, std::uint8_t bus, std::uint8_t address, std::function<void()> changed);
     ~PxS1udDevice() override;
+    bool UsbTransfersPending() const override;
 
 protected:
     int InitModel() override;
@@ -58,7 +59,8 @@ private:
     bool AdvanceEpoch() override { return true; }
     int ReadFirmware(FirmwareKind kind, std::vector<std::uint8_t> &firmware) override;
     std::function<void(const std::uint8_t *, std::size_t)> HelperWriter() override;
-    unsigned PendingReads() override { return static_cast<unsigned>(in_flight_.load()); }
+    // BulkDone が receive_mutex_ を保持したまま Session::Receive から呼ぶ。
+    unsigned PendingReads() override { return static_cast<unsigned>(in_flight_); }
     bool SignalLogEnabled() override { return true; }
 
     // 選局の後のロックの待機。地デジはカーネルと同じ 3 秒、J.83B は WinUSB 版と同じ 2 秒
@@ -69,29 +71,32 @@ private:
     static void LIBUSB_CALL BulkDone(libusb_transfer *transfer);
 
     struct Transfer {
+        ~Transfer() { if (transfer) libusb_free_transfer(transfer); }
         PxS1udDevice *owner = nullptr;
         libusb_transfer *transfer = nullptr;
         std::vector<std::uint8_t> buffer;
         std::uint64_t generation = 0;
+        bool in_flight = false;
+        bool parked = false;
     };
 
     std::uint8_t in_ = 0, out_ = 0;
     std::size_t alignment_ = 0;
     std::unique_ptr<PosixIqProcess> helper_;
     std::unique_ptr<siano::Session> session_;
+    std::function<void()> changed_;
     // VideoNode の状態のロックの下で使う
     bool opened_ = false;
     // Bulk IN の受信 (VideoOpen から VideoClose まで)
     std::vector<std::unique_ptr<Transfer>> transfers_;
-    std::mutex receive_mutex_;
+    mutable std::mutex receive_mutex_;
     std::condition_variable receive_changed_;
-    std::atomic_int in_flight_{0};
-    std::atomic_bool resubmit_{false};
-    // firmware の読み込み直しで受信が失敗し、出し直しを待つ転送
-    std::vector<Transfer *> parked_;
+    int in_flight_ = 0;
+    bool resubmit_ = false;
+    bool cancel_pending_ = false;
+    // firmware の読み込み直しで、出し直しを待つ転送があるか。Send と Delay の早期判定に使う。
     std::atomic_bool parked_any_{false};
-    bool leaked_ = false;
     // 読み込み直しの間に回復させた受信の失敗の数 (完了の通知が数え、受信の停止で記録する)
-    std::atomic<std::uint64_t> receive_failures_{0};
+    std::uint64_t receive_failures_ = 0;
 };
 }

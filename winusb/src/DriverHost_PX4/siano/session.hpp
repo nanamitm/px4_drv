@@ -56,7 +56,7 @@ public:
     virtual bool Removed() const=0;
     // 抜去で -ECANCELED を返して中断する
     virtual int Delay(unsigned milliseconds)=0;
-    // Bulk IN の受信を始める (Session::Receive が呼ばれ始める)。開く処理の最初に呼ぶ
+    // Bulk IN の受信を始める (Session::Receive が呼ばれ始める)。途中で失敗した場合は発行済みの転送を取り消す
     virtual int StartReceive()=0;
     // Bulk IN の受信を止め、未完了の転送を回収する
     virtual void StopReceive()=0;

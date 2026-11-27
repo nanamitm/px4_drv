@@ -3,6 +3,7 @@
 #include "channel.hpp"
 #include "msg.h"
 #include <algorithm>
+#include <array>
 #include <cerrno>
 #include <cstdlib>
 #include <cstring>
@@ -46,10 +47,11 @@ int ReadFile(const std::string &path, std::vector<std::uint8_t> &data)
 
 PxS1udDevice::PxS1udDevice(libusb_device_handle *handle, std::uint8_t bus, std::uint8_t address,
                            std::function<void()> changed)
-    : Device(handle, bus, address, "PX-S1UD", "pxs1udvideo", std::move(changed)),
+    : Device(handle, bus, address, "PX-S1UD", "pxs1udvideo", changed),
       helper_(std::make_unique<PosixIqProcess>(LibDir() + "/msi2500_frontend")),
       session_(std::make_unique<siano::Session>(static_cast<siano::SessionPort &>(*this), helper_.get(),
-                                                static_cast<unsigned>(TransferCount)))
+                                                static_cast<unsigned>(TransferCount))),
+      changed_(std::move(changed))
 {
 }
 
@@ -58,6 +60,20 @@ PxS1udDevice::~PxS1udDevice()
     StopSessions();
     if (opened_)
         CloseSession();
+    // 未完了のまま破棄されるのは、デーモン終了時にイベントスレッドを回収した後だけ。
+    // libusb が保持するバッファーは OS が回収するまで残す。
+    for (auto &t : transfers_) {
+        if (t->in_flight) {
+            t->owner = nullptr;
+            t.release();
+        }
+    }
+}
+
+bool PxS1udDevice::UsbTransfersPending() const
+{
+    std::lock_guard<std::mutex> lock(receive_mutex_);
+    return in_flight_ != 0;
 }
 
 int PxS1udDevice::InitModel()
@@ -125,8 +141,6 @@ int PxS1udDevice::VideoOpen()
 {
     if (opened_)
         return 0;
-    if (leaked_)
-        return -EIO;
     const int rc = session_->Open();
     if (rc)
         return rc;
@@ -321,8 +335,13 @@ int PxS1udDevice::StartReceive()
 {
     if (removal_.Removed())
         return -ECANCELED;
-    if (leaked_)
+    std::unique_lock<std::mutex> lock(receive_mutex_);
+    if (in_flight_)
         return -EIO;
+    transfers_.clear();
+    cancel_pending_ = false;
+    parked_any_ = false;
+    receive_failures_ = 0;
     try {
         for (int i = 0; i < TransferCount; ++i) {
             auto t = std::make_unique<Transfer>();
@@ -336,52 +355,41 @@ int PxS1udDevice::StartReceive()
             transfers_.push_back(std::move(t));
         }
     } catch (...) {
-        for (auto &t : transfers_)
-            libusb_free_transfer(t->transfer);
         transfers_.clear();
         return -ENOMEM;
     }
-    {
-        std::lock_guard<std::mutex> lock(receive_mutex_);
-        parked_.clear();
-        parked_any_ = false;
-    }
-    receive_failures_ = 0;
     resubmit_ = true;
     for (auto &t : transfers_) {
         t->generation = session_->Ticket();
-        ++in_flight_;
         if (const int rc = libusb_submit_transfer(t->transfer)) {
-            --in_flight_;
+            resubmit_ = false;
+            lock.unlock();
             msg_err("%s: bulk submit failed libusb=%s\n", label_.c_str(), libusb_error_name(rc));
             StopReceive();
             return rc == LIBUSB_ERROR_NO_DEVICE ? -ECANCELED : -EIO;
         }
+        t->in_flight = true;
+        ++in_flight_;
     }
     return 0;
 }
 
 void PxS1udDevice::StopReceive()
 {
+    std::unique_lock<std::mutex> lock(receive_mutex_);
+    // コールバックの再投入とキャンセルを同じロックで直列化する。
     resubmit_ = false;
-    for (auto &t : transfers_)
-        libusb_cancel_transfer(t->transfer);
-    {
-        std::unique_lock<std::mutex> lock(receive_mutex_);
-        if (!receive_changed_.wait_for(lock, std::chrono::seconds(5), [this] { return in_flight_ == 0; })) {
-            // libusb が使い続ける可能性があるため、転送とバッファーを解放せずに残す
-            msg_err("%s: %d bulk transfers did not complete\n", label_.c_str(), in_flight_.load());
-            leaked_ = true;
-            for (auto &t : transfers_)
-                t.release();
-            transfers_.clear();
-            return;
-        }
-        parked_.clear();
-        parked_any_ = false;
+    parked_any_ = false;
+    for (auto &t : transfers_) {
+        if (t->in_flight)
+            libusb_cancel_transfer(t->transfer);
     }
-    for (auto &t : transfers_)
-        libusb_free_transfer(t->transfer);
+    if (!receive_changed_.wait_for(lock, std::chrono::seconds(5), [this] { return in_flight_ == 0; })) {
+        msg_err("%s: %d bulk transfers did not complete; deferring USB release\n", label_.c_str(), in_flight_);
+        // 最後の完了通知まで Manager が機器とハンドルを保持する。
+        cancel_pending_ = true;
+        return;
+    }
     transfers_.clear();
     if (receive_failures_)
         msg_info("%s: bulk receive failures during firmware reload=%llu\n", label_.c_str(),
@@ -392,37 +400,45 @@ void PxS1udDevice::ResubmitParked()
 {
     if (!parked_any_)
         return;
-    std::vector<Transfer *> parked;
+    std::array<Transfer *, TransferCount> parked{};
+    std::size_t count = 0;
     {
         std::lock_guard<std::mutex> lock(receive_mutex_);
-        parked.swap(parked_);
+        for (auto &t : transfers_) {
+            if (t->parked) {
+                parked[count++] = t.get();
+                t->parked = false;
+            }
+        }
         parked_any_ = false;
     }
-    if (parked.empty() || !resubmit_)
+    if (!count)
         return;
     // J.83B 用の firmware が ROM へ戻るときの受信の失敗 (WinUSB 版では ERROR_GEN_FAILURE) の後、
     // WinUSB 版が IN をリセットするのと同じく halt を解除してから受信を出し直す
     if (const int rc = libusb_clear_halt(handle_, in_))
         msg_warn("%s: clear halt failed in=0x%02x libusb=%s\n", label_.c_str(), in_, libusb_error_name(rc));
-    for (auto *t : parked) {
-        t->generation = session_->Ticket();
-        ++in_flight_;
-        if (const int rc = libusb_submit_transfer(t->transfer)) {
-            --in_flight_;
+    std::lock_guard<std::mutex> lock(receive_mutex_);
+    for (std::size_t i = 0; i < count && resubmit_; ++i) {
+        auto &t = *parked[i];
+        t.generation = session_->Ticket();
+        if (const int rc = libusb_submit_transfer(t.transfer)) {
             msg_err("%s: bulk resubmit failed libusb=%s\n", label_.c_str(), libusb_error_name(rc));
             session_->Fail(rc == LIBUSB_ERROR_NO_DEVICE ? -ECANCELED : -EIO);
             break;
         }
+        t.in_flight = true;
+        ++in_flight_;
     }
-    receive_changed_.notify_all();
 }
 
 void LIBUSB_CALL PxS1udDevice::BulkDone(libusb_transfer *transfer)
 {
     auto &t = *static_cast<Transfer *>(transfer->user_data);
     auto &self = *t.owner;
-    bool resubmit = false, parked = false;
-    switch (transfer->status) {
+    std::lock_guard<std::mutex> lock(self.receive_mutex_);
+    bool resubmit = false;
+    switch (self.resubmit_ ? transfer->status : LIBUSB_TRANSFER_CANCELLED) {
     case LIBUSB_TRANSFER_COMPLETED: {
         // TS は CaptureGate を通ったものだけが VideoNode へ届く。VideoNode は START の前と STOP の後の TS を捨てる
         const auto received = self.session_->Receive(t.generation, transfer->buffer,
@@ -441,19 +457,20 @@ void LIBUSB_CALL PxS1udDevice::BulkDone(libusb_transfer *transfer)
         self.session_->Interrupt();
         break;
     default:
-        if (self.resubmit_ && self.session_->ReloadRecovery()) {
+        if (self.session_->ReloadRecovery()) {
             // firmware の読み込み直しの間の失敗。制御のスレッドが halt を解除して出し直す
             ++self.receive_failures_;
             msg_warn("%s: bulk receive failed during firmware reload status=%d\n", self.label_.c_str(),
                      transfer->status);
-            parked = true;
-        } else if (self.resubmit_) {
+            t.parked = true;
+            self.parked_any_ = true;
+        } else {
             msg_err("%s: bulk receive failed status=%d\n", self.label_.c_str(), transfer->status);
             self.session_->Fail(-EIO);
         }
         break;
     }
-    if (resubmit && self.resubmit_) {
+    if (resubmit) {
         t.generation = self.session_->Ticket();
         const int rc = libusb_submit_transfer(transfer);
         if (!rc)
@@ -464,14 +481,11 @@ void LIBUSB_CALL PxS1udDevice::BulkDone(libusb_transfer *transfer)
         else
             self.session_->Fail(-EIO);
     }
-    {
-        std::lock_guard<std::mutex> lock(self.receive_mutex_);
-        if (parked) {
-            self.parked_.push_back(&t);
-            self.parked_any_ = true;
-        }
-        --self.in_flight_;
+    t.in_flight = false;
+    if (--self.in_flight_ == 0) {
+        self.receive_changed_.notify_all();
+        if (self.cancel_pending_)
+            self.changed_();
     }
-    self.receive_changed_.notify_all();
 }
 }

@@ -383,7 +383,7 @@
     <ClInclude Include="pxbcud\plain_framer.hpp" />
     <ClInclude Include="pxbcud\pat_gate.hpp" />
     <ClInclude Include="pxbcud\recovery_budget.hpp" />
-    <ClInclude Include="pxbcud\winusb_io.hpp" />
+    <ClInclude Include="winusb_io.hpp" />
     <ClInclude Include="device_notifier.hpp" />
     <ClInclude Include="driver_host.hpp" />
     <ClInclude Include="isdb2056_device.hpp" />
