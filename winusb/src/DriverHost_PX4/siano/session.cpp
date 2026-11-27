@@ -29,7 +29,8 @@ int Session::Open()
     if (read) msg_warn("PX-S1UD: firmware not found; only an already initialized device can open\n");
     error_=0; ResetReceive();
     int ret=port_.StartReceive();
-    if (!ret) ret=frontend_.Initialize(firmware);
+    if (ret) return ret;
+    ret=frontend_.Initialize(firmware);
     if (ret==-EIO && !firmware.empty()) {
         // J.83B 用の firmware が稼働したままの機器 (このホストや BonDriver_S1UD.dll が読み込んだもの) は、
         // ISDB-T の INIT_DEVICE を受けても ISDB-T のモードへ移らない。通常の firmware を読み込み直す
@@ -127,6 +128,7 @@ int Session::Tune(System system,std::uint32_t frequency_khz)
     if (j83b && (!helper_ || frequency_khz<90000 || frequency_khz>775000)) return -EINVAL;
     if (port_.Removed()) return -ECANCELED;
     if (error_) return error_;
+    if (!j83b && !Frontend::IsdbtFrequencySupported(frequency_khz)) return -EINVAL;
     DisableOutput(); tuned_=false; locked_=false; cnr_=0;
     // 前のチャンネルの IQ の送出と helper を止めてから世代を切り替え、前の TS と復調状態を次へ持ち込まない
     int ret=StopIq();
