@@ -1544,7 +1544,7 @@ int Px4Device::Px4Receiver::SetStreamId()
 	if (params_.stream_id < 8) {
 		for (int i = 50; i; i--) {
 			ret = tc90522_tmcc_get_tsid_s(&tc90522_, params_.stream_id, &tsid);
-			if ((!ret && tsid) || (ret == -EINVAL))
+			if ((!ret && tc90522_tmcc_tsid_is_assigned(tsid)) || (ret == -EINVAL))
 				break;
 
 			Sleep(20);
@@ -1553,8 +1553,8 @@ int Px4Device::Px4Receiver::SetStreamId()
 		if (ret)
 			return ret;
 
-		/* TMCC のスロットが空のまま TSID 0 を設定すると、読み返しも一致して成功扱いになり、TS の来ない選局が確定するため再試行を求める */
-		if (!tsid)
+		/* 取得前 (0) や未割り当て (0xffff) の欄を TSID として設定すると、成功扱いのまま slot 0 の TS が届くため、Linux 版と同じく再試行を求める */
+		if (!tc90522_tmcc_tsid_is_assigned(tsid))
 			return -EAGAIN;
 
 		dev_dbg(&parent_.dev_, "px4::Px4Device::Px4Receiver::SetStreamId(%u): slot: %u, tsid: 0x%04x\n", index_, params_.stream_id, tsid);
